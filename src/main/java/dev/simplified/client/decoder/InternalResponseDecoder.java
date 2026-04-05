@@ -1,0 +1,159 @@
+package dev.simplified.client.decoder;
+
+import dev.simplified.client.Client;
+import dev.simplified.client.exception.ApiDecodeException;
+import dev.simplified.client.request.HttpMethod;
+import dev.simplified.client.request.Request;
+import dev.simplified.client.response.HttpStatus;
+import dev.simplified.client.response.NetworkDetails;
+import dev.simplified.client.response.Response;
+import dev.simplified.collection.concurrent.ConcurrentList;
+import feign.FeignException;
+import feign.Util;
+import feign.codec.Decoder;
+import feign.codec.DefaultDecoder;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.nio.charset.StandardCharsets;
+
+/**
+ * Decorating Feign {@link Decoder} that intercepts every successful response to capture
+ * network metadata and optionally wrap the decoded body in a {@link Response} envelope.
+ * <p>
+ * Decoding is routed by the declared return type of the Feign endpoint method:
+ * <ul>
+ *   <li><b>{@link InputStream}</b> - the raw response body stream is returned directly.
+ *       The caller owns the stream lifecycle and must close it to release the underlying
+ *       HTTP connection back to the pool. If the return type is {@code Response<InputStream>},
+ *       the stream is wrapped in a {@link Response} envelope providing access to
+ *       {@link NetworkDetails}, {@link HttpStatus}, and headers. In either case, the
+ *       response is not added to the recent responses cache since streaming bodies are
+ *       not replayable.</li>
+ *   <li><b>{@code byte[]}</b> - delegates to Feign's {@link DefaultDecoder} which reads
+ *       the entire response body into a byte array. The response body is closed after
+ *       decoding.</li>
+ *   <li><b>All other types</b> - delegates to the inner {@link Decoder} (typically a
+ *       {@link feign.gson.GsonDecoder}) for JSON deserialization. The response body is
+ *       closed after decoding.</li>
+ * </ul>
+ * <p>
+ * For non-streaming types, a {@link Response} envelope is built from the decoded body,
+ * {@link HttpStatus}, {@link NetworkDetails}, request information, and response headers,
+ * then appended to the shared {@code recentResponses} list.
+ * <p>
+ * If the declared return type is {@code Response<T>} (a parameterized type), the full
+ * envelope is returned to the caller. Otherwise only the unwrapped body object is
+ * returned, keeping the {@link Response} metadata available solely through the recent
+ * responses list.
+ * <p>
+ * This decoder requires {@link feign.Feign.Builder#doNotCloseAfterDecode()} to be set
+ * on the Feign builder so that {@link InputStream} responses are not prematurely closed
+ * by Feign's default post-decode cleanup. For non-streaming types, this decoder closes
+ * the response body itself in a {@code finally} block.
+ * <p>
+ * This class is instantiated internally by {@link Client} during Feign
+ * builder configuration and is not intended for direct use by application code.
+ *
+ * @see Client#getRecentResponses()
+ * @see NetworkDetails
+ * @see Response
+ */
+public final class InternalResponseDecoder implements Decoder {
+
+    /** The inner decoder that performs JSON deserialization (e.g. Gson). */
+    private final @NotNull Decoder delegate;
+
+    /** The decoder for binary response types ({@code byte[]}). */
+    private final @NotNull Decoder binaryDecoder = new DefaultDecoder();
+
+    /** The shared recent response list maintained by the owning {@link Client}. */
+    private final @NotNull ConcurrentList<Response<?>> recentResponses;
+
+    /**
+     * Constructs a new internal response decoder.
+     *
+     * @param delegate the inner decoder to which JSON-to-object conversion is delegated
+     * @param recentResponses the shared list to which every decoded response is appended
+     */
+    public InternalResponseDecoder(@NotNull Decoder delegate, @NotNull ConcurrentList<Response<?>> recentResponses) {
+        this.delegate = delegate;
+        this.recentResponses = recentResponses;
+    }
+
+    /**
+     * {@inheritDoc}
+     */
+    @Override
+    public Object decode(@NotNull feign.Response feignResponse, @NotNull Type type) throws IOException, FeignException {
+        Type bodyType = type;
+        boolean shouldWrap = false;
+
+        if (type instanceof ParameterizedType parameterizedType) {
+            if (parameterizedType.getRawType().equals(Response.class)) {
+                shouldWrap = true;
+                bodyType = parameterizedType.getActualTypeArguments()[0];
+            }
+        }
+
+        // Streaming: caller owns lifecycle, not cached
+        if (InputStream.class.equals(bodyType)) {
+            InputStream stream = feignResponse.body().asInputStream();
+
+            if (shouldWrap)
+                return this.buildResponse(feignResponse, stream);
+
+            return stream;
+        }
+
+        // Non-streaming: decode body, then close it
+        try {
+            Object decodedBody;
+
+            if (byte[].class.equals(bodyType)) {
+                decodedBody = this.binaryDecoder.decode(feignResponse, bodyType);
+            } else {
+                byte[] bodyData = Util.toByteArray(feignResponse.body().asInputStream());
+                feign.Response bufferedResponse = feignResponse.toBuilder().body(bodyData).build();
+
+                try {
+                    decodedBody = this.delegate.decode(bufferedResponse, bodyType);
+                } catch (Exception ex) {
+                    ApiDecodeException error = new ApiDecodeException(ex, feignResponse, new String(bodyData, StandardCharsets.UTF_8));
+                    this.recentResponses.add(error);
+                    throw error;
+                }
+            }
+
+            Response<?> response = this.buildResponse(feignResponse, decodedBody);
+            this.recentResponses.add(response);
+            return shouldWrap ? response : decodedBody;
+        } finally {
+            Util.ensureClosed(feignResponse.body());
+        }
+    }
+
+    /**
+     * Constructs a {@link Response} envelope from a raw Feign response and a decoded body.
+     *
+     * @param feignResponse the raw Feign HTTP response containing status, headers, and request info
+     * @param body the deserialized body object produced by the delegate decoder
+     * @return a new {@link Response} instance bundling the body with network and HTTP metadata
+     */
+    private @NotNull Response<?> buildResponse(@NotNull feign.Response feignResponse, Object body) {
+        return new Response.Impl<>(
+            body,
+            new NetworkDetails(feignResponse),
+            HttpStatus.of(feignResponse.status()),
+            new Request.Impl(
+                HttpMethod.of(feignResponse.request().httpMethod().name()),
+                feignResponse.request().url()
+            ),
+            Response.getHeaders(feignResponse.headers())
+        );
+    }
+
+}

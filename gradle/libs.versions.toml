@@ -1,0 +1,14 @@
+[versions]
+lombok = "1.18.36"
+annotations = "26.0.2"
+log4j2 = "2.25.3"
+gson = "2.11.0"
+feign = "13.11"
+
+[libraries]
+lombok = { group = "org.projectlombok", name = "lombok", version.ref = "lombok" }
+annotations = { group = "org.jetbrains", name = "annotations", version.ref = "annotations" }
+log4j2-api = { group = "org.apache.logging.log4j", name = "log4j-api", version.ref = "log4j2" }
+gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
+feign-gson = { group = "io.github.openfeign", name = "feign-gson", version.ref = "feign" }
+feign-httpclient = { group = "io.github.openfeign", name = "feign-httpclient", version.ref = "feign" }
