@@ -1,10 +1,10 @@
 package dev.simplified.client.response;
 
 import dev.simplified.client.request.Request;
-import dev.simplified.collection.concurrent.Concurrent;
-import dev.simplified.collection.concurrent.ConcurrentList;
-import dev.simplified.collection.concurrent.ConcurrentMap;
-import dev.simplified.tuple.pair.Pair;
+import dev.simplified.collection.Concurrent;
+import dev.simplified.collection.ConcurrentList;
+import dev.simplified.collection.ConcurrentMap;
+import dev.simplified.collection.tuple.pair.Pair;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;

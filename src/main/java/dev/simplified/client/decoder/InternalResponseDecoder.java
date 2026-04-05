@@ -7,7 +7,7 @@ import dev.simplified.client.request.Request;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
-import dev.simplified.collection.concurrent.ConcurrentList;
+import dev.simplified.collection.ConcurrentList;
 import feign.FeignException;
 import feign.Util;
 import feign.codec.Decoder;

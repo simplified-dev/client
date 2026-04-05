@@ -4,8 +4,8 @@ import dev.simplified.client.Client;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
 import dev.simplified.client.ratelimit.RateLimit;
-import dev.simplified.collection.concurrent.Concurrent;
-import dev.simplified.collection.concurrent.ConcurrentMap;
+import dev.simplified.collection.Concurrent;
+import dev.simplified.collection.ConcurrentMap;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 

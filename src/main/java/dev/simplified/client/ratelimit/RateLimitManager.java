@@ -1,7 +1,7 @@
 package dev.simplified.client.ratelimit;
 
-import dev.simplified.collection.concurrent.Concurrent;
-import dev.simplified.collection.concurrent.ConcurrentMap;
+import dev.simplified.collection.Concurrent;
+import dev.simplified.collection.ConcurrentMap;
 import lombok.NoArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 

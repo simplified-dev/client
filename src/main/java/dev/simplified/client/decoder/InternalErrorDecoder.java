@@ -8,7 +8,7 @@ import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.response.RetryAfterParser;
 import dev.simplified.client.route.RouteDiscovery;
-import dev.simplified.collection.concurrent.ConcurrentList;
+import dev.simplified.collection.ConcurrentList;
 import dev.simplified.reflection.Reflection;
 import dev.simplified.reflection.accessor.FieldAccessor;
 import feign.codec.ErrorDecoder;
