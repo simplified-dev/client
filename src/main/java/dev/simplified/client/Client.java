@@ -25,6 +25,8 @@ import dev.simplified.reflection.Reflection;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
 import feign.FeignException;
+import feign.codec.Decoder;
+import feign.codec.Encoder;
 import feign.gson.GsonDecoder;
 import feign.gson.GsonEncoder;
 import feign.httpclient.ApacheHttpClient;
@@ -296,14 +298,15 @@ public abstract class Client<E extends Endpoint> implements ReactiveEndpoint<E> 
      * The proxy is configured with:
      * <ul>
      *   <li>The {@linkplain #configureInternalClient() internal Apache HTTP client} as the transport.</li>
-     *   <li>{@link GsonEncoder} using the {@link #getGson()} instance.</li>
+     *   <li>The {@link Encoder} returned by {@link #configureEncoder()} - {@link GsonEncoder} by default.</li>
      *   <li>{@link feign.Feign.Builder#doNotCloseAfterDecode()} to allow the {@link InternalResponseDecoder}
      *       to manage response body lifecycle - required for {@link java.io.InputStream} return types where
      *       the body must remain open for the caller to stream.</li>
      *   <li>An {@link InternalResponseDecoder} that routes decoding by return type: {@link java.io.InputStream}
      *       returns the raw body stream (caller-managed lifecycle), {@code byte[]} delegates to Feign's
-     *       default binary decoder, and all other types delegate to {@link GsonDecoder}. Non-streaming
-     *       responses are wrapped into {@link Response} objects and added to {@link #getRecentResponses()}.</li>
+     *       default binary decoder, and all other types delegate to the {@link Decoder} returned by
+     *       {@link #configureDecoder()} ({@link GsonDecoder} by default). Non-streaming responses are
+     *       wrapped into {@link Response} objects and added to {@link #getRecentResponses()}.</li>
      *   <li>An {@link InternalErrorDecoder} that delegates to the configured {@link #getErrorDecoder()},
      *       handles rate-limit (HTTP 429) responses, tracks retry attempts, and wraps retryable errors
      *       in {@link RetryableApiException} for Feign's retry mechanism.</li>
@@ -322,10 +325,10 @@ public abstract class Client<E extends Endpoint> implements ReactiveEndpoint<E> 
     public final @NotNull E build() {
         return Feign.builder()
             .client(this.internalClient)
-            .encoder(new GsonEncoder(this.getGson()))
+            .encoder(this.configureEncoder())
             .doNotCloseAfterDecode()
             .decoder(new InternalResponseDecoder(
-                new GsonDecoder(this.getGson()),
+                this.configureDecoder(),
                 this.getRecentResponses()
             ))
             .errorDecoder(new InternalErrorDecoder(
@@ -468,6 +471,50 @@ public abstract class Client<E extends Endpoint> implements ReactiveEndpoint<E> 
      */
     protected @NotNull Timings configureTimings() {
         return Timings.createDefault();
+    }
+
+    /**
+     * Returns the Feign {@link Encoder} used to serialize outbound request bodies.
+     * <p>
+     * The default implementation returns a {@link GsonEncoder} wrapping the {@link Gson}
+     * instance from {@link #getGson()}, which is appropriate for JSON-based APIs.
+     * Subclasses may override this method to substitute an alternative encoder - for
+     * example, an XML encoder for RSS/Atom endpoints or a form-URL-encoded encoder for
+     * legacy APIs.
+     * <p>
+     * The returned encoder is consumed once by {@link #build()} during Feign proxy
+     * construction, so overrides may rely on a freshly constructed instance per client.
+     *
+     * @return the {@link Encoder} to use for request body serialization
+     * @see GsonEncoder
+     */
+    protected @NotNull Encoder configureEncoder() {
+        return new GsonEncoder(this.getGson());
+    }
+
+    /**
+     * Returns the Feign {@link Decoder} used to deserialize inbound response bodies.
+     * <p>
+     * The returned decoder is wrapped by {@link InternalResponseDecoder}, which routes
+     * {@link java.io.InputStream} and {@code byte[]} return types to dedicated handlers
+     * and delegates all other return types to this decoder. The default implementation
+     * returns a {@link GsonDecoder} wrapping the {@link Gson} instance from
+     * {@link #getGson()}, which is appropriate for JSON-based APIs.
+     * <p>
+     * Subclasses may override this method to substitute an alternative decoder - for
+     * example, an XML decoder that converts responses into a Gson {@link com.google.gson.JsonElement}
+     * tree before handing off to the shared {@link Gson} instance, preserving all
+     * registered {@code TypeAdapter}s and {@code TypeAdapterFactory}s.
+     * <p>
+     * The returned decoder is consumed once by {@link #build()} during Feign proxy
+     * construction, so overrides may rely on a freshly constructed instance per client.
+     *
+     * @return the {@link Decoder} to use for response body deserialization
+     * @see GsonDecoder
+     * @see InternalResponseDecoder
+     */
+    protected @NotNull Decoder configureDecoder() {
+        return new GsonDecoder(this.getGson());
     }
 
     /**

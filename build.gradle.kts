@@ -38,4 +38,8 @@ dependencies {
     // HTTP Client
     api(libs.feign.gson)
     api(libs.feign.httpclient)
+
+    // XML Codec Support (XmlDecoder + XmlEncoder)
+    api(libs.jackson.dataformat.xml)
+    api(libs.rome)
 }
