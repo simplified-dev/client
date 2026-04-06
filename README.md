@@ -78,32 +78,106 @@ dependencies {
 
 ## Usage
 
-Create a Feign-based HTTP client with built-in rate limiting and response decoding:
+### 1. Define an Endpoint Interface
 
-```java
-import dev.simplified.client.Client;
-import dev.simplified.client.ratelimit.RateLimitConfig;
-
-// Build a client targeting your API
-Client client = Client.builder()
-    .baseUrl("https://api.example.com")
-    .rateLimitConfig(RateLimitConfig.builder()
-        .maxRequests(100)
-        .perSeconds(60)
-        .build())
-    .build();
-```
-
-Define endpoints as annotated interfaces:
+Declare your API operations as a Feign-annotated interface extending `Endpoint`. Annotate the interface with `@Route` to set the target host and optional rate limit:
 
 ```java
 import dev.simplified.client.request.Endpoint;
-import dev.simplified.client.request.HttpMethod;
+import dev.simplified.client.ratelimit.RateLimitConfig;
+import dev.simplified.client.response.Response;
+import dev.simplified.client.route.Route;
+import feign.Param;
+import feign.RequestLine;
 
+@Route(value = "api.example.com/v1", rateLimit = @RateLimitConfig(limit = 100, window = 60))
 public interface UserApi extends Endpoint {
 
     @RequestLine("GET /users/{id}")
     Response<User> getUser(@Param("id") String id);
+
+    @RequestLine("GET /users")
+    Response<List<User>> listUsers();
+}
+```
+
+### 2. Subclass `Client`
+
+`Client` is an abstract class parameterized by your endpoint interface. Extend it and provide a `Gson` instance:
+
+```java
+import com.google.gson.Gson;
+import dev.simplified.client.Client;
+
+@Getter
+@RequiredArgsConstructor
+public class UserClient extends Client<UserApi> {
+
+    private final @NotNull Gson gson;
+
+}
+```
+
+### 3. Use the Client
+
+```java
+UserClient client = new UserClient(new Gson());
+
+// Synchronous call via the endpoint proxy
+Response<User> response = client.getEndpoint().getUser("123");
+User user = response.getBody();
+
+// Asynchronous call via ReactiveEndpoint
+CompletableFuture<Response<User>> future = client.fromBlocking(api -> api.getUser("123"));
+
+// Check rate limit status
+long remaining = client.getRemainingRequests("api.example.com/v1");
+boolean limited = client.isRateLimited("api.example.com/v1");
+
+// Inspect the most recent response
+client.getLastResponse().ifPresent(resp -> {
+    HttpStatus status = resp.getStatus();
+    long latency = client.getLatency();
+});
+```
+
+### Customization
+
+Override template methods on your `Client` subclass to customize behavior:
+
+```java
+public class UserClient extends Client<UserApi> {
+
+    // ...
+
+    @Override
+    protected ConcurrentMap<String, String> configureHeaders() {
+        ConcurrentMap<String, String> headers = Concurrent.newMap();
+        headers.put("Content-Type", "application/json");
+        return headers;
+    }
+
+    @Override
+    protected ConcurrentMap<String, Supplier<Optional<String>>> configureDynamicHeaders() {
+        ConcurrentMap<String, Supplier<Optional<String>>> headers = Concurrent.newMap();
+        headers.put("Authorization", () -> Optional.ofNullable(getApiKey()));
+        return headers;
+    }
+
+    @Override
+    protected Timings configureTimings() {
+        return new Timings(
+            120_000, 45_000, 30_000, // connection TTL, idle timeout, keep-alive
+            5_000, 10_000,           // connect timeout, socket timeout
+            200, 50,                 // max connections, max per route
+            3_600_000, 100           // cache duration, max cache size
+        );
+    }
+
+    @Override
+    protected ClientErrorDecoder configureErrorDecoder() {
+        return (methodKey, response) -> new MyApiException(methodKey, response);
+    }
 }
 ```
 
