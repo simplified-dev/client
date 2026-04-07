@@ -179,7 +179,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
         return this.getLastResponse()
             .map(Response::getDetails)
             .map(NetworkDetails::getRoundTrip)
-            .map(Stopwatch::getDurationMillis)
+            .map(Stopwatch::durationMillis)
             .orElse(-1L);
     }
 
@@ -329,18 +329,18 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                 context.setAttribute(NetworkDetails.RESPONSE_RECEIVED, responseReceived);
                 response.addHeader(NetworkDetails.RESPONSE_RECEIVED, responseReceived.toString());
 
-                if (this.recentResponses.size() > timings.getMaxCacheSize()) {
-                    long cutoff = System.currentTimeMillis() - timings.getCacheDuration();
-                    this.recentResponses.removeIf(r -> r.getDetails().getRoundTrip().getCompletedAt().toEpochMilli() < cutoff);
+                if (this.recentResponses.size() > timings.maxCacheSize()) {
+                    long cutoff = System.currentTimeMillis() - timings.cacheDuration();
+                    this.recentResponses.removeIf(r -> r.getDetails().getRoundTrip().completedAt().toEpochMilli() < cutoff);
                 }
             })
-            .setMaxConnTotal(timings.getMaxConnections())
-            .setMaxConnPerRoute(timings.getMaxConnectionsPerRoute())
-            .evictIdleConnections(timings.getConnectionIdleTimeout(), TimeUnit.MILLISECONDS)
-            .setConnectionTimeToLive(timings.getConnectionTimeToLive(), TimeUnit.MILLISECONDS)
+            .setMaxConnTotal(timings.maxConnections())
+            .setMaxConnPerRoute(timings.maxConnectionsPerRoute())
+            .evictIdleConnections(timings.connectionIdleTimeout(), TimeUnit.MILLISECONDS)
+            .setConnectionTimeToLive(timings.connectionTimeToLive(), TimeUnit.MILLISECONDS)
             .setKeepAliveStrategy((response, context) -> {
                 long keepAlive = DefaultConnectionKeepAliveStrategy.INSTANCE.getKeepAliveDuration(response, context);
-                return (keepAlive == -1) ? timings.getConnectionKeepAlive() : Math.min(keepAlive, 60_000);
+                return (keepAlive == -1) ? timings.connectionKeepAlive() : Math.min(keepAlive, 60_000);
             });
 
         // Custom Local Address
@@ -391,9 +391,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                 this.getRouteDiscovery()
             ))
             .options(new feign.Request.Options(
-                this.options.getTimings().getConnectTimeout(),
+                this.options.getTimings().connectTimeout(),
                 TimeUnit.MILLISECONDS,
-                this.options.getTimings().getSocketTimeout(),
+                this.options.getTimings().socketTimeout(),
                 TimeUnit.MILLISECONDS,
                 true
             ))

@@ -1,8 +1,6 @@
 package dev.simplified.client.request;
 
 import dev.simplified.client.Client;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.jetbrains.annotations.NotNull;
@@ -30,118 +28,63 @@ import java.util.concurrent.TimeUnit;
  * {@code configureTimings()} to supply a custom {@code Timings} instance; otherwise the
  * sensible defaults provided by {@link #createDefault()} are used.
  *
+ * @param connectionTimeToLive maximum lifetime of a pooled HTTP connection in milliseconds, before it is permanently
+ *                             closed regardless of activity. Passed to
+ *                             {@link HttpClientBuilder#setConnectionTimeToLive(long, TimeUnit)
+ *                             HttpClientBuilder.setConnectionTimeToLive()}. Default: 120,000 (2 minutes).
+ * @param connectionIdleTimeout maximum duration in milliseconds a pooled connection may sit idle before it is evicted
+ *                              by the background cleanup thread. Passed to
+ *                              {@link HttpClientBuilder#evictIdleConnections(long, TimeUnit)
+ *                              HttpClientBuilder.evictIdleConnections()}. Default: 45,000 (45 seconds).
+ * @param connectionKeepAlive default keep-alive duration in milliseconds for persistent connections when the server
+ *                            response does not include a {@code Keep-Alive} header. Applied by the custom keep-alive
+ *                            strategy in {@link Client#configureInternalClient()}. Default: 30,000 (30 seconds).
+ * @param connectTimeout maximum time in milliseconds to wait for a TCP connection to be established. Passed to
+ *                       {@link feign.Request.Options} as the connect timeout. Controls {@code SO_CONNECT_TIMEOUT}
+ *                       on the underlying socket. Default: 5,000 (5 seconds).
+ * @param socketTimeout maximum time in milliseconds of inactivity between consecutive data packets after the
+ *                      connection is established. Passed to {@link feign.Request.Options} as the read timeout, which
+ *                      maps to {@code SO_TIMEOUT} on the underlying socket. This is a per-packet inactivity limit,
+ *                      not a total transfer timeout - streaming large files works as long as data arrives within
+ *                      this interval. Default: 10,000 (10 seconds).
+ * @param maxConnections maximum total concurrent HTTP connections across all routes. Passed to
+ *                       {@link PoolingHttpClientConnectionManager#setMaxTotal(int)
+ *                       PoolingHttpClientConnectionManager.setMaxTotal()}. Default: 200.
+ * @param maxConnectionsPerRoute maximum concurrent HTTP connections per individual route. Passed to
+ *                               {@link PoolingHttpClientConnectionManager#setDefaultMaxPerRoute(int)
+ *                               PoolingHttpClientConnectionManager.setDefaultMaxPerRoute()}. Default: 50.
+ * @param cacheDuration duration in milliseconds for which recent responses are retained in the client's response
+ *                      cache before pruning. Used by the response interceptor in
+ *                      {@link Client#configureInternalClient()}. Default: 3,600,000 (1 hour).
+ * @param maxCacheSize maximum number of entries in the client's response cache before pruning triggers. Default: 100.
  * @see Client
  */
-@Getter
-@RequiredArgsConstructor
-public class Timings {
-
-    // HTTP
-
-    /**
-     * Maximum lifetime of a pooled HTTP connection before it is permanently closed,
-     * regardless of activity. Passed to
-     * {@link org.apache.http.impl.client.HttpClientBuilder#setConnectionTimeToLive(long, java.util.concurrent.TimeUnit)
-     * HttpClientBuilder.setConnectionTimeToLive()}.
-     * <p>
-     * Value is in milliseconds. Default: 120 000 (2 minutes).
-     */
-    private final long connectionTimeToLive;
-
-    /**
-     * Maximum duration a pooled connection may sit idle before it is evicted by the
-     * background cleanup thread. Passed to
-     * {@link HttpClientBuilder#evictIdleConnections(long, TimeUnit)
-     * HttpClientBuilder.evictIdleConnections()}.
-     * <p>
-     * Value is in milliseconds. Default: 45,000 (45 seconds).
-     */
-    private final long connectionIdleTimeout;
-
-    /**
-     * Default keep-alive duration for persistent connections when the server response
-     * does not include a {@code Keep-Alive} header. Applied by the custom keep-alive
-     * strategy in {@link Client#configureInternalClient()}.
-     * <p>
-     * Value is in milliseconds. Default: 30,000 (30 seconds).
-     */
-    private final long connectionKeepAlive;
-
-    // Feign
-
-    /**
-     * Maximum time to wait for a TCP connection to be established. Passed to
-     * {@link feign.Request.Options} as the connect timeout. Controls
-     * {@code SO_CONNECT_TIMEOUT} on the underlying socket.
-     * <p>
-     * Value is in milliseconds. Default: 5,000 (5 seconds).
-     */
-    private final long connectTimeout;
-
-    /**
-     * Maximum time of inactivity between consecutive data packets after the connection
-     * is established. Passed to {@link feign.Request.Options} as the read timeout,
-     * which maps to {@code SO_TIMEOUT} on the underlying socket.
-     * <p>
-     * This is a per-packet inactivity limit, not a total transfer timeout - streaming
-     * large files works as long as data arrives within this interval.
-     * <p>
-     * Value is in milliseconds. Default: 10,000 (10 seconds).
-     */
-    private final long socketTimeout;
-
-    // Concurrency
-
-    /**
-     * Maximum total concurrent HTTP connections across all routes. Passed to
-     * {@link PoolingHttpClientConnectionManager#setMaxTotal(int)
-     * PoolingHttpClientConnectionManager.setMaxTotal()}.
-     * <p>
-     * Default: 200.
-     */
-    private final int maxConnections;
-
-    /**
-     * Maximum concurrent HTTP connections per individual route. Passed to
-     * {@link PoolingHttpClientConnectionManager#setDefaultMaxPerRoute(int)
-     * PoolingHttpClientConnectionManager.setDefaultMaxPerRoute()}.
-     * <p>
-     * Default: 50.
-     */
-    private final int maxConnectionsPerRoute;
-
-    // Cache
-
-    /**
-     * Duration for which recent responses are retained in the client's response cache
-     * before pruning. Used by the response interceptor in
-     * {@link Client#configureInternalClient()}.
-     * <p>
-     * Value is in milliseconds. Default: 3,600,000 (1 hour).
-     */
-    private final long cacheDuration;
-
-    /**
-     * Maximum number of entries in the client's response cache before pruning triggers.
-     * <p>
-     * Default: 100.
-     */
-    private final long maxCacheSize;
+public record Timings(
+    long connectionTimeToLive,
+    long connectionIdleTimeout,
+    long connectionKeepAlive,
+    long connectTimeout,
+    long socketTimeout,
+    int maxConnections,
+    int maxConnectionsPerRoute,
+    long cacheDuration,
+    long maxCacheSize
+) {
 
     /**
      * Creates a {@code Timings} instance populated with sensible default values.
      * <p>
      * Defaults:
      * <ul>
-     *   <li>{@link #getConnectionTimeToLive() connectionTimeToLive} - 120,000 ms (2 minutes)</li>
-     *   <li>{@link #getConnectionIdleTimeout() connectionIdleTimeout} - 45,000 ms (45 seconds)</li>
-     *   <li>{@link #getConnectionKeepAlive() connectionKeepAlive} - 30,000 ms (30 seconds)</li>
-     *   <li>{@link #getConnectTimeout() connectTimeout} - 5,000 ms (5 seconds)</li>
-     *   <li>{@link #getSocketTimeout() socketTimeout} - 10,000 ms (10 seconds)</li>
-     *   <li>{@link #getMaxConnections() maxConnections} - 200</li>
-     *   <li>{@link #getMaxConnectionsPerRoute() maxConnectionsPerRoute} - 50</li>
-     *   <li>{@link #getCacheDuration() cacheDuration} - 3,600,000 ms (1 hour)</li>
-     *   <li>{@link #getMaxCacheSize() maxCacheSize} - 100</li>
+     *   <li>{@link #connectionTimeToLive() connectionTimeToLive} - 120,000 ms (2 minutes)</li>
+     *   <li>{@link #connectionIdleTimeout() connectionIdleTimeout} - 45,000 ms (45 seconds)</li>
+     *   <li>{@link #connectionKeepAlive() connectionKeepAlive} - 30,000 ms (30 seconds)</li>
+     *   <li>{@link #connectTimeout() connectTimeout} - 5,000 ms (5 seconds)</li>
+     *   <li>{@link #socketTimeout() socketTimeout} - 10,000 ms (10 seconds)</li>
+     *   <li>{@link #maxConnections() maxConnections} - 200</li>
+     *   <li>{@link #maxConnectionsPerRoute() maxConnectionsPerRoute} - 50</li>
+     *   <li>{@link #cacheDuration() cacheDuration} - 3,600,000 ms (1 hour)</li>
+     *   <li>{@link #maxCacheSize() maxCacheSize} - 100</li>
      * </ul>
      *
      * @return a new {@code Timings} with default configuration values
