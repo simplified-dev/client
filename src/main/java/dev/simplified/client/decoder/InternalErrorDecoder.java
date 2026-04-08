@@ -2,8 +2,10 @@ package dev.simplified.client.decoder;
 
 import dev.simplified.client.Client;
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.NotModifiedException;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.exception.RetryableApiException;
+import dev.simplified.client.response.HttpState;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.response.RetryAfterParser;
@@ -95,12 +97,27 @@ public final class InternalErrorDecoder implements ErrorDecoder {
             context.lastMethodKey = methodKey;
         }
 
-        ApiException exception = response.status() == HttpStatus.TOO_MANY_REQUESTS.getCode() ?
-            new RateLimitException(
+        // 3xx responses are not errors in the REST sense. Feign invokes the ErrorDecoder for
+        // every status outside 2xx by default, so 304 Not Modified (a successful outcome of a
+        // conditional request) and other 3xx responses land here. Short-circuit them into a
+        // NotModifiedException without invoking the domain ClientErrorDecoder, which would
+        // try to parse an empty or non-JSON body and produce a confusing
+        // "Unknown (body missing or not JSON)" error trace. Callers differentiate genuine
+        // errors (4xx/5xx) from cache-hit short-circuits (3xx) by catching NotModifiedException
+        // explicitly before the broader ApiException catch.
+        ApiException exception;
+
+        if (HttpState.REDIRECTION.containsCode(response.status())) {
+            exception = new NotModifiedException(methodKey, response);
+        } else if (response.status() == HttpStatus.TOO_MANY_REQUESTS.getCode()) {
+            exception = new RateLimitException(
                 methodKey,
                 response,
                 this.routeDiscovery.findMatchingMetadata(response.request().url())
-            ) : this.customDecoder.decode(methodKey, response);
+            );
+        } else {
+            exception = this.customDecoder.decode(methodKey, response);
+        }
 
         RETRY_ATTEMPTS_FIELD.set(exception, context.retryAttempt);
         this.recentResponses.add(exception);
