@@ -2,6 +2,7 @@ package dev.simplified.client.cache;
 
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.collection.Concurrent;
+import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.collection.tuple.pair.Pair;
 import dev.simplified.collection.unmodifiable.ConcurrentUnmodifiableMap;
 import org.jetbrains.annotations.NotNull;
@@ -158,7 +159,7 @@ public final class CacheKey {
      *
      * @param values the Vary header values for this variant, keyed by lowercased Vary name
      */
-    public record VaryFingerprint(@NotNull ConcurrentUnmodifiableMap<String, String> values) {
+    public record VaryFingerprint(@NotNull ConcurrentMap<String, String> values) {
 
         /** Sentinel fingerprint for cache entries whose stored response had no {@code Vary} header. */
         public static final @NotNull VaryFingerprint EMPTY = new VaryFingerprint(Concurrent.newUnmodifiableMap());
@@ -181,7 +182,7 @@ public final class CacheKey {
             if (varyNames.isEmpty())
                 return EMPTY;
 
-            ConcurrentUnmodifiableMap<String, String> values = varyNames.stream()
+            ConcurrentMap<String, String> values = varyNames.stream()
                 .map(name -> name.toLowerCase(Locale.ROOT))
                 .map(name -> Pair.of(name, joinHeaderValues(findHeaderValues(requestHeaders, name))))
                 .collect(Concurrent.toUnmodifiableSortedMap(String.CASE_INSENSITIVE_ORDER));
