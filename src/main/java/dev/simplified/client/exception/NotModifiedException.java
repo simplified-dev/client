@@ -1,7 +1,6 @@
 package dev.simplified.client.exception;
 
 import dev.simplified.client.decoder.InternalErrorDecoder;
-import dev.simplified.client.interceptor.InternalResponseInterceptor;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.Response;
@@ -22,15 +21,18 @@ import org.jetbrains.annotations.NotNull;
  * inspect the HTTP status code.
  *
  * <p>In most cases callers will <b>not</b> see this exception thrown. When the framework
- * can locate a cached body for the same {@code (HttpMethod, URL)} in
- * {@link dev.simplified.client.Client#getRecentResponses()},
- * {@link InternalResponseInterceptor} transparently returns that cached body - the method
- * appears to complete successfully and {@link Response#getStatus()} reports
+ * holds a matching cached variant in
+ * {@link dev.simplified.client.cache.ResponseCache ResponseCache},
+ * {@link dev.simplified.client.cache.CachingFeignClient CachingFeignClient} transparently
+ * returns a synthesized replay of the cached body before Feign's error pipeline runs -
+ * the method appears to complete successfully and {@link Response#getStatus()} reports
  * {@link HttpStatus#NOT_MODIFIED} as the wire-truth indicator. This exception is reserved
  * for <i>cache-miss revalidations</i>: the server said the cache is fresh, but the
  * framework no longer holds the corresponding response (for example, streaming endpoints
- * are never cached, and the cache is bounded and pruned by
- * {@link dev.simplified.client.request.Timings#cacheDuration()}).
+ * are never cached, and cache entries are bounded by
+ * {@link dev.simplified.client.request.Timings#maxCacheBytes()} and expire according to
+ * each entry's {@code Cache-Control} directives capped by
+ * {@link dev.simplified.client.request.Timings#cacheSafetyFallback()}).
  *
  * <p>The {@code 3xx} range in general is not an error range: {@code 301}/{@code 302}/
  * {@code 303} redirects are auto-followed by the underlying HTTP transport, {@code 304}
@@ -56,7 +58,7 @@ import org.jetbrains.annotations.NotNull;
  * }</pre>
  *
  * @see InternalErrorDecoder
- * @see InternalResponseInterceptor
+ * @see dev.simplified.client.cache.CachingFeignClient
  * @see ETag
  * @see HttpStatus#NOT_MODIFIED
  */

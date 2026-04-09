@@ -1,6 +1,7 @@
 package dev.simplified.client.decoder;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.NotModifiedException;
 import dev.simplified.client.exception.PreconditionFailedException;
@@ -8,10 +9,8 @@ import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.exception.RetryableApiException;
 import dev.simplified.client.response.HttpState;
 import dev.simplified.client.response.HttpStatus;
-import dev.simplified.client.response.Response;
 import dev.simplified.client.response.RetryAfterParser;
 import dev.simplified.client.route.RouteDiscovery;
-import dev.simplified.collection.ConcurrentList;
 import dev.simplified.reflection.Reflection;
 import dev.simplified.reflection.accessor.FieldAccessor;
 import feign.codec.ErrorDecoder;
@@ -33,8 +32,8 @@ import java.util.OptionalLong;
  *       {@link ClientErrorDecoder} for domain-specific error parsing.</li>
  *   <li>Reflectively sets the cumulative {@code retryAttempts} count on the resulting
  *       {@link ApiException} via the shared {@link Reflection} accessor.</li>
- *   <li>Appends the exception to the shared {@code recentResponses} list so it is visible
- *       through {@link dev.simplified.client.Client#getRecentResponses()}.</li>
+ *   <li>Records the exception via {@link ResponseCache#recordLastResponse(dev.simplified.client.response.Response)}
+ *       so it is visible through {@link dev.simplified.client.Client#getLastResponse()}.</li>
  *   <li>If a {@code Retry-After} header is present, wraps the exception in a
  *       {@link RetryableApiException} that Feign's retry mechanism can act upon.</li>
  *   <li>Cleans up the thread-local retry context once a request sequence completes without
@@ -60,8 +59,8 @@ public final class InternalErrorDecoder implements ErrorDecoder {
     /** The route discovery engine used to resolve route metadata for rate limit exceptions. */
     private final @NotNull RouteDiscovery routeDiscovery;
 
-    /** The shared recent response list maintained by the owning {@link Client}. */
-    private final @NotNull ConcurrentList<Response<?>> recentResponses;
+    /** The shared response cache used for observability of error outcomes. */
+    private final @NotNull ResponseCache responseCache;
 
     /** Thread-local retry state tracker. */
     private final @NotNull ThreadLocal<RetryContext> retryContext;
@@ -71,12 +70,12 @@ public final class InternalErrorDecoder implements ErrorDecoder {
      *
      * @param clientDecoder the client-supplied decoder for domain-specific error parsing
      * @param routeDiscovery the route discovery engine for resolving route metadata
-     * @param recentResponses the shared list to which decoded error responses are appended
+     * @param responseCache the shared response cache used for recording error responses
      */
-    public InternalErrorDecoder(@NotNull ClientErrorDecoder clientDecoder, @NotNull RouteDiscovery routeDiscovery, @NotNull ConcurrentList<Response<?>> recentResponses) {
+    public InternalErrorDecoder(@NotNull ClientErrorDecoder clientDecoder, @NotNull RouteDiscovery routeDiscovery, @NotNull ResponseCache responseCache) {
         this.customDecoder = clientDecoder;
         this.routeDiscovery = routeDiscovery;
-        this.recentResponses = recentResponses;
+        this.responseCache = responseCache;
         this.retryContext = ThreadLocal.withInitial(RetryContext::new);
     }
 
@@ -131,7 +130,7 @@ public final class InternalErrorDecoder implements ErrorDecoder {
         }
 
         RETRY_ATTEMPTS_FIELD.set(exception, context.retryAttempt);
-        this.recentResponses.add(exception);
+        this.responseCache.recordLastResponse(exception);
 
         // If retryable, wrap for Feign's retry mechanism
         OptionalLong retryAfter = RetryAfterParser.parseFromHeaders(response.headers());

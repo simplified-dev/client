@@ -20,13 +20,13 @@ import java.util.concurrent.TimeUnit;
  *       Feign request via {@link feign.Request.Options}.</li>
  *   <li><b>Concurrency limits</b> - maximum total connections and maximum connections per
  *       route in the {@link PoolingHttpClientConnectionManager}.</li>
- *   <li><b>Client-level caching</b> - duration and size for which recent responses are retained in
- *       the client's response cache.</li>
+ *   <li><b>Client-level caching</b> - entries in the RFC 7234 response cache are evicted by
+ *       per-entry freshness ({@code Cache-Control: max-age} / {@code s-maxage} /
+ *       {@code Expires}) extended by any {@code stale-if-error} window, with a hard ceiling
+ *       of {@link #cacheSafetyFallback()} so nothing survives eternally. Total cache weight
+ *       is bounded by {@link #maxCacheBytes()}, summing raw-body bytes, header bytes, and
+ *       per-entry overhead.</li>
  * </ul>
- * <p>
- * Subclasses of {@link Client} may override
- * {@code configureTimings()} to supply a custom {@code Timings} instance; otherwise the
- * sensible defaults provided by {@link #createDefault()} are used.
  *
  * @param connectionTimeToLive maximum lifetime of a pooled HTTP connection in milliseconds, before it is permanently
  *                             closed regardless of activity. Passed to
@@ -37,8 +37,7 @@ import java.util.concurrent.TimeUnit;
  *                              {@link HttpClientBuilder#evictIdleConnections(long, TimeUnit)
  *                              HttpClientBuilder.evictIdleConnections()}. Default: 45,000 (45 seconds).
  * @param connectionKeepAlive default keep-alive duration in milliseconds for persistent connections when the server
- *                            response does not include a {@code Keep-Alive} header. Applied by the custom keep-alive
- *                            strategy in {@link Client#configureInternalClient()}. Default: 30,000 (30 seconds).
+ *                            response does not include a {@code Keep-Alive} header. Default: 30,000 (30 seconds).
  * @param connectTimeout maximum time in milliseconds to wait for a TCP connection to be established. Passed to
  *                       {@link feign.Request.Options} as the connect timeout. Controls {@code SO_CONNECT_TIMEOUT}
  *                       on the underlying socket. Default: 5,000 (5 seconds).
@@ -53,10 +52,12 @@ import java.util.concurrent.TimeUnit;
  * @param maxConnectionsPerRoute maximum concurrent HTTP connections per individual route. Passed to
  *                               {@link PoolingHttpClientConnectionManager#setDefaultMaxPerRoute(int)
  *                               PoolingHttpClientConnectionManager.setDefaultMaxPerRoute()}. Default: 50.
- * @param cacheDuration duration in milliseconds for which recent responses are retained in the client's response
- *                      cache before pruning. Used by the response interceptor in
- *                      {@link Client#configureInternalClient()}. Default: 3,600,000 (1 hour).
- * @param maxCacheSize maximum number of entries in the client's response cache before pruning triggers. Default: 100.
+ * @param maxCacheBytes maximum total weight of all cached response variants, in bytes. Includes raw body bytes,
+ *                      approximate header byte size, and a fixed per-entry overhead. Default: 16,777,216 (16 MiB).
+ * @param cacheSafetyFallback absolute upper bound on any cache entry's lifetime in milliseconds, regardless of
+ *                            response-advertised freshness. Applied inside the custom expiry so that entries carrying
+ *                            {@code Cache-Control: immutable, max-age=99999999} cannot survive eternally.
+ *                            Default: 86,400,000 (24 hours).
  * @see Client
  */
 public record Timings(
@@ -67,8 +68,8 @@ public record Timings(
     long socketTimeout,
     int maxConnections,
     int maxConnectionsPerRoute,
-    long cacheDuration,
-    long maxCacheSize
+    long maxCacheBytes,
+    long cacheSafetyFallback
 ) {
 
     /**
@@ -83,8 +84,8 @@ public record Timings(
      *   <li>{@link #socketTimeout() socketTimeout} - 10,000 ms (10 seconds)</li>
      *   <li>{@link #maxConnections() maxConnections} - 200</li>
      *   <li>{@link #maxConnectionsPerRoute() maxConnectionsPerRoute} - 50</li>
-     *   <li>{@link #cacheDuration() cacheDuration} - 3,600,000 ms (1 hour)</li>
-     *   <li>{@link #maxCacheSize() maxCacheSize} - 100</li>
+     *   <li>{@link #maxCacheBytes() maxCacheBytes} - 16,777,216 (16 MiB)</li>
+     *   <li>{@link #cacheSafetyFallback() cacheSafetyFallback} - 86,400,000 ms (24 hours)</li>
      * </ul>
      *
      * @return a new {@code Timings} with default configuration values
@@ -98,8 +99,8 @@ public record Timings(
             10 * 1_000,
             200,
             50,
-            Duration.ofHours(1).toMillis(),
-            100
+            16L * 1024 * 1024,
+            Duration.ofHours(24).toMillis()
         );
     }
 

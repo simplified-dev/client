@@ -1,5 +1,7 @@
 package dev.simplified.client;
 
+import dev.simplified.client.cache.CachingFeignClient;
+import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.InternalErrorDecoder;
 import dev.simplified.client.decoder.InternalResponseDecoder;
@@ -19,8 +21,6 @@ import dev.simplified.client.response.Response;
 import dev.simplified.client.route.DynamicRouteProvider;
 import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
-import dev.simplified.collection.Concurrent;
-import dev.simplified.collection.ConcurrentList;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
 import feign.httpclient.ApacheHttpClient;
@@ -28,7 +28,6 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import org.apache.http.HttpRequest;
 import org.apache.http.HttpRequestInterceptor;
-import org.apache.http.HttpResponseInterceptor;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.socket.ConnectionSocketFactory;
@@ -59,12 +58,16 @@ import java.util.concurrent.TimeUnit;
  * <p>
  * During construction the client discovers routes from {@link Route @Route} or
  * {@link dev.simplified.client.route.DynamicRoute @DynamicRoute} annotations on the contract
- * interface through {@link RouteDiscovery}, builds a pooling Apache {@link ApacheHttpClient} with
- * {@link TimedPlainConnectionSocketFactory} and {@link TimedSecureConnectionSocketFactory} for DNS,
- * TCP, and TLS timing instrumentation, assembles a Feign proxy that wires together encoding,
- * decoding, request and response interceptors, and the configured error decoder, and finally wraps
- * the resulting Feign proxy in a JDK dynamic proxy that unwraps {@link RetryableApiException} so
- * callers see the original typed {@link ApiException} rather than Feign's internal retry wrapper.
+ * interface through {@link RouteDiscovery}, instantiates a {@link ResponseCache} for both
+ * conditional revalidation and {@code getLastResponse()} observability, builds a pooling
+ * Apache {@link ApacheHttpClient} with {@link TimedPlainConnectionSocketFactory} and
+ * {@link TimedSecureConnectionSocketFactory} for DNS, TCP, and TLS timing instrumentation,
+ * wraps the Apache client in a {@link CachingFeignClient} that serves RFC 7234 cache hits
+ * transparently, assembles a Feign proxy that wires together encoding, decoding, request
+ * and response interceptors, and the configured error decoder, and finally wraps the
+ * resulting Feign proxy in a JDK dynamic proxy that unwraps {@link RetryableApiException}
+ * so callers see the original typed {@link ApiException} rather than Feign's internal
+ * retry wrapper.
  * <p>
  * To produce a derived client that shares most of an existing client's configuration, call
  * {@link #mutate()} to obtain a {@link ClientOptions.Builder} seeded from the current options,
@@ -77,6 +80,8 @@ import java.util.concurrent.TimeUnit;
  * @see AsyncAccess
  * @see RouteDiscovery
  * @see RateLimitManager
+ * @see ResponseCache
+ * @see CachingFeignClient
  * @see Response
  * @see ClientErrorDecoder
  */
@@ -99,15 +104,22 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /** The Feign-generated proxy implementing the contract interface, wrapped to unwrap internal exceptions. */
     private final @NotNull C contract;
 
-    /** The bounded list of recent {@link Response} objects, automatically pruned by cache duration. */
-    private final @NotNull ConcurrentList<Response<?>> recentResponses = Concurrent.newList();
+    /**
+     * The RFC 7234 response cache and merged observability facade, replacing the legacy
+     * {@code recentResponses} list. Holds both the Caffeine cache used for conditional
+     * revalidation and fresh-hit short-circuiting and the single-slot "last response"
+     * reference exposed via {@link #getLastResponse()}.
+     */
+    private final @NotNull ResponseCache responseCache;
 
     /**
      * Constructs a new client from the given configuration bundle.
      * <p>
      * Discovers routes for the target contract interface, initializes the rate-limit manager,
-     * builds the pooling Apache HTTP client and Feign proxy, and wraps the proxy in an
-     * exception-unwrapping dynamic proxy.
+     * instantiates the response cache from {@link Timings#maxCacheBytes()} and
+     * {@link Timings#cacheSafetyFallback()}, builds the pooling Apache HTTP client, wraps it
+     * in a {@link CachingFeignClient} that serves RFC 7234 cache hits transparently, and
+     * assembles the Feign proxy through an exception-unwrapping dynamic proxy.
      *
      * @param options the immutable configuration bundle
      */
@@ -115,6 +127,10 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
         this.options = options;
         this.routeDiscovery = new RouteDiscovery(options.getTarget());
         this.rateLimitManager = new RateLimitManager();
+        this.responseCache = new ResponseCache(
+            options.getTimings().maxCacheBytes(),
+            options.getTimings().cacheSafetyFallback()
+        );
         this.internalClient = this.buildInternalClient();
         this.contract = this.wrapContractProxy(this.build());
     }
@@ -149,19 +165,20 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     // ===== Runtime state =====
 
     /**
-     * Retrieves the most recent response from the list of cached responses.
+     * Retrieves the most recently observed response, whether successful or erroneous.
      * <p>
-     * The most recent response is determined by comparing the
-     * {@linkplain NetworkDetails#getRoundTrip() round-trip} completion timestamp of each cached
-     * entry. The response cache is automatically pruned based on the
-     * {@linkplain Timings#getCacheDuration() cache duration} configured in the client's
-     * {@link ClientOptions}.
+     * Delegates to {@link ResponseCache#getLastResponse()}, which returns the single-slot
+     * reference updated by the decoder and error-decoder pipelines on every completed
+     * exchange (including fresh cache hits replayed through the decoder). Because
+     * {@link ApiException} implements {@link Response}, the same reference carries both
+     * successful decodes and typed exceptions.
      *
-     * @return an {@link Optional} containing the most recent {@link Response} if the cache is
-     *         non-empty, or {@link Optional#empty()} if no responses have been recorded
+     * @return an {@link Optional} containing the most recent {@link Response} if one has
+     *         been observed, or {@link Optional#empty()} if the client has not yet issued
+     *         a request
      */
     public @NotNull Optional<Response<?>> getLastResponse() {
-        return this.recentResponses.findLast();
+        return this.responseCache.getLastResponse();
     }
 
     /**
@@ -278,11 +295,15 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * and {@link TimedSecureConnectionSocketFactory} to capture DNS, TCP, and TLS timings into the
      * {@link HttpContext} as {@link NetworkDetails} attributes; a request interceptor that records
      * the request start timestamp, propagates timing attributes as headers, and appends the
-     * configured queries, headers, and dynamic headers from {@link ClientOptions}; a response
-     * interceptor that records the response-received timestamp and prunes expired entries from
-     * {@link #getRecentResponses()} based on the {@linkplain Timings#getCacheDuration() cache
-     * duration}; pool limits and timeouts derived from {@link Timings}; and an optional local
-     * IPv6 address binding from {@link ClientOptions#getInet6Address()}.
+     * configured queries, headers, and dynamic headers from {@link ClientOptions}; pool limits and
+     * timeouts derived from {@link Timings}; and an optional local IPv6 address binding from
+     * {@link ClientOptions#getInet6Address()}.
+     * <p>
+     * Cache semantics (freshness, revalidation, stale-if-error replay, invalidation on unsafe
+     * methods) live in {@link CachingFeignClient}, which wraps the returned Apache client before
+     * it reaches Feign. The post-response pruning interceptor that used to live here has been
+     * retired - entries in {@link ResponseCache} are evicted by per-entry TTL and weight,
+     * bounded by {@link Timings#cacheSafetyFallback()} and {@link Timings#maxCacheBytes()}.
      *
      * @return a fully configured {@link ApacheHttpClient} ready for use by Feign
      */
@@ -324,16 +345,6 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                     .ifPresent(value -> request.addHeader(key, value))
                 );
             })
-            .addInterceptorLast((HttpResponseInterceptor) (response, context) -> {
-                Instant responseReceived = Instant.now();
-                context.setAttribute(NetworkDetails.RESPONSE_RECEIVED, responseReceived);
-                response.addHeader(NetworkDetails.RESPONSE_RECEIVED, responseReceived.toString());
-
-                if (this.recentResponses.size() > timings.maxCacheSize()) {
-                    long cutoff = System.currentTimeMillis() - timings.cacheDuration();
-                    this.recentResponses.removeIf(r -> r.getDetails().getRoundTrip().completedAt().toEpochMilli() < cutoff);
-                }
-            })
             .setMaxConnTotal(timings.maxConnections())
             .setMaxConnPerRoute(timings.maxConnectionsPerRoute())
             .evictIdleConnections(timings.connectionIdleTimeout(), TimeUnit.MILLISECONDS)
@@ -354,43 +365,45 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     }
 
     /**
-     * Builds a Feign proxy implementing the endpoint interface {@code E}.
+     * Builds a Feign proxy implementing the contract interface {@code C}.
      * <p>
-     * The proxy is configured with the internal Apache HTTP client as the transport, the
+     * The proxy is configured with the internal Apache HTTP client wrapped in a
+     * {@link CachingFeignClient} so that RFC 7234 fresh-hit short-circuiting, conditional
+     * revalidation, and unsafe-method invalidation happen transparently below Feign. The
      * {@linkplain ClientOptions#getEncoderFactory() encoder factory} and
-     * {@linkplain ClientOptions#getDecoderFactory() decoder factory} from the options (each
-     * invoked once with the configured {@link com.google.gson.Gson Gson}),
-     * {@link feign.Feign.Builder#doNotCloseAfterDecode()} so that {@link InternalResponseDecoder}
-     * can manage response body lifecycle for {@link java.io.InputStream} return types, and the
-     * standard request/response interceptors and error decoder pipeline.
+     * {@linkplain ClientOptions#getDecoderFactory() decoder factory} from the options are
+     * each invoked once with the configured {@link com.google.gson.Gson Gson}.
+     * {@link feign.Feign.Builder#doNotCloseAfterDecode()} is set so that
+     * {@link InternalResponseDecoder} can manage response body lifecycle for
+     * {@link java.io.InputStream} return types.
      * <p>
      * The returned proxy is subsequently wrapped by {@link #wrapContractProxy(Contract)} to
      * strip internal exception wrappers before they reach callers.
      *
-     * @return a Feign-generated proxy instance of type {@code E}
+     * @return a Feign-generated proxy instance of type {@code C}
      */
     private @NotNull C build() {
+        feign.Client cachingClient = new CachingFeignClient(this.internalClient, this.responseCache);
+
         return Feign.builder()
-            .client(this.internalClient)
+            .client(cachingClient)
             .encoder(this.options.getEncoderFactory().apply(this.options.getGson()))
             .decoder(new InternalResponseDecoder(
                 this.options.getDecoderFactory().apply(this.options.getGson()),
-                this.getRecentResponses()
+                this.responseCache
             ))
             .errorDecoder(new InternalErrorDecoder(
                 this.options.getErrorDecoder(),
                 this.getRouteDiscovery(),
-                this.getRecentResponses()
+                this.responseCache
             ))
             .requestInterceptor(new InternalRequestInterceptor(
                 this.getRateLimitManager(),
-                this.getRouteDiscovery(),
-                this.getRecentResponses()
+                this.getRouteDiscovery()
             ))
             .responseInterceptor(new InternalResponseInterceptor(
                 this.getRateLimitManager(),
-                this.getRouteDiscovery(),
-                this.getRecentResponses()
+                this.getRouteDiscovery()
             ))
             .options(new feign.Request.Options(
                 this.options.getTimings().connectTimeout(),
