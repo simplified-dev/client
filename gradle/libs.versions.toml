@@ -6,6 +6,7 @@ gson = "2.11.0"
 feign = "13.11"
 jackson = "2.18.2"
 rome = "2.1.0"
+caffeine = "3.2.0"
 
 [libraries]
 lombok = { group = "org.projectlombok", name = "lombok", version.ref = "lombok" }
@@ -16,3 +17,4 @@ feign-gson = { group = "io.github.openfeign", name = "feign-gson", version.ref =
 feign-httpclient = { group = "io.github.openfeign", name = "feign-httpclient", version.ref = "feign" }
 jackson-dataformat-xml = { group = "com.fasterxml.jackson.dataformat", name = "jackson-dataformat-xml", version.ref = "jackson" }
 rome = { group = "com.rometools", name = "rome", version.ref = "rome" }
+caffeine = { group = "com.github.ben-manes.caffeine", name = "caffeine", version.ref = "caffeine" }

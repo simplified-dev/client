@@ -5,11 +5,7 @@ import lombok.experimental.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.text.DateFormat;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.util.Collection;
-import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalLong;
 import java.util.concurrent.TimeUnit;
@@ -26,16 +22,19 @@ import java.util.regex.Pattern;
  *     <li><b>Delay-seconds</b> - a non-negative integer (optionally with trailing {@code .0}) indicating
  *         the number of seconds the client should wait before retrying
  *         (e.g. {@code Retry-After: 120})</li>
- *     <li><b>HTTP-date</b> - an RFC 822 / RFC 1123 formatted date indicating the absolute time
- *         at which the client may retry
+ *     <li><b>HTTP-date</b> - an RFC 7231 §7.1.1.1 HTTP date indicating the absolute time at
+ *         which the client may retry
  *         (e.g. {@code Retry-After: Wed, 21 Oct 2026 07:28:00 GMT})</li>
  * </ul>
  * <p>
  * All parse methods return {@link OptionalLong#empty()} when the header is missing, blank, or
  * not parseable in either format, making them safe to use without exception handling.
- * The delay-seconds format is attempted first as it is the most common in practice.
+ * The delay-seconds format is attempted first as it is the most common in practice; the
+ * HTTP-date branch delegates to {@link HttpDates}, the canonical HTTP-date parser that
+ * accepts all three formats permitted by RFC 7231.
  *
  * @see <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.3">RFC 7231 - Retry-After</a>
+ * @see HttpDates
  */
 @UtilityClass
 public final class RetryAfterParser {
@@ -45,9 +44,6 @@ public final class RetryAfterParser {
 
     /** Pattern matching a non-negative integer, optionally followed by a decimal point and trailing zeros. */
     private static final @NotNull Pattern RETRY_AFTER_PATTERN = Pattern.compile("^[0-9]+\\.?0*$");
-
-    /** Thread-unsafe RFC 822/1123 date formatter; all access must be synchronized. */
-    private static final @NotNull DateFormat RFC822_FORMAT = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US);
 
     /**
      * Parses a {@code Retry-After} value from a collection of header values into an
@@ -101,8 +97,8 @@ public final class RetryAfterParser {
      * Parses a raw {@code Retry-After} header value string into an epoch-millisecond timestamp.
      * <p>
      * First attempts to interpret the value as delay-seconds (a non-negative integer),
-     * converting it to an absolute timestamp offset from the current system time. If that fails,
-     * attempts to parse the value as an HTTP-date in RFC 822/1123 format.
+     * converting it to an absolute timestamp offset from the current system time. If that
+     * fails, delegates to {@link HttpDates#parse(String)} for the HTTP-date branch.
      *
      * @param retryAfter the raw header value string to parse
      * @return an {@link OptionalLong} containing the resolved epoch-millisecond timestamp, or
@@ -115,7 +111,7 @@ public final class RetryAfterParser {
         if (secondsResult.isPresent())
             return secondsResult;
 
-        // Try parsing as HTTP-date (RFC 822/1123 format)
+        // Try parsing as HTTP-date via the canonical HttpDates parser
         return parseAsHttpDate(retryAfter);
     }
 
@@ -146,24 +142,21 @@ public final class RetryAfterParser {
     }
 
     /**
-     * Attempts to parse the given value as an HTTP-date in RFC 822/1123 format and
-     * returns the result as an epoch-millisecond timestamp.
+     * Attempts to parse the given value as an HTTP date and returns the result as an
+     * epoch-millisecond timestamp.
      * <p>
-     * Access to the shared {@link DateFormat} instance is synchronized to ensure
-     * thread safety, since {@link SimpleDateFormat} is not thread-safe.
+     * Delegates to {@link HttpDates#parse(String)}, which handles all three formats
+     * permitted by RFC 7231 §7.1.1.1 (IMF-fixdate, RFC 850, asctime).
      *
      * @param retryAfter the raw header value string to parse
      * @return an {@link OptionalLong} containing the parsed epoch-millisecond timestamp, or
-     *         {@link OptionalLong#empty()} if the value does not conform to the expected format
+     *         {@link OptionalLong#empty()} if the value does not conform to any accepted
+     *         HTTP date format
      */
     private static @NotNull OptionalLong parseAsHttpDate(@NotNull String retryAfter) {
-        synchronized (RFC822_FORMAT) {
-            try {
-                return OptionalLong.of(RFC822_FORMAT.parse(retryAfter).getTime());
-            } catch (ParseException e) {
-                return OptionalLong.empty();
-            }
-        }
+        return HttpDates.parse(retryAfter)
+            .map(instant -> OptionalLong.of(instant.toEpochMilli()))
+            .orElseGet(OptionalLong::empty);
     }
 
 }

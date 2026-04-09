@@ -42,4 +42,7 @@ dependencies {
     // XML Codec Support (XmlDecoder + XmlEncoder)
     api(libs.jackson.dataformat.xml)
     api(libs.rome)
+
+    // Caching
+    api(libs.caffeine)
 }

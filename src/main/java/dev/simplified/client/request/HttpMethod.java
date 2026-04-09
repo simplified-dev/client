@@ -62,6 +62,40 @@ public enum HttpMethod {
     }
 
     /**
+     * Indicates whether this method is considered <i>safe</i> per
+     * <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.1">RFC 7231
+     * Section 4.2.1</a>.
+     * <p>
+     * Safe methods ({@code GET}, {@code HEAD}, {@code OPTIONS}, {@code TRACE}) are
+     * defined as being essentially read-only and must not have server-side side effects
+     * beyond what a reasonable cache or log would capture. The HTTP response cache uses
+     * this distinction to decide whether to invalidate cached entries for a URL after a
+     * successful request (unsafe methods invalidate; safe methods do not).
+     *
+     * @return {@code true} if this method is safe per RFC 7231 §4.2.1
+     */
+    public boolean isSafe() {
+        return this == GET || this == HEAD || this == OPTIONS || this == TRACE;
+    }
+
+    /**
+     * Indicates whether responses to this method may be stored in an HTTP cache by
+     * default per
+     * <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-4.2.3">RFC 7231
+     * Section 4.2.3</a>.
+     * <p>
+     * Only {@code GET} and {@code HEAD} are cacheable by default in the general case.
+     * Other methods may carry an explicit cache-control directive permitting storage,
+     * but the response cache in this client only considers cacheable methods as
+     * candidates for storage and lookup.
+     *
+     * @return {@code true} if responses to this method are cacheable by default
+     */
+    public boolean isCacheable() {
+        return this == GET || this == HEAD;
+    }
+
+    /**
      * Resolves an {@code HttpMethod} from its name using a case-insensitive comparison.
      * <p>
      * If no matching constant is found, {@link #GET} is returned as the default.
