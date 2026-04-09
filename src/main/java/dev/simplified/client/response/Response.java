@@ -11,6 +11,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Top-level interface representing a fully-resolved HTTP response, providing typed access
@@ -51,6 +52,27 @@ public interface Response<T> {
             .orElse(CloudflareCacheStatus.UNKNOWN);
     }
 
+    /**
+     * Retrieves the parsed {@link ETag} from the {@code ETag} response header.
+     * <p>
+     * Looks up {@link ETag#HEADER_KEY} in the response headers and delegates the string
+     * value to {@link ETag#parse(String)}, which handles strong and weak ({@code W/})
+     * validators and rejects malformed input. Header lookup is case-insensitive because
+     * {@link #getHeaders(Map)} collects into a map ordered by
+     * {@link String#CASE_INSENSITIVE_ORDER}.
+     *
+     * @return the parsed entity tag if the response carries a valid {@code ETag} header,
+     *         otherwise {@link Optional#empty()}
+     * @see ETag
+     * @see <a href="https://datatracker.ietf.org/doc/html/rfc7232#section-2.3">RFC 7232 Section 2.3</a>
+     */
+    default @NotNull Optional<ETag> getETag() {
+        return this.getHeaders()
+            .getOptional(ETag.HEADER_KEY)
+            .flatMap(ConcurrentList::findFirst)
+            .flatMap(ETag::parse);
+    }
+
     /** The deserialized body of the HTTP response, decoded into the parameterized type {@code T}. */
     @NotNull T getBody();
 
@@ -89,11 +111,14 @@ public interface Response<T> {
      * <p>
      * Internal headers (identified by {@link NetworkDetails#isInternalHeader(String)})
      * are excluded because they carry interceptor-injected timing data that is not part
-     * of the actual HTTP response.
+     * of the actual HTTP response. The returned map uses
+     * {@link String#CASE_INSENSITIVE_ORDER} for key comparison, matching HTTP's
+     * case-insensitive header semantics so lookups like {@code getOptional("etag")} and
+     * {@code getOptional("ETag")} both succeed.
      *
      * @param headers the raw response headers map to convert
-     * @return an unmodifiable {@link ConcurrentMap} of header names to unmodifiable
-     *         {@link ConcurrentList} value lists, with internal headers removed
+     * @return an unmodifiable case-insensitive {@link ConcurrentMap} of header names to
+     *         unmodifiable {@link ConcurrentList} value lists, with internal headers removed
      */
     static @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders(@NotNull Map<String, Collection<String>> headers) {
         return headers.entrySet()
@@ -104,7 +129,7 @@ public interface Response<T> {
                 entry.getKey(),
                 (ConcurrentList<String>) Concurrent.newUnmodifiableList(entry.getValue())
             ))
-            .collect(Concurrent.toUnmodifiableMap());
+            .collect(Concurrent.toUnmodifiableSortedMap(String.CASE_INSENSITIVE_ORDER));
     }
 
     /**
