@@ -1,21 +1,36 @@
 package dev.simplified.client.exception;
 
 import dev.simplified.client.decoder.InternalErrorDecoder;
+import dev.simplified.client.interceptor.InternalResponseInterceptor;
+import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.HttpStatus;
+import dev.simplified.client.response.Response;
 import org.jetbrains.annotations.NotNull;
 
 /**
- * Thrown when a remote API responds with {@code 304 Not Modified} to a conditional request.
+ * Thrown when a remote API responds with {@code 304 Not Modified} to a conditional request
+ * for which the framework has no cached body to serve.
  *
  * <p>Unlike other {@link ApiException} subclasses, a {@code NotModifiedException} does not
  * represent an error condition - it is the expected outcome of a successful
  * {@code If-None-Match} / {@code If-Modified-Since} exchange and signals that the caller's
  * cached copy is still current. Feign's default response handling treats any non-{@code 2xx}
  * status as an error and invokes the {@link feign.codec.ErrorDecoder}; the framework's
- * {@link InternalErrorDecoder} short-circuits this behaviour for
- * {@code 3xx} responses and returns {@code NotModifiedException} instead of delegating to
- * the domain-specific {@code ClientErrorDecoder}, so callers can catch the type explicitly
- * without needing to inspect the HTTP status code.
+ * {@link InternalErrorDecoder} short-circuits this behaviour for {@code 3xx} responses and
+ * returns {@code NotModifiedException} instead of delegating to the domain-specific
+ * {@code ClientErrorDecoder}, so callers can catch the type explicitly without needing to
+ * inspect the HTTP status code.
+ *
+ * <p>In most cases callers will <b>not</b> see this exception thrown. When the framework
+ * can locate a cached body for the same {@code (HttpMethod, URL)} in
+ * {@link dev.simplified.client.Client#getRecentResponses()},
+ * {@link InternalResponseInterceptor} transparently returns that cached body - the method
+ * appears to complete successfully and {@link Response#getStatus()} reports
+ * {@link HttpStatus#NOT_MODIFIED} as the wire-truth indicator. This exception is reserved
+ * for <i>cache-miss revalidations</i>: the server said the cache is fresh, but the
+ * framework no longer holds the corresponding response (for example, streaming endpoints
+ * are never cached, and the cache is bounded and pruned by
+ * {@link dev.simplified.client.request.Timings#cacheDuration()}).
  *
  * <p>The {@code 3xx} range in general is not an error range: {@code 301}/{@code 302}/
  * {@code 303} redirects are auto-followed by the underlying HTTP transport, {@code 304}
@@ -24,20 +39,25 @@ import org.jetbrains.annotations.NotNull;
  * so callers can distinguish them from genuine {@code 4xx} client errors and {@code 5xx}
  * server errors.
  *
- * <p>Intended usage pattern:
+ * <p>Intended usage pattern - only needed when a cached body may not exist (e.g. after
+ * long idle periods, across client restarts, or for streaming endpoints):
  * <pre>{@code
  * try {
- *     ETagContext.callWithEtag(storedEtag, contract::getLatestMasterCommit);
+ *     Commit commit = contract.getLatestCommit();  // framework auto-attaches If-None-Match
+ *     return Optional.of(commit);
  * } catch (NotModifiedException ex) {
- *     // cached copy is still current - no action needed
+ *     // cache miss on revalidation - the server confirmed freshness but the framework
+ *     // no longer has the body; re-fetch without conditional headers and try again.
  *     return Optional.empty();
  * } catch (ApiException ex) {
- *     // genuine error - log and retry next cycle
  *     log.warn("API call failed: {}", ex.getMessage());
+ *     return Optional.empty();
  * }
  * }</pre>
  *
  * @see InternalErrorDecoder
+ * @see InternalResponseInterceptor
+ * @see ETag
  * @see HttpStatus#NOT_MODIFIED
  */
 public class NotModifiedException extends ApiException {
