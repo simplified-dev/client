@@ -384,11 +384,13 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             ))
             .requestInterceptor(new InternalRequestInterceptor(
                 this.getRateLimitManager(),
-                this.getRouteDiscovery()
+                this.getRouteDiscovery(),
+                this.getRecentResponses()
             ))
             .responseInterceptor(new InternalResponseInterceptor(
                 this.getRateLimitManager(),
-                this.getRouteDiscovery()
+                this.getRouteDiscovery(),
+                this.getRecentResponses()
             ))
             .options(new feign.Request.Options(
                 this.options.getTimings().connectTimeout(),
