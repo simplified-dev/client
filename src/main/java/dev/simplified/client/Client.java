@@ -51,7 +51,7 @@ import java.util.concurrent.TimeUnit;
  * <p>
  * A {@code Client} is parameterized by a {@link Contract} interface whose methods declare the
  * remote HTTP operations (using Feign's {@code @RequestLine} annotations) and is constructed via
- * {@link #create(ClientOptions)} from an immutable {@link ClientOptions} bundle. All customization
+ * {@link #create(ClientConfig)} from an immutable {@link ClientConfig} bundle. All customization
  * - headers, queries, dynamic headers, timings, error decoder, encoder/decoder factories, IPv6
  * binding - lives on the options; the client itself owns only the runtime state needed to execute
  * requests.
@@ -70,12 +70,12 @@ import java.util.concurrent.TimeUnit;
  * retry wrapper.
  * <p>
  * To produce a derived client that shares most of an existing client's configuration, call
- * {@link #mutate()} to obtain a {@link ClientOptions.Builder} seeded from the current options,
- * adjust the differing fields, and pass the result to {@link #create(ClientOptions)}.
+ * {@link #mutate()} to obtain a {@link ClientConfig.Builder} seeded from the current options,
+ * adjust the differing fields, and pass the result to {@link #create(ClientConfig)}.
  *
  * @param <C> the Feign contract interface type that declares the remote HTTP operations;
  *            must extend {@link Contract}
- * @see ClientOptions
+ * @see ClientConfig
  * @see Contract
  * @see AsyncAccess
  * @see RouteDiscovery
@@ -89,7 +89,7 @@ import java.util.concurrent.TimeUnit;
 public final class Client<C extends Contract> implements AsyncAccess<C> {
 
     /** The immutable configuration bundle used to construct this client. */
-    private final @NotNull ClientOptions<C> options;
+    private final @NotNull ClientConfig<C> options;
 
     /** The underlying Apache HTTP client wrapped by Feign for connection pooling and transport. */
     @Getter(AccessLevel.NONE)
@@ -123,7 +123,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      *
      * @param options the immutable configuration bundle
      */
-    private Client(@NotNull ClientOptions<C> options) {
+    private Client(@NotNull ClientConfig<C> options) {
         this.options = options;
         this.routeDiscovery = new RouteDiscovery(options.getTarget());
         this.rateLimitManager = new RateLimitManager();
@@ -142,23 +142,23 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * @param options the immutable configuration bundle
      * @return a fully initialized client ready to issue requests
      */
-    public static <C extends Contract> @NotNull Client<C> create(@NotNull ClientOptions<C> options) {
+    public static <C extends Contract> @NotNull Client<C> create(@NotNull ClientConfig<C> options) {
         return new Client<>(options);
     }
 
     // ===== Configuration access =====
 
     /**
-     * Returns a {@link ClientOptions.Builder} pre-populated with this client's current options
+     * Returns a {@link ClientConfig.Builder} pre-populated with this client's current options
      * for further modification.
      * <p>
      * Equivalent to {@code this.getOptions().mutate()}; provided as an instance method to support
      * the {@code client.mutate().withFoo(...).build()} idiom for deriving a configuration variant
-     * before passing the result to {@link #create(ClientOptions)}.
+     * before passing the result to {@link #create(ClientConfig)}.
      *
      * @return a builder pre-populated from this client's options
      */
-    public @NotNull ClientOptions.Builder<C> mutate() {
+    public @NotNull ClientConfig.Builder<C> mutate() {
         return this.options.mutate();
     }
 
@@ -295,9 +295,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * and {@link TimedSecureConnectionSocketFactory} to capture DNS, TCP, and TLS timings into the
      * {@link HttpContext} as {@link NetworkDetails} attributes; a request interceptor that records
      * the request start timestamp, propagates timing attributes as headers, and appends the
-     * configured queries, headers, and dynamic headers from {@link ClientOptions}; pool limits and
+     * configured queries, headers, and dynamic headers from {@link ClientConfig}; pool limits and
      * timeouts derived from {@link Timings}; and an optional local IPv6 address binding from
-     * {@link ClientOptions#getInet6Address()}.
+     * {@link ClientConfig#getInet6Address()}.
      * <p>
      * Cache semantics (freshness, revalidation, stale-if-error replay, invalidation on unsafe
      * methods) live in {@link CachingFeignClient}, which wraps the returned Apache client before
@@ -370,8 +370,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * The proxy is configured with the internal Apache HTTP client wrapped in a
      * {@link CachingFeignClient} so that RFC 7234 fresh-hit short-circuiting, conditional
      * revalidation, and unsafe-method invalidation happen transparently below Feign. The
-     * {@linkplain ClientOptions#getEncoderFactory() encoder factory} and
-     * {@linkplain ClientOptions#getDecoderFactory() decoder factory} from the options are
+     * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
+     * {@linkplain ClientConfig#getDecoderFactory() decoder factory} from the options are
      * each invoked once with the configured {@link com.google.gson.Gson Gson}.
      * {@link feign.Feign.Builder#doNotCloseAfterDecode()} is set so that
      * {@link InternalResponseDecoder} can manage response body lifecycle for

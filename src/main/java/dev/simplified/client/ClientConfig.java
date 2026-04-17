@@ -34,7 +34,7 @@ import java.util.function.Supplier;
  * be reused across multiple clients, mutated to derive variants, and tested in isolation.
  * <p>
  * Construction is via {@link #builder(Class, Gson)}, which seeds a {@link Builder} with sensible
- * defaults for every optional field. {@link #from(ClientOptions)} or {@link #mutate()} produces a
+ * defaults for every optional field. {@link #from(ClientConfig)} or {@link #mutate()} produces a
  * new builder pre-populated from an existing instance, enabling the
  * {@code base.mutate().withFoo(...).build()} idiom for derived configurations.
  * <p>
@@ -50,7 +50,7 @@ import java.util.function.Supplier;
  */
 @Getter
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
-public final class ClientOptions<C extends Contract> {
+public final class ClientConfig<C extends Contract> {
 
     /** The contract interface class the resulting client will target. */
     private final @NotNull Class<C> target;
@@ -110,14 +110,14 @@ public final class ClientOptions<C extends Contract> {
      * @param existing the options to copy from
      * @return a pre-populated builder
      */
-    public static <C extends Contract> @NotNull Builder<C> from(@NotNull ClientOptions<C> existing) {
+    public static <C extends Contract> @NotNull Builder<C> from(@NotNull ClientConfig<C> existing) {
         return new Builder<>(existing);
     }
 
     /**
      * Returns a {@link Builder} pre-populated with this instance's values for further modification.
      * <p>
-     * Equivalent to {@link #from(ClientOptions) ClientOptions.from(this)}; provided as an instance
+     * Equivalent to {@link #from(ClientConfig) ClientOptions.from(this)}; provided as an instance
      * method to support the {@code options.mutate().withFoo(...).build()} idiom.
      *
      * @return a pre-populated builder
@@ -127,7 +127,7 @@ public final class ClientOptions<C extends Contract> {
     }
 
     /**
-     * Fluent builder for constructing immutable {@link ClientOptions} instances.
+     * Fluent builder for constructing immutable {@link ClientConfig} instances.
      *
      * @param <C> the contract interface type
      */
@@ -149,7 +149,7 @@ public final class ClientOptions<C extends Contract> {
             this.gson = gson;
         }
 
-        private Builder(@NotNull ClientOptions<C> existing) {
+        private Builder(@NotNull ClientConfig<C> existing) {
             this.target = existing.target;
             this.gson = existing.gson;
             this.inet6Address = existing.inet6Address;
@@ -319,7 +319,7 @@ public final class ClientOptions<C extends Contract> {
         }
 
         /**
-         * Constructs an immutable {@link ClientOptions} from the current builder state.
+         * Constructs an immutable {@link ClientConfig} from the current builder state.
          * <p>
          * The mutable maps held by the builder are sealed into unmodifiable copies on the
          * resulting options instance, so the builder may continue to be mutated and rebuilt
@@ -327,10 +327,10 @@ public final class ClientOptions<C extends Contract> {
          *
          * @return a new immutable {@code ClientOptions}
          */
-        public @NotNull ClientOptions<C> build() {
+        public @NotNull ClientConfig<C> build() {
             Objects.requireNonNull(this.target, "target");
             Objects.requireNonNull(this.gson, "gson");
-            return new ClientOptions<>(
+            return new ClientConfig<>(
                 this.target,
                 this.gson,
                 this.inet6Address,

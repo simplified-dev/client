@@ -23,7 +23,7 @@ import java.util.stream.IntStream;
  * Generic pool of {@link Client} instances that fronts a single contract type with availability
  * filtering and per-client configuration variance.
  * <p>
- * A {@code Proxy} wraps a list of clients all sharing a common {@link ClientOptions} base. When a
+ * A {@code Proxy} wraps a list of clients all sharing a common {@link ClientConfig} base. When a
  * caller asks for the contract proxy, the proxy selects the first available client - typically the
  * first one whose rate-limit bucket is not exhausted - and falls back to constructing a new client
  * (mutated by an optional {@link UnaryOperator}) when none of the existing pool members are
@@ -36,7 +36,7 @@ import java.util.stream.IntStream;
  *
  * @param <C> the {@link Contract} interface type that the underlying clients target
  * @see Client
- * @see ClientOptions
+ * @see ClientConfig
  * @see AsyncAccess
  */
 @Getter
@@ -44,11 +44,11 @@ import java.util.stream.IntStream;
 public final class Proxy<C extends Contract> implements AsyncAccess<C> {
 
     /** The shared base options every client in the pool derives from. */
-    private final @NotNull ClientOptions<C> baseOptions;
+    private final @NotNull ClientConfig<C> baseOptions;
 
     /** Operator applied to the base options builder when constructing a new client. */
     @Getter(AccessLevel.NONE)
-    private final @NotNull UnaryOperator<ClientOptions.Builder<C>> perClientMutator;
+    private final @NotNull UnaryOperator<ClientConfig.Builder<C>> perClientMutator;
 
     /** Predicate that determines whether a pooled client is currently available to serve a request. */
     @Getter(AccessLevel.NONE)
@@ -74,7 +74,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
      * @param baseOptions the shared base options
      * @return a builder pre-populated with default behaviors
      */
-    public static <C extends Contract> @NotNull Builder<C> builder(@NotNull ClientOptions<C> baseOptions) {
+    public static <C extends Contract> @NotNull Builder<C> builder(@NotNull ClientConfig<C> baseOptions) {
         return new Builder<>(baseOptions);
     }
 
@@ -133,18 +133,18 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
      */
     public static final class Builder<C extends Contract> {
 
-        private final @NotNull ClientOptions<C> baseOptions;
-        private @NotNull UnaryOperator<ClientOptions.Builder<C>> perClientMutator = UnaryOperator.identity();
+        private final @NotNull ClientConfig<C> baseOptions;
+        private @NotNull UnaryOperator<ClientConfig.Builder<C>> perClientMutator = UnaryOperator.identity();
         private @NotNull Predicate<Client<C>> availability = client -> !client.isRateLimited();
 
-        private Builder(@NotNull ClientOptions<C> baseOptions) {
+        private Builder(@NotNull ClientConfig<C> baseOptions) {
             this.baseOptions = baseOptions;
         }
 
         /**
          * Sets the operator applied to the base options builder when constructing a new client.
          * <p>
-         * The operator receives a fresh {@link ClientOptions.Builder} seeded from the base
+         * The operator receives a fresh {@link ClientConfig.Builder} seeded from the base
          * options on each call to {@link #getClient()} that needs to add a new pool member, and
          * returns a builder that {@link Builder#build()} will then call to produce the per-client
          * options. Use this to inject per-client variance such as a fresh IPv6 source address.
@@ -155,7 +155,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * @param mutator the per-client options mutator
          * @return this builder
          */
-        public @NotNull Builder<C> withPerClientMutator(@NotNull UnaryOperator<ClientOptions.Builder<C>> mutator) {
+        public @NotNull Builder<C> withPerClientMutator(@NotNull UnaryOperator<ClientConfig.Builder<C>> mutator) {
             this.perClientMutator = mutator;
             return this;
         }
