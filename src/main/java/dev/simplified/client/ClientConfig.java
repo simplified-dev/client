@@ -2,6 +2,7 @@ package dev.simplified.client;
 
 import com.google.gson.Gson;
 import dev.simplified.client.decoder.ClientErrorDecoder;
+import dev.simplified.client.decoder.GsonAwareErrorDecoder;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
@@ -215,6 +216,26 @@ public final class ClientConfig<C extends Contract> {
         public @NotNull Builder<C> withErrorDecoder(@NotNull ClientErrorDecoder errorDecoder) {
             this.errorDecoder = errorDecoder;
             return this;
+        }
+
+        /**
+         * Sets the error decoder to a {@link GsonAwareErrorDecoder} that receives the builder's
+         * configured {@link Gson} at decode time. Pairs naturally with a
+         * {@link dev.simplified.client.exception.JsonApiException JsonApiException} subclass
+         * and a constructor reference:
+         *
+         * <pre>{@code
+         * .withErrorDecoder(FooApiException::new)
+         * }</pre>
+         *
+         * <p>The decoder is adapted to the underlying {@link ClientErrorDecoder} contract by
+         * closing over the current {@link Gson} instance.</p>
+         *
+         * @param errorDecoder the Gson-aware error decoder
+         * @return this builder
+         */
+        public @NotNull Builder<C> withErrorDecoder(@NotNull GsonAwareErrorDecoder errorDecoder) {
+            return this.withErrorDecoder((methodKey, response) -> errorDecoder.decode(this.gson, methodKey, response));
         }
 
         /**

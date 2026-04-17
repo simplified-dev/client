@@ -68,7 +68,7 @@ public final class RouteDiscovery {
             extractRouteFromTarget(method).ifPresent(info -> methodRoutes.put(method, info));
 
         this.defaultRoute = defaultRoute.get();
-        this.methodRoutes = methodRoutes.toUnmodifiableMap();
+        this.methodRoutes = methodRoutes.toUnmodifiable();
     }
 
     /**
