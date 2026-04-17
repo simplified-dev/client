@@ -1,6 +1,7 @@
 package dev.simplified.client.decoder;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.ApiException;
 import feign.Response;
 import feign.codec.ErrorDecoder;
@@ -11,7 +12,7 @@ import org.jetbrains.annotations.NotNull;
  * strongly-typed {@link ApiException} instances.
  * <p>
  * Each {@link Client} subclass provides its own implementation via
- * {@link Client#configureErrorDecoder()}, allowing domain-specific
+ * {@link ClientConfig#errorDecoder}, allowing domain-specific
  * error response bodies to be parsed into meaningful exception types. The returned
  * {@link ApiException} is then wrapped by the internal error pipeline
  * ({@link InternalErrorDecoder}) which adds retry tracking and rate limit handling
@@ -19,7 +20,7 @@ import org.jetbrains.annotations.NotNull;
  *
  * @see InternalErrorDecoder
  * @see ApiException
- * @see Client#configureErrorDecoder()
+ * @see ClientConfig#errorDecoder
  */
 public interface ClientErrorDecoder extends ErrorDecoder {
 
