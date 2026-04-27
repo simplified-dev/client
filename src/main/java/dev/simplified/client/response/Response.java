@@ -159,7 +159,7 @@ public interface Response<T> {
                 entry.getKey(),
                 (ConcurrentList<String>) Concurrent.newUnmodifiableList(entry.getValue())
             ))
-            .collect(Concurrent.toUnmodifiableSortedMap(String.CASE_INSENSITIVE_ORDER));
+            .collect(Concurrent.toUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER));
     }
 
     /**

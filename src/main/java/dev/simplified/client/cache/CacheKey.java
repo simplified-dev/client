@@ -30,7 +30,7 @@ import java.util.TreeMap;
  * {@code @QueryMap} with non-deterministic iteration order cannot silently fragment the
  * cache across logically identical requests. {@code VaryFingerprint} backs its value map
  * with a {@link ConcurrentUnmodifiableMap} built via the project's standard
- * {@link Concurrent#toUnmodifiableSortedMap(java.util.Comparator) toUnmodifiableSortedMap}
+ * {@link Concurrent#toUnmodifiableTreeMap(java.util.Comparator) toUnmodifiableSortedMap}
  * collector, inheriting content-based equality through the
  * {@code dev.simplified.collection.atomic.AtomicMap#equals(Object)} delegate.
  *
@@ -151,7 +151,7 @@ public final class CacheKey {
      * subset of request headers listed in the stored response's {@code Vary} header.
      * <p>
      * The backing map is a {@link ConcurrentUnmodifiableMap} produced by
-     * {@link Concurrent#toUnmodifiableSortedMap(java.util.Comparator)} with
+     * {@link Concurrent#toUnmodifiableTreeMap(java.util.Comparator)} with
      * {@link String#CASE_INSENSITIVE_ORDER}. Record equality delegates to the map's
      * {@code equals}, which in turn delegates through
      * {@code dev.simplified.collection.atomic.AtomicMap#equals(Object)} to the backing
@@ -185,7 +185,7 @@ public final class CacheKey {
             ConcurrentMap<String, String> values = varyNames.stream()
                 .map(name -> name.toLowerCase(Locale.ROOT))
                 .map(name -> Pair.of(name, joinHeaderValues(findHeaderValues(requestHeaders, name))))
-                .collect(Concurrent.toUnmodifiableSortedMap(String.CASE_INSENSITIVE_ORDER));
+                .collect(Concurrent.toUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER));
 
             return new VaryFingerprint(values);
         }

@@ -14,16 +14,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.TreeMap;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -382,7 +373,7 @@ public final class ResponseCache {
                 entry.getKey(),
                 (ConcurrentList<String>) Concurrent.newUnmodifiableList(entry.getValue())
             ))
-            .collect(Concurrent.toUnmodifiableSortedMap(String.CASE_INSENSITIVE_ORDER));
+            .collect(Concurrent.toUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER));
 
         return new Response.Impl<>(
             decoded.getBody(),
@@ -428,7 +419,7 @@ public final class ResponseCache {
 
         ConcurrentMap<String, ConcurrentList<String>> finalHeaders = mutable.entrySet().stream()
             .map(entry -> Pair.of(entry.getKey(), entry.getValue()))
-            .collect(Concurrent.toUnmodifiableSortedMap(String.CASE_INSENSITIVE_ORDER));
+            .collect(Concurrent.toUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER));
 
         return new Response.Cached<>(
             existing.getBody(),
