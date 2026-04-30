@@ -143,7 +143,8 @@ public final class NetworkDetails {
      */
     @SuppressWarnings("unchecked")
     private static <T> T getAttribute(@NotNull HttpContext context, @NotNull String id, T defaultValue) {
-        return context.getAttribute(id) != null ? (T) context.getAttribute(id) : defaultValue;
+        Object value = context.getAttribute(id);
+        return value != null ? (T) value : defaultValue;
     }
 
     /**

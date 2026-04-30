@@ -45,6 +45,9 @@ public final class RetryAfterParser {
     /** Pattern matching a non-negative integer, optionally followed by a decimal point and trailing zeros. */
     private static final @NotNull Pattern RETRY_AFTER_PATTERN = Pattern.compile("^[0-9]+\\.?0*$");
 
+    /** Pattern matching a trailing decimal point followed by zeros, used to strip {@code .0...} suffixes from delay-seconds values. */
+    private static final @NotNull Pattern TRAILING_ZERO_DECIMAL = Pattern.compile("\\.0*$");
+
     /**
      * Parses a {@code Retry-After} value from a collection of header values into an
      * epoch-millisecond timestamp.
@@ -127,7 +130,7 @@ public final class RetryAfterParser {
     private static @NotNull OptionalLong parseAsSeconds(@NotNull String retryAfter) {
         // Match integer or decimal seconds (e.g., "120" or "120.0")
         if (RETRY_AFTER_PATTERN.matcher(retryAfter).matches()) {
-            String cleaned = retryAfter.replaceAll("\\.0*$", "");
+            String cleaned = TRAILING_ZERO_DECIMAL.matcher(retryAfter).replaceAll("");
 
             try {
                 long seconds = Long.parseLong(cleaned);

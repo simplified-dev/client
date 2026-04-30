@@ -66,4 +66,21 @@ public final class RetryableApiException extends RetryableException {
         return this.wrappedException;
     }
 
+    /**
+     * Suppresses stack-trace capture for this retry envelope.
+     * <p>
+     * The wrapped {@link ApiException} already carries the full HTTP context
+     * (status, headers, body, network details) needed for diagnosis, and the
+     * retry pipeline allocates one of these per back-off attempt. Returning
+     * {@code this} without populating the trace eliminates the per-instance
+     * {@link Throwable#fillInStackTrace()} cost on hot retry paths such as
+     * {@code 429} storms.
+     *
+     * @return this exception, with no stack trace populated
+     */
+    @Override
+    public synchronized Throwable fillInStackTrace() {
+        return this;
+    }
+
 }

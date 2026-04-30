@@ -5,6 +5,9 @@ import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.HashMap;
+import java.util.Map;
+
 /**
  * Enumeration of HTTP response status codes, providing a strongly-typed representation of
  * every standard, vendor-specific, and application-specific status code used by the HTTP
@@ -318,6 +321,21 @@ public enum HttpStatus {
     /** {@code 999 Unknown Error} - an unclassifiable Java-level error occurred. */
     UNKNOWN_ERROR(999, HttpState.JAVA_ERROR);
 
+    /** Cached snapshot of {@link #values()} reused by lookups and iteration to avoid the per-call defensive array clone. */
+    private static final HttpStatus @NotNull [] CACHED_VALUES = values();
+
+    /** Index of status codes to enum constants for O(1) lookup by numeric code. */
+    private static final @NotNull Map<Integer, HttpStatus> BY_CODE;
+
+    static {
+        Map<Integer, HttpStatus> byCode = new HashMap<>(CACHED_VALUES.length * 2);
+
+        for (HttpStatus value : CACHED_VALUES)
+            byCode.put(value.code, value);
+
+        BY_CODE = Map.copyOf(byCode);
+    }
+
     /** The numeric HTTP status code. */
     private final int code;
 
@@ -353,21 +371,21 @@ public enum HttpStatus {
     /**
      * Resolves the {@link HttpStatus} constant for the given numeric HTTP status code.
      * <p>
-     * Iterates through all defined constants and returns the first whose
-     * {@link #getCode()} matches the provided value. If no match is found,
-     * an {@link IllegalArgumentException} is thrown.
+     * Performs an O(1) lookup against an immutable index of all defined constants and
+     * returns the matching value. If no match is found, an
+     * {@link IllegalArgumentException} is thrown.
      *
      * @param code the numeric HTTP status code to look up
      * @return the {@link HttpStatus} constant matching {@code code}
      * @throws IllegalArgumentException if no constant is defined for {@code code}
      */
     public static @NotNull HttpStatus of(int code) {
-        for (HttpStatus httpCode : HttpStatus.values()) {
-            if (httpCode.getCode() == code)
-                return httpCode;
-        }
+        HttpStatus status = BY_CODE.get(code);
 
-        throw new IllegalArgumentException("Invalid HTTP status code: " + code);
+        if (status == null)
+            throw new IllegalArgumentException("Invalid HTTP status code: " + code);
+
+        return status;
     }
 
 }

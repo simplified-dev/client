@@ -4,6 +4,7 @@ import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.route.RouteDiscovery;
+import feign.FeignException;
 import feign.RequestTemplate;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
@@ -57,7 +58,7 @@ public final class RateLimitException extends ApiException {
      * @param routeMetadata the route metadata providing the bucket identifier and rate-limit policy
      */
     public RateLimitException(@NotNull String methodKey, @NotNull feign.Response response, @NotNull RouteDiscovery.Metadata routeMetadata) {
-        super(methodKey, response, "RateLimit");
+        super(FeignException.errorStatus(methodKey, response), response, "RateLimit", false);
         this.serverEnforced = true;
         this.bucketId = routeMetadata.getRoute();
         this.rateLimit = routeMetadata.getRateLimit();
@@ -78,20 +79,41 @@ public final class RateLimitException extends ApiException {
      * @param routeMetadata the route metadata providing the bucket identifier and rate-limit policy
      */
     public RateLimitException(@NotNull RequestTemplate template, @NotNull RouteDiscovery.Metadata routeMetadata) {
-        super(
-            template.methodMetadata().method().getName(),
-            feign.Response.builder()
-                .status(HttpStatus.TOO_MANY_REQUESTS.getCode())
-                .reason(HttpStatus.TOO_MANY_REQUESTS.getMessage())
-                .headers(template.headers())
-                .request(template.request())
-                .protocolVersion(template.request().protocolVersion())
-                .build(),
-            "RateLimit"
-        );
-        this.serverEnforced = false;
+        this(template.methodMetadata().method().getName(), syntheticResponse(template), routeMetadata, false);
+    }
+
+    /**
+     * Private delegating constructor that ensures the synthetic response is built
+     * once and reused across both the {@link FeignException} factory and the
+     * superclass call.
+     *
+     * @param methodKey the resolved Feign method key for the blocked request
+     * @param response the synthetic {@code 429} response
+     * @param routeMetadata the route metadata providing the bucket identifier and rate-limit policy
+     * @param serverEnforced whether the rate limit was enforced by the remote server
+     */
+    private RateLimitException(@NotNull String methodKey, @NotNull feign.Response response, @NotNull RouteDiscovery.Metadata routeMetadata, boolean serverEnforced) {
+        super(FeignException.errorStatus(methodKey, response), response, "RateLimit", false);
+        this.serverEnforced = serverEnforced;
         this.bucketId = routeMetadata.getRoute();
         this.rateLimit = routeMetadata.getRateLimit();
+    }
+
+    /**
+     * Builds the synthetic {@code 429 Too Many Requests} response used by the
+     * client-enforced constructor.
+     *
+     * @param template the request template to fabricate a response for
+     * @return a synthetic feign response carrying the {@code 429} status
+     */
+    private static @NotNull feign.Response syntheticResponse(@NotNull RequestTemplate template) {
+        return feign.Response.builder()
+            .status(HttpStatus.TOO_MANY_REQUESTS.getCode())
+            .reason(HttpStatus.TOO_MANY_REQUESTS.getMessage())
+            .headers(template.headers())
+            .request(template.request())
+            .protocolVersion(template.request().protocolVersion())
+            .build();
     }
 
 }

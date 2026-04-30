@@ -63,11 +63,12 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
     public void apply(@NotNull RequestTemplate template) {
         Method method = template.methodMetadata().method();
         RouteDiscovery.Metadata routeMetadata = this.routeDiscovery.getMetadata(method);
+        long now = System.currentTimeMillis();
 
-        if (this.rateLimitManager.isRateLimited(routeMetadata.getRoute(), routeMetadata.getRateLimit()))
+        if (this.rateLimitManager.isRateLimited(routeMetadata.getRoute(), routeMetadata.getRateLimit(), now))
             throw new RateLimitException(template, routeMetadata);
 
-        this.rateLimitManager.trackRequest(routeMetadata.getRoute(), routeMetadata.getRateLimit());
+        this.rateLimitManager.trackRequest(routeMetadata.getRoute(), routeMetadata.getRateLimit(), now);
 
         template.header(ROUTE_ID_HEADER, routeMetadata.getRoute());
         template.target(routeMetadata.getFullUrl());

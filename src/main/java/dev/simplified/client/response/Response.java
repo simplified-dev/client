@@ -4,7 +4,6 @@ import dev.simplified.client.request.Request;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.collection.tuple.pair.Pair;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
@@ -21,6 +20,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 /**
@@ -151,15 +151,23 @@ public interface Response<T> {
      *         unmodifiable {@link ConcurrentList} value lists, with internal headers removed
      */
     static @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders(@NotNull Map<String, Collection<String>> headers) {
-        return headers.entrySet()
-            .stream()
-            .filter(entry -> !entry.getValue().isEmpty())
-            .filter(entry -> !NetworkDetails.isInternalHeader(entry.getKey()))
-            .map(entry -> Pair.of(
-                entry.getKey(),
-                (ConcurrentList<String>) Concurrent.newUnmodifiableList(entry.getValue())
-            ))
-            .collect(Concurrent.toUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER));
+        TreeMap<String, ConcurrentList<String>> sorted = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+
+        for (Map.Entry<String, Collection<String>> entry : headers.entrySet()) {
+            Collection<String> values = entry.getValue();
+
+            if (values.isEmpty())
+                continue;
+
+            String key = entry.getKey();
+
+            if (NetworkDetails.isInternalHeader(key))
+                continue;
+
+            sorted.put(key, Concurrent.newUnmodifiableList(values));
+        }
+
+        return Concurrent.newUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER, sorted);
     }
 
     /**

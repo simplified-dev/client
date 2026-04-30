@@ -3,9 +3,6 @@ package dev.simplified.client.request.expander;
 import feign.Param;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Arrays;
-import java.util.stream.Collectors;
-
 /**
  * A Feign {@link Param.Expander} that converts a {@code String[]} into a comma-separated
  * list of double-quoted elements suitable for inclusion in a query parameter or URI template.
@@ -29,10 +26,17 @@ public final class StringArrayQuoteExpander implements Param.Expander {
     /** {@inheritDoc} */
     @Override
     public String expand(@NotNull Object value) {
-        if (String[].class.isAssignableFrom(value.getClass())) {
-            return Arrays.stream((String[]) value)
-                .map(str -> String.format("\"%s\"", str))
-                .collect(Collectors.joining(","));
+        if (value instanceof String[] strings) {
+            StringBuilder sb = new StringBuilder(strings.length * 8);
+
+            for (int i = 0; i < strings.length; i++) {
+                if (i > 0)
+                    sb.append(',');
+
+                sb.append('"').append(strings[i]).append('"');
+            }
+
+            return sb.toString();
         }
 
         return String.valueOf(value);

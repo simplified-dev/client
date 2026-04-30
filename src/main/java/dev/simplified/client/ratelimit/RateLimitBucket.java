@@ -52,24 +52,34 @@ class RateLimitBucket {
     }
 
     /**
-     * Determines whether this bucket has exhausted its quota for the current
-     * window.
+     * Determines whether this bucket has exhausted its quota for the current window.
      * <p>
-     * If the current window has elapsed, the counter is atomically reset and
-     * the method returns {@code false}.  Buckets backed by an
-     * {@linkplain RateLimit#isUnlimited() unlimited} policy always return
-     * {@code false}.
+     * If the current window has elapsed, the counter is atomically reset and the method returns {@code false}.
+     * Buckets backed by an {@linkplain RateLimit#isUnlimited() unlimited} policy always return {@code false}.
      *
      * @return {@code true} if the request count has reached the configured
      *         limit and the window has not yet expired; {@code false} otherwise
      */
     public boolean isRateLimited() {
+        return this.isRateLimited(System.currentTimeMillis());
+    }
+
+    /**
+     * Determines whether this bucket has exhausted its quota for the current window.
+     * <p>
+     * Accepts a pre-sampled epoch-millisecond timestamp, allowing callers that already hold a clock
+     * reading to avoid an extra {@link System#currentTimeMillis()} sample.
+     *
+     * @param now the pre-sampled epoch-millisecond timestamp to evaluate the window against
+     * @return {@code true} if the request count has reached the configured
+     *         limit and the window has not yet expired; {@code false} otherwise
+     */
+    public boolean isRateLimited(long now) {
         RateLimit limit = rateLimit.get();
         if (limit.isUnlimited()) {
             return false;
         }
 
-        long now = System.currentTimeMillis();
         long start = windowStart.get();
         long windowMillis = limit.getWindowDurationMillis();
 
@@ -89,18 +99,27 @@ class RateLimitBucket {
     /**
      * Records a single request against this bucket.
      * <p>
-     * If the current window has elapsed, the counter is atomically reset to
-     * {@code 1} (counting the current request as the first in the new window).
-     * Requests against an {@linkplain RateLimit#isUnlimited() unlimited} policy
-     * are silently ignored.
+     * If the current window has elapsed, the counter is atomically reset to {@code 1} (counting the current request
+     * as the first in the new window). Requests against an {@linkplain RateLimit#isUnlimited() unlimited} policy are silently ignored.
      */
     public void trackRequest() {
+        this.trackRequest(System.currentTimeMillis());
+    }
+
+    /**
+     * Records a single request against this bucket.
+     * <p>
+     * Accepts a pre-sampled epoch-millisecond timestamp, allowing callers that already hold a clock
+     * reading to avoid an extra {@link System#currentTimeMillis()} sample.
+     *
+     * @param now the pre-sampled epoch-millisecond timestamp to record this request against
+     */
+    public void trackRequest(long now) {
         RateLimit limit = this.rateLimit.get();
 
         if (limit.isUnlimited())
             return;
 
-        long now = System.currentTimeMillis();
         long start = this.windowStart.get();
         long windowMillis = limit.getWindowDurationMillis();
 

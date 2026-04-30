@@ -58,6 +58,9 @@ public enum HttpState {
     /** Application-level Java error responses ({@code 990-999}). */
     JAVA_ERROR(990, 999, true);
 
+    /** Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone. */
+    private static final HttpState @NotNull [] CACHED_VALUES = values();
+
     /** The human-readable title derived from the constant name, formatted with {@link StringUtil#capitalizeFully(String)}. */
     private final @NotNull String title;
 
@@ -116,7 +119,7 @@ public enum HttpState {
      *                                  defined state range
      */
     public static @NotNull HttpState of(int code) {
-        for (HttpState httpState : values()) {
+        for (HttpState httpState : CACHED_VALUES) {
             if (httpState == SERVER_ERROR)
                 continue;
 

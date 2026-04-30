@@ -77,6 +77,20 @@ public class RateLimitManager {
     }
 
     /**
+     * Variant of {@link #isRateLimited(String, RateLimit)} that accepts a pre-sampled
+     * epoch-millisecond timestamp, allowing callers that already hold a clock reading to
+     * avoid an extra {@link System#currentTimeMillis()} sample.
+     *
+     * @param bucketId the route identifier to check
+     * @param rateLimit the rate-limit policy to use if the bucket must be created
+     * @param now the pre-sampled epoch-millisecond timestamp to evaluate the window against
+     * @return {@code true} if the bucket is currently rate-limited; {@code false} otherwise
+     */
+    public boolean isRateLimited(@NotNull String bucketId, @NotNull RateLimit rateLimit, long now) {
+        return this.getOrCreateBucket(bucketId, rateLimit).isRateLimited(now);
+    }
+
+    /**
      * Records a single request against the bucket identified by {@code bucketId}.
      * <p>
      * Creates the bucket with the supplied {@link RateLimit} policy if it does
@@ -87,6 +101,19 @@ public class RateLimitManager {
      */
     public void trackRequest(@NotNull String bucketId, @NotNull RateLimit rateLimit) {
         this.getOrCreateBucket(bucketId, rateLimit).trackRequest();
+    }
+
+    /**
+     * Variant of {@link #trackRequest(String, RateLimit)} that accepts a pre-sampled
+     * epoch-millisecond timestamp, allowing callers that already hold a clock reading to
+     * avoid an extra {@link System#currentTimeMillis()} sample.
+     *
+     * @param bucketId the route identifier to track
+     * @param rateLimit the rate-limit policy to use if the bucket must be created
+     * @param now the pre-sampled epoch-millisecond timestamp to record this request against
+     */
+    public void trackRequest(@NotNull String bucketId, @NotNull RateLimit rateLimit, long now) {
+        this.getOrCreateBucket(bucketId, rateLimit).trackRequest(now);
     }
 
     /**

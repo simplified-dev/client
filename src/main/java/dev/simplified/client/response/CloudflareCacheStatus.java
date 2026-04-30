@@ -4,7 +4,9 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Enumeration of Cloudflare CDN cache statuses, representing the caching disposition
@@ -57,6 +59,21 @@ public enum CloudflareCacheStatus {
     /** The HTTP response header key used by Cloudflare to communicate cache status. */
     public static final @NotNull String HEADER_KEY = "CF-Cache-Status";
 
+    /** Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone. */
+    private static final CloudflareCacheStatus @NotNull [] CACHED_VALUES = values();
+
+    /** Index of uppercase status names to enum constants for O(1) case-insensitive lookup. */
+    private static final @NotNull Map<String, CloudflareCacheStatus> BY_NAME;
+
+    static {
+        Map<String, CloudflareCacheStatus> byName = new HashMap<>(CACHED_VALUES.length * 2);
+
+        for (CloudflareCacheStatus value : CACHED_VALUES)
+            byName.put(value.name(), value);
+
+        BY_NAME = Map.copyOf(byName);
+    }
+
     /** A human-readable description of the caching behavior represented by this constant. */
     private final @NotNull String description;
 
@@ -73,10 +90,8 @@ public enum CloudflareCacheStatus {
      *         no constant matches the provided name
      */
     public static @NotNull CloudflareCacheStatus of(@NotNull String name) {
-        return Arrays.stream(values())
-            .filter(value -> value.name().equalsIgnoreCase(name))
-            .findFirst()
-            .orElse(UNKNOWN);
+        CloudflareCacheStatus status = BY_NAME.get(name.toUpperCase(Locale.ROOT));
+        return status != null ? status : UNKNOWN;
     }
 
 }

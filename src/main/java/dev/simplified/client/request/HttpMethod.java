@@ -4,7 +4,9 @@ import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * Enumeration of standard HTTP request methods as defined by RFC 7231 and RFC 5789.
@@ -50,6 +52,21 @@ public enum HttpMethod {
 
     /** HTTP PATCH method; applies partial modifications to a resource using the supplied request body. */
     PATCH(true);
+
+    /** Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone. */
+    private static final HttpMethod @NotNull [] CACHED_VALUES = values();
+
+    /** Index of uppercase method names to enum constants for O(1) lookup by canonical name. */
+    private static final @NotNull Map<String, HttpMethod> BY_NAME;
+
+    static {
+        Map<String, HttpMethod> byName = new HashMap<>(CACHED_VALUES.length * 2);
+
+        for (HttpMethod value : CACHED_VALUES)
+            byName.put(value.name(), value);
+
+        BY_NAME = Map.copyOf(byName);
+    }
 
     /** Whether this HTTP method conventionally carries a request body. */
     private final boolean withBody;
@@ -104,10 +121,8 @@ public enum HttpMethod {
      * @return the matching {@code HttpMethod}, or {@link #GET} if no match is found
      */
     public static @NotNull HttpMethod of(@NotNull String name) {
-        return Arrays.stream(values())
-            .filter(value -> value.name().equalsIgnoreCase(name))
-            .findFirst()
-            .orElse(GET);
+        HttpMethod method = BY_NAME.get(name.toUpperCase(Locale.ROOT));
+        return method != null ? method : GET;
     }
 
 }

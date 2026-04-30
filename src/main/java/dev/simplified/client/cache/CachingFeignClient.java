@@ -12,7 +12,6 @@ import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -275,7 +274,8 @@ public final class CachingFeignClient implements Client {
 
         cached.getHeaders()
             .getOptional("Last-Modified")
-            .flatMap(list -> list.stream().findFirst())
+            .filter(list -> !list.isEmpty())
+            .map(List::getFirst)
             .ifPresent(lastMod -> headers.put("If-Modified-Since", List.of(lastMod)));
 
         return Request.create(
@@ -298,16 +298,16 @@ public final class CachingFeignClient implements Client {
      * @return a new feign.Request with timing headers stamped
      */
     private static @NotNull Request buildSyntheticRequest(@NotNull Request original, @NotNull Instant now) {
-        String nowIso = now.toString();
+        List<String> nowList = List.of(now.toString());
         Map<String, Collection<String>> headers = new HashMap<>(original.headers());
 
-        headers.put(NetworkDetails.REQUEST_START, List.of(nowIso));
-        headers.put(NetworkDetails.DNS_START, List.of(nowIso));
-        headers.put(NetworkDetails.DNS_END, List.of(nowIso));
-        headers.put(NetworkDetails.TCP_CONNECT_START, List.of(nowIso));
-        headers.put(NetworkDetails.TCP_CONNECT_END, List.of(nowIso));
-        headers.put(NetworkDetails.TLS_HANDSHAKE_START, List.of(nowIso));
-        headers.put(NetworkDetails.TLS_HANDSHAKE_END, List.of(nowIso));
+        headers.put(NetworkDetails.REQUEST_START, nowList);
+        headers.put(NetworkDetails.DNS_START, nowList);
+        headers.put(NetworkDetails.DNS_END, nowList);
+        headers.put(NetworkDetails.TCP_CONNECT_START, nowList);
+        headers.put(NetworkDetails.TCP_CONNECT_END, nowList);
+        headers.put(NetworkDetails.TLS_HANDSHAKE_START, nowList);
+        headers.put(NetworkDetails.TLS_HANDSHAKE_END, nowList);
 
         return Request.create(
             original.httpMethod(),
@@ -338,7 +338,10 @@ public final class CachingFeignClient implements Client {
     ) {
         TreeMap<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-        cached.getHeaders().forEach((name, values) -> headers.put(name, new ArrayList<>(values)));
+        // The cached header lists are already unmodifiable ConcurrentLists; the caller
+        // (Feign's response builder) consumes them read-only, so reuse the references
+        // directly instead of allocating a fresh ArrayList per header.
+        headers.putAll(cached.getHeaders());
 
         headers.put("Age", List.of(Long.toString(ageSeconds)));
         headers.put(ResponseCache.CACHE_HIT_HEADER, List.of("true"));

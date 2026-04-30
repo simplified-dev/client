@@ -76,28 +76,29 @@ public final class TimedSecureConnectionSocketFactory implements LayeredConnecti
      */
     @Override
     public Socket connectSocket(int connectTimeout, @NotNull Socket socket, @NotNull HttpHost host, @NotNull InetSocketAddress remoteAddress, InetSocketAddress localAddress, @NotNull HttpContext context) throws IOException {
+        // Anchor a single wall-clock Instant against a monotonic nanoTime baseline so that
+        // subsequent stopwatch boundaries can be derived via nanoTime deltas (single
+        // non-allocating native call) instead of paying for Instant.now() syscalls per sample.
+        Instant anchorInstant = Instant.now();
+        long anchorNanos = System.nanoTime();
+
         // Time DNS resolution
-        Instant dnsStart = Instant.now();
+        long dnsStartNanos = System.nanoTime();
         dnsResolver.resolve(host.getHostName());
-        Instant dnsEnd = Instant.now();
-        context.setAttribute(NetworkDetails.DNS_START, dnsStart);
-        context.setAttribute(NetworkDetails.DNS_END, dnsEnd);
+        long dnsEndNanos = System.nanoTime();
+        context.setAttribute(NetworkDetails.DNS_START, instantAt(anchorInstant, anchorNanos, dnsStartNanos));
+        context.setAttribute(NetworkDetails.DNS_END, instantAt(anchorInstant, anchorNanos, dnsEndNanos));
 
         // Time TCP + TLS connection (combined in initial connect for HTTPS)
-        Instant tcpStart = Instant.now();
+        long tcpStartNanos = System.nanoTime();
         Socket result = delegate.connectSocket(connectTimeout, socket, host, remoteAddress, localAddress, context);
-        Instant tcpEnd = Instant.now();
+        long tcpEndNanos = System.nanoTime();
 
         // For HTTPS, this includes both TCP and TLS handshake
-        context.setAttribute(NetworkDetails.TCP_CONNECT_START, tcpStart);
-        context.setAttribute(NetworkDetails.TCP_CONNECT_END, tcpEnd);
+        context.setAttribute(NetworkDetails.TCP_CONNECT_START, instantAt(anchorInstant, anchorNanos, tcpStartNanos));
+        context.setAttribute(NetworkDetails.TCP_CONNECT_END, instantAt(anchorInstant, anchorNanos, tcpEndNanos));
 
-        // Extract TLS info
-        if (result instanceof SSLSocket) {
-            SSLSession session = ((SSLSocket) result).getSession();
-            context.setAttribute(NetworkDetails.TLS_PROTOCOL, session.getProtocol());
-            context.setAttribute(NetworkDetails.TLS_CIPHER, session.getCipherSuite());
-        }
+        recordTlsMetadata(result, context);
 
         return result;
     }
@@ -107,21 +108,53 @@ public final class TimedSecureConnectionSocketFactory implements LayeredConnecti
      */
     @Override
     public Socket createLayeredSocket(@NotNull Socket socket, @NotNull String target, int port, @NotNull HttpContext context) throws IOException {
-        // Time TLS handshake specifically (when layering TLS over existing connection)
-        Instant tlsStart = Instant.now();
-        Socket result = delegate.createLayeredSocket(socket, target, port, context);
-        Instant tlsEnd = Instant.now();
-        context.setAttribute(NetworkDetails.TLS_HANDSHAKE_START, tlsStart);
-        context.setAttribute(NetworkDetails.TLS_HANDSHAKE_END, tlsEnd);
+        // Anchor a single wall-clock Instant against a monotonic nanoTime baseline so that
+        // the TLS handshake boundaries can be derived from nanoTime deltas instead of
+        // paying for an Instant.now() syscall on each sample.
+        Instant anchorInstant = Instant.now();
+        long anchorNanos = System.nanoTime();
 
-        // Extract TLS info
-        if (result instanceof SSLSocket) {
-            SSLSession session = ((SSLSocket) result).getSession();
+        // Time TLS handshake specifically (when layering TLS over existing connection)
+        long tlsStartNanos = System.nanoTime();
+        Socket result = delegate.createLayeredSocket(socket, target, port, context);
+        long tlsEndNanos = System.nanoTime();
+        context.setAttribute(NetworkDetails.TLS_HANDSHAKE_START, instantAt(anchorInstant, anchorNanos, tlsStartNanos));
+        context.setAttribute(NetworkDetails.TLS_HANDSHAKE_END, instantAt(anchorInstant, anchorNanos, tlsEndNanos));
+
+        recordTlsMetadata(result, context);
+
+        return result;
+    }
+
+    /**
+     * Records the negotiated TLS protocol and cipher suite onto the given context when the
+     * connected socket is an {@link SSLSocket}. No-op for plain sockets.
+     *
+     * @param socket the socket returned by the delegate
+     * @param context the HTTP execution context to populate
+     */
+    private static void recordTlsMetadata(@NotNull Socket socket, @NotNull HttpContext context) {
+        if (socket instanceof SSLSocket sslSocket) {
+            SSLSession session = sslSocket.getSession();
             context.setAttribute(NetworkDetails.TLS_PROTOCOL, session.getProtocol());
             context.setAttribute(NetworkDetails.TLS_CIPHER, session.getCipherSuite());
         }
+    }
 
-        return result;
+    /**
+     * Derives an {@link Instant} for the given monotonic-clock sample by offsetting the
+     * anchor instant by the elapsed nanoseconds between the anchor and sample readings.
+     * Because {@link System#nanoTime()} is monotonic, the resulting timestamps preserve
+     * accurate elapsed-time semantics across NTP adjustments that would perturb
+     * {@link Instant#now()}.
+     *
+     * @param anchorInstant the wall-clock anchor sampled at the start of the measurement window
+     * @param anchorNanos the monotonic-clock reading captured alongside {@code anchorInstant}
+     * @param sampleNanos the monotonic-clock reading at the moment to derive an instant for
+     * @return the wall-clock instant corresponding to {@code sampleNanos}
+     */
+    private static @NotNull Instant instantAt(@NotNull Instant anchorInstant, long anchorNanos, long sampleNanos) {
+        return anchorInstant.plusNanos(sampleNanos - anchorNanos);
     }
 
 }

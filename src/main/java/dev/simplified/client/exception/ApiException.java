@@ -153,6 +153,36 @@ public class ApiException extends RuntimeException implements Response<Optional<
     }
 
     /**
+     * Constructs an {@code ApiException} from a {@link FeignException} and its
+     * associated raw response, with control over whether a stack trace is captured.
+     * <p>
+     * Subclasses representing expected, high-frequency error conditions (e.g. rate
+     * limiting) pass {@code false} for {@code writableStackTrace} to avoid the
+     * per-instance cost of {@link Throwable#fillInStackTrace()}. The HTTP context
+     * (status, headers, body, request URL, {@link NetworkDetails}) carried by
+     * {@code ApiException} is sufficient for diagnosis in those cases.
+     *
+     * @param exception the Feign exception wrapping the HTTP error
+     * @param response the raw Feign HTTP response used to capture {@link NetworkDetails}
+     * @param name a short name classifying this error type
+     * @param writableStackTrace whether this exception should capture a stack trace
+     */
+    protected ApiException(@NotNull FeignException exception, @NotNull feign.Response response, @NotNull String name, boolean writableStackTrace) {
+        super(exception.getMessage(), exception.getCause(), true, writableStackTrace);
+        this.name = name;
+        this.status = HttpStatus.of(exception.status());
+        this.body = exception.responseBody().map(byteBuffer -> StringUtil.toEncodedString(byteBuffer.array(), StandardCharsets.UTF_8));
+        this.details = new NetworkDetails(response);
+        this.headers = Response.getHeaders(exception.responseHeaders());
+        this.response = exception::getMessage;
+        this.feignRequest = exception.request();
+        this.request = new Request.Impl(
+            HttpMethod.of(exception.request().httpMethod().name()),
+            exception.request().url()
+        );
+    }
+
+    /**
      * Deserializes a JSON string into an instance of the specified class.
      * <p>
      * Returns {@code null} if the input is {@code null} or if a
