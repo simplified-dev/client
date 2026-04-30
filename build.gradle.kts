@@ -1,5 +1,7 @@
 plugins {
     id("java-library")
+    id("me.champeau.jmh") version "0.7.2"
+    idea
 }
 
 group = "dev.simplified"
@@ -45,4 +47,29 @@ dependencies {
 
     // Caching
     api(libs.caffeine)
+
+    // JMH benchmarks (only used by the jmh source set)
+    jmh("org.openjdk.jmh:jmh-core:1.37")
+    jmh("org.openjdk.jmh:jmh-generator-annprocess:1.37")
+    jmhAnnotationProcessor("org.openjdk.jmh:jmh-generator-annprocess:1.37")
+}
+
+jmh {
+    fork.set(1)
+    warmupIterations.set(3)
+    iterations.set(5)
+    timeOnIteration.set("2s")
+    warmup.set("1s")
+    benchmarkMode.set(listOf("avgt"))
+    timeUnit.set("ns")
+    profilers.set(listOf("gc"))
+    resultFormat.set("JSON")
+    resultsFile.set(project.layout.buildDirectory.file("reports/jmh/results.json"))
+}
+
+idea {
+    module {
+        testSources.from(sourceSets["jmh"].java.srcDirs)
+        testResources.from(sourceSets["jmh"].resources.srcDirs)
+    }
 }
