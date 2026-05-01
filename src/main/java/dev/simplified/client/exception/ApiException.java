@@ -17,9 +17,11 @@ import feign.Util;
 import lombok.AccessLevel;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
@@ -53,7 +55,7 @@ import java.util.Optional;
  * @see ClientErrorDecoder
  */
 @Getter
-public class ApiException extends RuntimeException implements Response<Optional<String>> {
+public class ApiException extends RuntimeException implements Response<Optional<byte[]>> {
 
     /** Constant flag indicating this response represents an error. */
     private final boolean error = true;
@@ -71,9 +73,9 @@ public class ApiException extends RuntimeException implements Response<Optional<
     @Getter(AccessLevel.PACKAGE)
     private final @NotNull feign.Request feignRequest;
 
-    /** Memoized UTF-8 view of the response body bytes, or {@link Optional#empty()} if the body was absent. */
+    /** Memoized response body bytes, or {@link Optional#empty()} if the body was absent. */
     @Getter(AccessLevel.NONE)
-    private final @NotNull Lazy<Optional<String>> body;
+    private final @NotNull Lazy<Optional<byte[]>> body;
 
     /** Memoized network timing and TLS metadata derived from {@link #anchor}. */
     private final @NotNull Lazy<NetworkDetails> details;
@@ -110,6 +112,23 @@ public class ApiException extends RuntimeException implements Response<Optional<
     }
 
     /**
+     * Constructs an {@code ApiException} from a Feign method key and a buffered anchor.
+     * <p>
+     * Wraps the anchor in a {@link FeignException} via
+     * {@link FeignException#errorStatus(String, feign.Response)} and delegates to the
+     * canonical {@link #ApiException(FeignException, feign.Response, String) public
+     * constructor}. Subclasses that only have access to the method key invoke this form
+     * via {@code super(methodKey, response, name)}.
+     *
+     * @param methodKey the Feign method key identifying the endpoint that failed
+     * @param anchor the buffered Feign HTTP response
+     * @param name a short name classifying this error type
+     */
+    public ApiException(@NotNull String methodKey, @NotNull feign.Response anchor, @NotNull String name) {
+        this(FeignException.errorStatus(methodKey, anchor), anchor, name);
+    }
+
+    /**
      * Constructs an {@code ApiException} from a {@link FeignException} and its associated
      * buffered anchor, with control over whether a stack trace is captured.
      * <p>
@@ -132,9 +151,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
         this.feignRequest = source.request();
         this.status = HttpStatus.of(source.status());
         byte[] bodyBytes = readAnchorBytes(anchor);
-        this.body = Lazy.of(() -> bodyBytes.length == 0
-            ? Optional.empty()
-            : Optional.of(new String(bodyBytes, StandardCharsets.UTF_8)));
+        this.body = Lazy.of(() -> bodyBytes.length == 0 ? Optional.empty() : Optional.of(bodyBytes));
         this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
         this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
         this.request = Lazy.of(() -> new Request.Impl(
@@ -144,25 +161,8 @@ public class ApiException extends RuntimeException implements Response<Optional<
         this.response = source::getMessage;
     }
 
-    /**
-     * Constructs an {@code ApiException} from a Feign method key and a buffered anchor.
-     * <p>
-     * Wraps the anchor in a {@link FeignException} via
-     * {@link FeignException#errorStatus(String, feign.Response)} and delegates to the
-     * canonical {@link #ApiException(FeignException, feign.Response, String) public
-     * constructor}.
-     *
-     * @param methodKey the Feign method key identifying the endpoint that failed
-     * @param anchor the buffered Feign HTTP response
-     * @param name a short name classifying this error type
-     * @return a new {@code ApiException} anchored on {@code anchor}
-     */
-    public static @NotNull ApiException fromMethodKey(@NotNull String methodKey, @NotNull feign.Response anchor, @NotNull String name) {
-        return new ApiException(FeignException.errorStatus(methodKey, anchor), anchor, name);
-    }
-
     @Override
-    public @NotNull Optional<String> getBody() {
+    public @NotNull Optional<byte[]> getBody() {
         return this.body.get();
     }
 
@@ -204,25 +204,31 @@ public class ApiException extends RuntimeException implements Response<Optional<
     }
 
     /**
-     * Deserializes a JSON string into an instance of the specified class.
+     * Deserializes the response body bytes into an instance of the specified class via the
+     * supplied {@link Gson}.
      * <p>
-     * Returns {@code null} if the input is {@code null} or if a
-     * {@link JsonSyntaxException} is thrown during deserialization, allowing
-     * subclass error decoders to attempt parsing without risking an unhandled
-     * exception.
+     * Reads the bytes from {@link #getBody()}, decodes them as UTF-8 into a streaming
+     * {@link Reader}, and hands the reader to {@code gson} so the parse runs directly off
+     * the captured byte array without an intermediate {@link String} allocation. Returns
+     * {@link Optional#empty()} when the body is absent, when {@code gson} returns
+     * {@code null}, or when deserialization throws a {@link JsonSyntaxException} or
+     * {@link IOException} - allowing subclass error decoders to fall back to a stub
+     * response without surfacing the parse failure.
      *
      * @param gson the Gson instance to use for deserialization
-     * @param json the JSON string to deserialize, may be {@code null}
      * @param classOfT the target class to deserialize into
      * @param <T> the type of the desired object
-     * @return the deserialized object, or {@code null} if deserialization fails
+     * @return the deserialized object, or {@link Optional#empty()} if the body is absent
+     *         or deserialization fails
      */
-    protected final @Nullable <T> T fromJson(@NotNull Gson gson, @Nullable String json, @NotNull Class<T> classOfT) throws JsonSyntaxException {
-        try {
-            return gson.fromJson(json, classOfT);
-        } catch (JsonSyntaxException jsex) {
-            return null;
-        }
+    protected final @NotNull <T> Optional<T> fromJson(@NotNull Gson gson, @NotNull Class<T> classOfT) {
+        return this.getBody().flatMap(bytes -> {
+            try (Reader reader = new InputStreamReader(new ByteArrayInputStream(bytes), StandardCharsets.UTF_8)) {
+                return Optional.ofNullable(gson.fromJson(reader, classOfT));
+            } catch (IOException | JsonSyntaxException ex) {
+                return Optional.empty();
+            }
+        });
     }
 
 }

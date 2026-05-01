@@ -8,7 +8,6 @@ import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
-import feign.FeignException;
 import feign.codec.Decoder;
 import feign.codec.Encoder;
 import feign.gson.GsonDecoder;
@@ -374,16 +373,7 @@ public final class ClientConfig<C extends Contract> {
      * @return the default error decoder
      */
     private static @NotNull ClientErrorDecoder defaultErrorDecoder() {
-        return (methodKey, response) -> new ApiException(
-            FeignException.errorStatus(
-                methodKey,
-                response,
-                null,
-                null
-            ),
-            response,
-            "Client"
-        );
+        return (methodKey, response) -> new ApiException(methodKey, response, "Client");
     }
 
 }

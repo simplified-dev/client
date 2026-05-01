@@ -167,7 +167,7 @@ public class ApiExceptionConstructionBenchmark {
 
         private final @NotNull String name;
         private final @NotNull HttpStatus status;
-        private final @NotNull Optional<String> body;
+        private final @NotNull Optional<byte[]> body;
         private final @NotNull NetworkDetails details;
         private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
         private final @NotNull Request request;
@@ -176,7 +176,7 @@ public class ApiExceptionConstructionBenchmark {
             super(source.getMessage(), source.getCause(), true, true);
             this.name = name;
             this.status = HttpStatus.of(source.status());
-            this.body = source.responseBody().map(buf -> new String(buf.array(), StandardCharsets.UTF_8));
+            this.body = source.responseBody().map(buf -> buf.array().clone());
             this.details = new NetworkDetails(response);
             this.headers = Response.getHeaders(toMutableHeaders(source.responseHeaders()));
             this.request = new Request.Impl(
@@ -186,7 +186,7 @@ public class ApiExceptionConstructionBenchmark {
         }
 
         @NotNull HttpStatus getStatus() { return this.status; }
-        @NotNull Optional<String> getBody() { return this.body; }
+        @NotNull Optional<byte[]> getBody() { return this.body; }
         @NotNull NetworkDetails getDetails() { return this.details; }
         @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() { return this.headers; }
         @NotNull Request getRequest() { return this.request; }

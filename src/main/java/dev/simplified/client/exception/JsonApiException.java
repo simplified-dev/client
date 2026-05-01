@@ -2,7 +2,6 @@ package dev.simplified.client.exception;
 
 import com.google.gson.Gson;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
-import feign.FeignException;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.function.Supplier;
@@ -62,10 +61,8 @@ public abstract class JsonApiException extends ApiException {
         @NotNull Class<E> responseType,
         @NotNull Supplier<E> fallback
     ) {
-        super(FeignException.errorStatus(methodKey, response), response, name);
-        super.response = this.getBody()
-            .map(json -> this.fromJson(gson, json, responseType))
-            .orElse(fallback.get());
+        super(methodKey, response, name);
+        super.response = this.fromJson(gson, responseType).orElseGet(fallback);
     }
 
 }
