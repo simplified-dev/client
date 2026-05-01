@@ -6,12 +6,10 @@ import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.util.Lazy;
-import feign.Util;
 import lombok.AccessLevel;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
-import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
@@ -23,7 +21,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -38,9 +36,9 @@ import java.util.stream.Collectors;
  * commonly needed response characteristics.
  * <p>
  * Three default implementations are provided as nested classes: {@link Impl} carries a
- * lazily-decoded body anchored on the buffered {@link feign.Response}, {@link StreamingImpl}
+ * lazily-decoded body driven by a caller-supplied {@link Supplier}, {@link StreamingImpl}
  * wraps a streaming body whose decode runs eagerly while metadata stays lazy, and
- * {@link Cached} extends {@code Impl} with behavioral accessors that compute RFC 7234 cache
+ * {@link CachedImpl} extends {@code Impl} with behavioral accessors that compute RFC 7234 cache
  * semantics (freshness, age, revalidation capability) from the inherited headers and
  * {@link NetworkDetails}. {@code Cached} adds no new fields - every cache-specific value is
  * derived on demand.
@@ -90,22 +88,6 @@ public interface Response<T> {
             .getOptional(ETag.HEADER_KEY)
             .flatMap(ConcurrentList::findFirst)
             .flatMap(ETag::parse);
-    }
-
-    /**
-     * Returns the raw response body bytes captured during decoding, if any.
-     * <p>
-     * Populated when the response was decoded from a buffered (non-streaming) body; used
-     * by the HTTP response cache to replay cached responses through the decoder pipeline
-     * on conditional-request cache hits. Returns {@link Optional#empty()} for streaming
-     * responses, errors without a body, and exception subtypes such as
-     * {@link dev.simplified.client.exception.ApiException}.
-     *
-     * @return the raw wire bytes for this response, or {@link Optional#empty()} if not
-     *         captured
-     */
-    default @NotNull Optional<byte[]> getRawBody() {
-        return Optional.empty();
     }
 
     /** The deserialized body of the HTTP response, decoded into the parameterized type {@code T}. */
@@ -177,14 +159,15 @@ public interface Response<T> {
 
     /**
      * Lazy buffered-body implementation of {@link Response} anchored on a
-     * {@link feign.Response} whose body is already buffered into a {@code byte[]}.
+     * {@link feign.Response} that supplies metadata (status, headers, request) while the
+     * decoded body is materialized on demand by a caller-supplied {@link Supplier}.
      * <p>
      * The decoded body, network details, headers, and originating request are all derived
-     * on demand from the anchor via memoizing {@link Lazy} holders. Callers that only read
+     * on demand via memoizing {@link Lazy} holders. Callers that only read
      * {@link #getStatus()} pay zero decode cost; callers that read {@link #getBody()} drive
-     * the supplied {@link Function} exactly once to materialize the typed body. The anchor's
-     * body is read once per call to {@link #getRawBody()} (Feign's buffered body API supports
-     * repeated reads on byte-backed bodies, so the read is allocation-light).
+     * the supplied {@link Supplier} exactly once to materialize the typed body. The body
+     * supplier closes over any bytes it needs, so the anchor's body need not be readable
+     * after construction.
      *
      * @param <T> the deserialized type of the response body
      */
@@ -197,9 +180,9 @@ public interface Response<T> {
         /** The HTTP status code and classification, computed eagerly from {@link #anchor}. */
         private final @NotNull HttpStatus status;
 
-        /** The decoder driving {@link #body} on first access; closes over the call site's body type and codec. */
+        /** The decoder driving {@link #body} on first access; closes over the call site's body bytes and codec. */
         @Getter(AccessLevel.NONE)
-        private final @NotNull Function<feign.Response, T> bodyDecoder;
+        private final @NotNull Supplier<T> bodyDecoder;
 
         /** Memoized decoded body, materialized on the first call to {@link #getBody()}. */
         @Getter(AccessLevel.NONE)
@@ -217,17 +200,16 @@ public interface Response<T> {
         /**
          * Constructs a lazy buffered response.
          *
-         * @param anchor the buffered Feign response - must carry a {@code byte[]}-backed body
-         *               so {@link #getBody()} and {@link #getRawBody()} can be invoked
-         *               independently of decode order
-         * @param bodyDecoder the function that materializes the typed body from the anchor on
-         *                    first access
+         * @param anchor the Feign response supplying metadata (status, headers, request) for
+         *               this envelope; its body need not be readable
+         * @param bodyDecoder the supplier that materializes the typed body on first access,
+         *                    typically closing over previously-buffered body bytes
          */
-        public Impl(@NotNull feign.Response anchor, @NotNull Function<feign.Response, T> bodyDecoder) {
+        public Impl(@NotNull feign.Response anchor, @NotNull Supplier<T> bodyDecoder) {
             this.anchor = anchor;
             this.bodyDecoder = bodyDecoder;
             this.status = HttpStatus.of(anchor.status());
-            this.body = Lazy.of(() -> this.bodyDecoder.apply(this.anchor));
+            this.body = Lazy.of(this.bodyDecoder);
             this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
             this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
             this.request = Lazy.of(() -> new Request.Impl(
@@ -256,20 +238,6 @@ public interface Response<T> {
             return this.request.get();
         }
 
-        @Override
-        public @NotNull Optional<byte[]> getRawBody() {
-            feign.Response.Body raw = this.anchor.body();
-
-            if (raw == null)
-                return Optional.empty();
-
-            try {
-                return Optional.of(Util.toByteArray(raw.asInputStream()));
-            } catch (IOException ex) {
-                return Optional.empty();
-            }
-        }
-
         /**
          * Builds a new {@code Impl} that swaps the underlying anchor for {@code newAnchor}
          * while preserving the original body decoder.
@@ -277,10 +245,12 @@ public interface Response<T> {
          * Used by the response cache to rebuild a sanitized envelope (e.g. with hop-by-hop
          * headers stripped, or with {@code 304}-merged headers) without forcing the lazy
          * decoder to run. The returned envelope drops every memoized field on the source
-         * instance; subsequent reads start fresh against {@code newAnchor}.
+         * instance; subsequent reads start fresh against {@code newAnchor}. The shared
+         * {@link Supplier} reference means body bytes captured in its closure follow the
+         * helper through.
          *
-         * @param newAnchor the replacement anchor whose headers, status, request, and body
-         *                  bytes drive the returned envelope
+         * @param newAnchor the replacement anchor whose headers, status, and request drive
+         *                  the returned envelope
          * @return a new {@code Impl} sharing the source decoder but anchored on {@code newAnchor}
          */
         public @NotNull Impl<T> withAnchor(@NotNull feign.Response newAnchor) {
@@ -298,8 +268,8 @@ public interface Response<T> {
      * than a buffered {@code byte[]}. The body is therefore stored as a direct field; the
      * status, headers, and originating request are still derived lazily from the anchor so
      * that callers reading only {@link #getStatus()} skip the headers / request allocations.
-     * Streaming responses are not cacheable - {@link #getRawBody()} always returns
-     * {@link Optional#empty()}.
+     * Streaming responses are not cacheable - the cache layer never receives a streaming
+     * envelope.
      *
      * @param <T> the deserialized type of the streaming body (typically {@link java.io.InputStream})
      */
@@ -366,10 +336,10 @@ public interface Response<T> {
      * is derived on demand from the inherited {@link NetworkDetails} (request / response
      * timings via {@link NetworkDetails#getRoundTrip()}) and the inherited response
      * headers ({@code Cache-Control}, {@code Expires}, {@code Date}, {@code Age},
-     * {@code Vary}, {@code Last-Modified}). Used as the value type of
-     * {@code ResponseCache}'s two-level map, where a cached entry is both a first-class
-     * {@link Response} (status, headers, body, raw bytes) and a carrier of freshness
-     * and revalidation logic.
+     * {@code Vary}, {@code Last-Modified}). Used as the response side of
+     * {@code ResponseCache}'s entry tuple, where the cached entry is both a first-class
+     * {@link Response} (status, headers, body) and a carrier of freshness and revalidation
+     * logic; the body bytes for replay live alongside in the cache's storage tuple.
      * <p>
      * Because directive parsing and header lookups are cheap (a handful of microseconds),
      * storing parsed fields on the entry would offer no meaningful performance benefit over
@@ -378,22 +348,22 @@ public interface Response<T> {
      * the single source of truth.
      * <p>
      * Streaming responses cannot be cached - {@code Cached} extends only {@link Impl} and
-     * never {@link StreamingImpl}, mirroring the storage contract that requires a buffered
-     * {@code byte[]} body.
+     * never {@link StreamingImpl}, mirroring the storage contract that requires buffered
+     * body bytes alongside the entry.
      *
      * @param <T> the deserialized type of the response body
      * @see <a href="https://datatracker.ietf.org/doc/html/rfc7234">RFC 7234 - HTTP/1.1 Caching</a>
      */
-    final class Cached<T> extends Impl<T> {
+    final class CachedImpl<T> extends Impl<T> {
 
         /**
-         * Constructs a cached view over a buffered anchor and decoder, using the same fields
+         * Constructs a cached view over an anchor and body supplier, using the same fields
          * that drive {@link Impl}.
          *
-         * @param anchor the buffered Feign response carrying the cached bytes and headers
-         * @param bodyDecoder the function that materializes the typed body on demand
+         * @param anchor the Feign response supplying cached headers and metadata
+         * @param bodyDecoder the supplier that materializes the typed body on demand
          */
-        private Cached(@NotNull feign.Response anchor, @NotNull Function<feign.Response, T> bodyDecoder) {
+        private CachedImpl(@NotNull feign.Response anchor, @NotNull Supplier<T> bodyDecoder) {
             super(anchor, bodyDecoder);
         }
 
@@ -409,8 +379,8 @@ public interface Response<T> {
          * @param <U> the deserialized body type
          * @return a new {@code Cached} instance sharing {@code source}'s anchor and decoder
          */
-        public static <U> @NotNull Cached<U> from(@NotNull Impl<U> source) {
-            return new Cached<>(source.anchor, source.bodyDecoder);
+        public static <U> @NotNull CachedImpl<U> from(@NotNull Impl<U> source) {
+            return new CachedImpl<>(source.anchor, source.bodyDecoder);
         }
 
         /**

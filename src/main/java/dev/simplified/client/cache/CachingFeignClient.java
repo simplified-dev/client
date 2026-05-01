@@ -77,7 +77,7 @@ public final class CachingFeignClient implements Client {
         HttpMethod method = HttpMethod.of(request.httpMethod().name());
 
         if (method.isCacheable() && !hasConditionalHeaders(request.headers())) {
-            Optional<Response.Cached<?>> lookup = this.responseCache.lookup(method, request.url(), request.headers());
+            Optional<CacheEntry<?>> lookup = this.responseCache.lookup(method, request.url(), request.headers());
 
             if (lookup.isPresent()) {
                 feign.Response shortCircuit = this.serveFromCache(request, options, method, lookup.get());
@@ -98,14 +98,14 @@ public final class CachingFeignClient implements Client {
     // ===== Cache-hit paths =====
 
     /**
-     * Attempts to serve the request from the given cached variant, returning a synthesized
+     * Attempts to serve the request from the given cached entry, returning a synthesized
      * {@link feign.Response} on success or {@code null} if the caller should fall through
      * to the delegate.
      *
      * @param request the original request
      * @param options the Feign request options (used when dispatching a revalidation)
      * @param method the HTTP method of the request
-     * @param cached the cached variant selected by {@link ResponseCache#lookup}
+     * @param entry the cached entry selected by {@link ResponseCache#lookup}
      * @return the synthesized response for a fresh / 304 / stale-if-error path, or
      *         {@code null} if the caller should proceed to the delegate
      * @throws IOException if the delegate fails during a stale revalidation
@@ -114,12 +114,13 @@ public final class CachingFeignClient implements Client {
         @NotNull Request request,
         @NotNull Request.Options options,
         @NotNull HttpMethod method,
-        @NotNull Response.Cached<?> cached
+        @NotNull CacheEntry<?> entry
     ) throws IOException {
         Instant now = Instant.now();
+        Response.CachedImpl<?> cached = entry.response();
 
         if (cached.isFresh(now))
-            return this.synthesizeFreshHit(request, cached, now);
+            return this.synthesizeFreshHit(request, entry, now);
 
         if (!cached.canRevalidate())
             return null;
@@ -134,19 +135,19 @@ public final class CachingFeignClient implements Client {
 
             feign.Util.ensureClosed(response.body());
 
-            return this.synthesizeFreshHit(request, cached, now);
+            return this.synthesizeFreshHit(request, entry, now);
         }
 
         if (isServerError(response.status()) && cached.canServeStaleOnError(now)) {
             feign.Util.ensureClosed(response.body());
-            return this.synthesizeStaleHit(request, cached, now);
+            return this.synthesizeStaleHit(request, entry, now);
         }
 
         return response;
     }
 
     /**
-     * Builds a synthetic {@link feign.Response} that replays the given cached variant's
+     * Builds a synthetic {@link feign.Response} that replays the given cached entry's
      * body and headers without consulting the network.
      * <p>
      * The synthetic request carries the original request URL, method, and caller headers
@@ -158,45 +159,45 @@ public final class CachingFeignClient implements Client {
      * and an {@code X-Internal-Response-Received} timestamp matching the request start.
      *
      * @param originalRequest the original request being short-circuited
-     * @param cached the cached variant whose bytes will be served
+     * @param entry the cached entry whose bytes will be served
      * @param now the synthesized start/end timestamp
      * @return the synthesized response
      */
     private @NotNull feign.Response synthesizeFreshHit(
         @NotNull Request originalRequest,
-        @NotNull Response.Cached<?> cached,
+        @NotNull CacheEntry<?> entry,
         @NotNull Instant now
     ) {
-        long ageSeconds = Math.max(0L, cached.currentAge(now).getSeconds());
-        return this.synthesize(originalRequest, cached, now, ageSeconds, false);
+        long ageSeconds = Math.max(0L, entry.response().currentAge(now).getSeconds());
+        return this.synthesize(originalRequest, entry, now, ageSeconds, false);
     }
 
     /**
-     * Builds a synthetic stale-if-error replay for the given cached variant.
+     * Builds a synthetic stale-if-error replay for the given cached entry.
      * <p>
-     * Identical to {@link #synthesizeFreshHit(Request, Response.Cached, Instant)} except
+     * Identical to {@link #synthesizeFreshHit(Request, CacheEntry, Instant)} except
      * that {@link ResponseCache#CACHE_STALE_HEADER} is added to the response headers so
      * observability callers can distinguish a stale replay from a fresh hit.
      *
      * @param originalRequest the original request
-     * @param cached the cached variant to replay
+     * @param entry the cached entry to replay
      * @param now the synthesized timestamp
      * @return the synthesized stale replay response
      */
     private @NotNull feign.Response synthesizeStaleHit(
         @NotNull Request originalRequest,
-        @NotNull Response.Cached<?> cached,
+        @NotNull CacheEntry<?> entry,
         @NotNull Instant now
     ) {
-        long ageSeconds = Math.max(0L, cached.currentAge(now).getSeconds());
-        return this.synthesize(originalRequest, cached, now, ageSeconds, true);
+        long ageSeconds = Math.max(0L, entry.response().currentAge(now).getSeconds());
+        return this.synthesize(originalRequest, entry, now, ageSeconds, true);
     }
 
     /**
      * Core synthesis helper shared by fresh-hit and stale-hit paths.
      *
      * @param originalRequest the original request that was short-circuited
-     * @param cached the cached variant whose bytes and headers will be served
+     * @param entry the cached entry whose bytes and headers will be served
      * @param now the timestamp for request-start and response-received headers
      * @param ageSeconds the computed {@code Age} value to advertise
      * @param servedStale whether this is a stale-if-error replay
@@ -204,21 +205,21 @@ public final class CachingFeignClient implements Client {
      */
     private @NotNull feign.Response synthesize(
         @NotNull Request originalRequest,
-        @NotNull Response.Cached<?> cached,
+        @NotNull CacheEntry<?> entry,
         @NotNull Instant now,
         long ageSeconds,
         boolean servedStale
     ) {
+        Response.CachedImpl<?> cached = entry.response();
         Map<String, Collection<String>> responseHeaders = buildResponseHeaders(cached, now, ageSeconds, servedStale);
         Request syntheticRequest = buildSyntheticRequest(originalRequest, now);
-        byte[] body = cached.getRawBody().orElse(new byte[0]);
 
         return feign.Response.builder()
             .request(syntheticRequest)
             .status(cached.getStatus().getCode())
             .reason(cached.getStatus().getMessage())
             .headers(responseHeaders)
-            .body(body)
+            .body(entry.body())
             .build();
     }
 
@@ -267,7 +268,7 @@ public final class CachingFeignClient implements Client {
      * @param cached the cached variant carrying the validators
      * @return a copy of the request with conditional headers attached
      */
-    private @NotNull Request withConditionalHeaders(@NotNull Request request, @NotNull Response.Cached<?> cached) {
+    private @NotNull Request withConditionalHeaders(@NotNull Request request, @NotNull Response.CachedImpl<?> cached) {
         Map<String, Collection<String>> headers = new HashMap<>(request.headers());
 
         cached.getETag().ifPresent(etag -> headers.put(ETag.IF_NONE_MATCH_HEADER, List.of(etag.toHeaderValue())));
@@ -331,7 +332,7 @@ public final class CachingFeignClient implements Client {
      * @return the response headers for the synthetic response
      */
     private static @NotNull Map<String, Collection<String>> buildResponseHeaders(
-        @NotNull Response.Cached<?> cached,
+        @NotNull Response.CachedImpl<?> cached,
         @NotNull Instant now,
         long ageSeconds,
         boolean servedStale

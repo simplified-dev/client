@@ -107,7 +107,7 @@ public final class RateLimitException extends ApiException {
      * @return a synthetic feign response carrying the {@code 429} status
      */
     private static @NotNull feign.Response syntheticResponse(@NotNull RequestTemplate template) {
-        // Buffered empty body so the lazy ApiException.body / getRawBody readers see a
+        // Buffered empty body so the ApiException constructor's body-byte capture sees a
         // byte[]-backed body rather than a live stream.
         return feign.Response.builder()
             .status(HttpStatus.TOO_MANY_REQUESTS.getCode())

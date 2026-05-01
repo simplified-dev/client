@@ -24,14 +24,14 @@ import java.util.concurrent.atomic.AtomicReference;
  * The cache is a two-level Caffeine structure: the outer {@link Cache} is keyed by
  * {@link CacheKey.UrlKey} (HTTP method + canonicalized URL) and holds an inner
  * {@link java.util.concurrent.ConcurrentMap ConcurrentHashMap} of
- * {@link CacheKey.VaryFingerprint} to {@link Response.Cached}. This lets Caffeine evict
+ * {@link CacheKey.VaryFingerprint} to {@link Response.CachedImpl}. This lets Caffeine evict
  * whole URL buckets while still honouring content-negotiation variants, and avoids the
  * O(N) partial-key scans a flat composite-key layout would require.
  * <p>
  * Eviction is driven by three layered mechanisms:
  * <ul>
  *   <li><b>Per-entry freshness</b> - {@link ResponseCacheExpiry} computes a TTL for each
- *       bucket from each variant's {@link Response.Cached#freshnessLifetime()
+ *       bucket from each variant's {@link Response.CachedImpl#freshnessLifetime()
  *       freshness lifetime} plus its {@code stale-if-error} window, then clamps it to
  *       the constructor-supplied safety fallback</li>
  *   <li><b>Weight-based eviction</b> - {@link ResponseCacheWeigher} sums raw-body bytes,
@@ -95,8 +95,8 @@ public final class ResponseCache {
      * <p>
      * Deliberately <b>not</b> prefixed with {@code X-Internal-} so that
      * {@link Response#getHeaders(Map)} preserves it in the public view. This lets callers
-     * observe cache hits and lets {@link #store(Response.Impl)} skip re-storing entries that
-     * originated from the cache itself.
+     * observe cache hits and lets {@link #store(Response.Impl, byte[])} skip re-storing
+     * entries that originated from the cache itself.
      */
     public static final @NotNull String CACHE_HIT_HEADER = "X-Cache-Hit";
 
@@ -109,7 +109,7 @@ public final class ResponseCache {
     public static final @NotNull String CACHE_STALE_HEADER = "X-Cache-Served-Stale";
 
     /** The Caffeine-backed two-level cache of URL bucket -> Vary variants. */
-    private final @NotNull Cache<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>>> cache;
+    private final @NotNull Cache<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> cache;
 
     /** The single-slot observability reference returned from {@link #getLastResponse()}. */
     private final @NotNull AtomicReference<Response<?>> lastResponse = new AtomicReference<>();
@@ -179,34 +179,36 @@ public final class ResponseCache {
     // ===== Cache operations =====
 
     /**
-     * Looks up a cached variant matching the given request.
+     * Looks up a cached entry matching the given request.
      * <p>
      * Resolves the outer {@link CacheKey.UrlKey} bucket, then iterates the inner Vary map
-     * and returns the first variant whose {@link Response.Cached#varyHeaderNames() vary
-     * header names} match the current request's headers. Returns {@link Optional#empty()}
-     * if no bucket or variant matches. Freshness and revalidation decisions are the
-     * caller's responsibility (typically {@link CachingFeignClient}).
+     * and returns the first entry whose response's
+     * {@link Response.CachedImpl#varyHeaderNames() vary header names} match the current
+     * request's headers. Returns {@link Optional#empty()} if no bucket or variant matches.
+     * Freshness and revalidation decisions are the caller's responsibility (typically
+     * {@link CachingFeignClient}).
      *
      * @param method the HTTP method of the lookup request
      * @param url the raw URL of the lookup request (will be canonicalized internally)
      * @param requestHeaders the lookup request's headers, used for Vary matching
-     * @return the matching cached variant, or {@link Optional#empty()} if none
+     * @return the matching cached entry, or {@link Optional#empty()} if none
      */
-    public @NotNull Optional<Response.Cached<?>> lookup(
+    public @NotNull Optional<CacheEntry<?>> lookup(
         @NotNull HttpMethod method,
         @NotNull String url,
         @NotNull Map<String, ? extends Collection<String>> requestHeaders
     ) {
         CacheKey.UrlKey key = CacheKey.UrlKey.of(method, url);
-        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>> variants = this.cache.getIfPresent(key);
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants = this.cache.getIfPresent(key);
 
         if (variants == null || variants.isEmpty())
             return Optional.empty();
 
-        for (Response.Cached<?> candidate : variants.values()) {
-            Set<String> varyNames = candidate.varyHeaderNames();
+        for (CacheEntry<?> candidate : variants.values()) {
+            Response.CachedImpl<?> response = candidate.response();
+            Set<String> varyNames = response.varyHeaderNames();
             CacheKey.VaryFingerprint lookupFp = CacheKey.VaryFingerprint.of(varyNames, requestHeaders);
-            CacheKey.VaryFingerprint storedFp = CacheKey.VaryFingerprint.of(varyNames, toMultimap(candidate.getHeaders()));
+            CacheKey.VaryFingerprint storedFp = CacheKey.VaryFingerprint.of(varyNames, toMultimap(response.getHeaders()));
 
             if (lookupFp.equals(storedFp))
                 return Optional.of(candidate);
@@ -216,14 +218,13 @@ public final class ResponseCache {
     }
 
     /**
-     * Stores a decoded response in the cache if it passes the RFC 7234 §3 storage
-     * predicate. No-ops when the storage predicate rejects the response for any reason
-     * (see the class-level Javadoc and inline rules below).
+     * Stores a decoded response and its captured body bytes in the cache if it passes the
+     * RFC 7234 §3 storage predicate. No-ops when the storage predicate rejects the response
+     * for any reason (see the class-level Javadoc and inline rules below).
      * <p>
      * Storage rules:
      * <ul>
      *   <li>{@code Cache-Control: no-store} -> skip</li>
-     *   <li>no raw body captured (streaming, decode failure) -> skip</li>
      *   <li>method is not {@link HttpMethod#isCacheable() cacheable} -> skip</li>
      *   <li>{@code Vary: *} -> skip</li>
      *   <li>status not in the default cacheable set {@code {200, 203, 204, 300, 301, 404,
@@ -232,25 +233,43 @@ public final class ResponseCache {
      *       -> skip</li>
      * </ul>
      * <p>
+     * Streaming responses skip this overload entirely - the decoder pipeline routes them
+     * around the cache because their bodies cannot be replayed.
+     * <p>
      * Before storage, hop-by-hop headers, {@code Content-Encoding}, and {@code Content-Length}
      * are stripped from the response headers so that a replayed entry cannot misrepresent the
      * stored body's transport framing.
      *
      * @param decoded the decoded response to consider for caching
+     * @param body the captured body bytes to store alongside {@code decoded} for replay
      */
-    public void store(@NotNull Response.Impl<?> decoded) {
+    public void store(@NotNull Response.Impl<?> decoded, byte @NotNull [] body) {
         if (!shouldStore(decoded))
             return;
 
-        Response.Impl<?> sanitized = stripTransportHeaders(decoded);
-        Response.Cached<?> cached = Response.Cached.from(sanitized);
+        CacheEntry<?> entry = buildEntry(decoded, body);
+        Response.CachedImpl<?> cached = entry.response();
 
         CacheKey.UrlKey key = CacheKey.UrlKey.of(cached.getRequest().getMethod(), cached.getRequest().getUrl());
         CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(cached.varyHeaderNames(), toMultimap(cached.getHeaders()));
 
-        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>> variants = this.cache.asMap()
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants = this.cache.asMap()
             .computeIfAbsent(key, k -> new ConcurrentHashMap<>());
-        variants.put(fingerprint, cached);
+        variants.put(fingerprint, entry);
+    }
+
+    /**
+     * Wildcard-capturing helper that builds a fresh {@link CacheEntry} from a decoded
+     * response and its captured body bytes.
+     *
+     * @param decoded the decoded response to wrap
+     * @param body the captured body bytes
+     * @param <T> the decoded body type, captured from the wildcard at the call site
+     * @return a new entry pairing the sanitized cached view with the body bytes
+     */
+    private static <T> @NotNull CacheEntry<T> buildEntry(@NotNull Response.Impl<T> decoded, byte @NotNull [] body) {
+        Response.Impl<T> sanitized = stripTransportHeaders(decoded);
+        return new CacheEntry<>(Response.CachedImpl.from(sanitized), body);
     }
 
     /**
@@ -275,7 +294,7 @@ public final class ResponseCache {
      * per <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
      * §4.3.4</a>.
      * <p>
-     * Builds a new {@link Response.Cached} whose headers are the cached entry's headers
+     * Builds a new {@link Response.CachedImpl} whose headers are the cached entry's headers
      * overlaid with the end-to-end headers from the 304 response, never touching
      * {@code Content-Length}, {@code Content-Encoding}, or {@code Transfer-Encoding}. The
      * raw body, status, and request are carried forward unchanged from the cached entry.
@@ -296,12 +315,12 @@ public final class ResponseCache {
         @NotNull CacheKey.VaryFingerprint fingerprint,
         @NotNull Map<String, ? extends Collection<String>> new304Headers
     ) {
-        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>> variants = this.cache.getIfPresent(key);
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants = this.cache.getIfPresent(key);
 
         if (variants == null)
             return;
 
-        Response.Cached<?> existing = variants.get(fingerprint);
+        CacheEntry<?> existing = variants.get(fingerprint);
 
         if (existing == null)
             return;
@@ -318,9 +337,6 @@ public final class ResponseCache {
      * @return {@code true} if the response is eligible for caching
      */
     private static boolean shouldStore(@NotNull Response.Impl<?> decoded) {
-        if (decoded.getRawBody().isEmpty())
-            return false;
-
         HttpMethod method = decoded.getRequest().getMethod();
 
         if (!method.isCacheable())
@@ -376,20 +392,21 @@ public final class ResponseCache {
     }
 
     /**
-     * Merges the headers from a 304 response into an existing cached variant, producing a
-     * fresh {@link Response.Cached} whose anchor carries the merged headers while the body
-     * bytes, status, and request are inherited from the existing variant.
+     * Merges the headers from a 304 response into an existing cached entry, producing a
+     * fresh {@link CacheEntry} whose response anchor carries the merged headers while the
+     * body bytes, status, and request are inherited from the existing entry.
      *
-     * @param existing the cached variant to refresh
+     * @param existing the cached entry to refresh
      * @param new304Headers the headers from the 304 response
      * @param <T> the decoded body type
-     * @return a new {@code Cached} with merged headers and the existing anchor bytes
+     * @return a new {@code CacheEntry} with merged headers and the existing body bytes
      */
-    private static <T> @NotNull Response.Cached<T> mergeHeaders(
-        @NotNull Response.Cached<T> existing,
+    private static <T> @NotNull CacheEntry<T> mergeHeaders(
+        @NotNull CacheEntry<T> existing,
         @NotNull Map<String, ? extends Collection<String>> new304Headers
     ) {
-        feign.Response anchor = existing.getAnchor();
+        Response.CachedImpl<T> existingResponse = existing.response();
+        feign.Response anchor = existingResponse.getAnchor();
         Map<String, Collection<String>> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         merged.putAll(anchor.headers());
 
@@ -410,7 +427,7 @@ public final class ResponseCache {
             .headers(merged)
             .build();
 
-        return Response.Cached.from(existing.withAnchor(mergedAnchor));
+        return new CacheEntry<>(Response.CachedImpl.from(existingResponse.withAnchor(mergedAnchor)), existing.body());
     }
 
     /**

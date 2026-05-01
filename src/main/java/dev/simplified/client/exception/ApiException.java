@@ -101,8 +101,8 @@ public class ApiException extends RuntimeException implements Response<Optional<
      *
      * @param source the Feign exception wrapping the HTTP error
      * @param anchor the buffered Feign HTTP response - must carry a {@code byte[]}-backed
-     *               body so lazy reads of {@link #getBody()} and {@link #getRawBody()}
-     *               do not contend over a consumed stream
+     *               body so the constructor can capture the bytes for the lazy
+     *               {@link #getBody()} reader without contending over a consumed stream
      * @param name a short name classifying this error type
      */
     public ApiException(@NotNull FeignException source, @NotNull feign.Response anchor, @NotNull String name) {
@@ -131,7 +131,10 @@ public class ApiException extends RuntimeException implements Response<Optional<
         this.anchor = anchor;
         this.feignRequest = source.request();
         this.status = HttpStatus.of(source.status());
-        this.body = Lazy.of(() -> decodeBodyUtf8(this.anchor));
+        byte[] bodyBytes = readAnchorBytes(anchor);
+        this.body = Lazy.of(() -> bodyBytes.length == 0
+            ? Optional.empty()
+            : Optional.of(new String(bodyBytes, StandardCharsets.UTF_8)));
         this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
         this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
         this.request = Lazy.of(() -> new Request.Impl(
@@ -178,37 +181,25 @@ public class ApiException extends RuntimeException implements Response<Optional<
         return this.request.get();
     }
 
-    @Override
-    public @NotNull Optional<byte[]> getRawBody() {
-        feign.Response.Body raw = this.anchor.body();
-
-        if (raw == null)
-            return Optional.empty();
-
-        try {
-            return Optional.of(Util.toByteArray(raw.asInputStream()));
-        } catch (IOException ex) {
-            return Optional.empty();
-        }
-    }
-
     /**
-     * Reads the buffered anchor body into a UTF-8 string.
+     * Reads the buffered anchor body into a {@code byte[]} once at construction time so the
+     * lazy {@link #body} initializer can decode UTF-8 from a captured array rather than
+     * re-reading the anchor.
      *
-     * @param anchor the buffered Feign response whose body bytes are decoded
-     * @return the body as a UTF-8 string, or {@link Optional#empty()} if the body is
-     *         {@code null} or cannot be read
+     * @param anchor the buffered Feign response whose body bytes are captured
+     * @return the captured body bytes, or an empty array if the body is {@code null} or
+     *         cannot be read
      */
-    private static @NotNull Optional<String> decodeBodyUtf8(@NotNull feign.Response anchor) {
+    private static byte @NotNull [] readAnchorBytes(@NotNull feign.Response anchor) {
         feign.Response.Body raw = anchor.body();
 
         if (raw == null)
-            return Optional.empty();
+            return new byte[0];
 
         try {
-            return Optional.of(new String(Util.toByteArray(raw.asInputStream()), StandardCharsets.UTF_8));
+            return Util.toByteArray(raw.asInputStream());
         } catch (IOException ex) {
-            return Optional.empty();
+            return new byte[0];
         }
     }
 

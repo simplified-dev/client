@@ -1,7 +1,6 @@
 package dev.simplified.client.cache;
 
 import com.github.benmanes.caffeine.cache.Weigher;
-import dev.simplified.client.response.Response;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
 import org.jetbrains.annotations.NotNull;
@@ -15,22 +14,22 @@ import java.util.Map;
  * <p>
  * Per-entry weight is computed as:
  * <ul>
- *   <li>the length of the raw response body bytes captured at decode time, or {@code 0}
- *       if absent</li>
+ *   <li>the length of the captured body bytes stored alongside the response in
+ *       {@link CacheEntry#body()}</li>
  *   <li>an approximation of the stored response headers' wire size
  *       ({@code sum(key.length() + value.length())})</li>
  *   <li>a fixed {@code 512} byte overhead for the Java object graph (envelope,
  *       {@link dev.simplified.client.response.NetworkDetails}, request record)</li>
  * </ul>
  * <p>
- * The raw-body length dominates real-world usage, so the header and overhead terms are
+ * The body-byte length dominates real-world usage, so the header and overhead terms are
  * deliberately rough approximations rather than exact byte counts. The total is
  * saturating-clamped to {@link Integer#MAX_VALUE} because Caffeine's weigher contract
  * returns an {@code int}.
  *
  * @see ResponseCache
  */
-public final class ResponseCacheWeigher implements Weigher<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>>> {
+public final class ResponseCacheWeigher implements Weigher<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> {
 
     /** Fixed object-graph overhead applied to every cached variant. */
     private static final long OBJECT_OVERHEAD_BYTES = 512L;
@@ -38,13 +37,13 @@ public final class ResponseCacheWeigher implements Weigher<CacheKey.UrlKey, java
     @Override
     public int weigh(
         @NotNull CacheKey.UrlKey key,
-        @NotNull java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>> variants
+        @NotNull java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants
     ) {
         long total = 0L;
 
-        for (Response.Cached<?> cached : variants.values()) {
-            total += cached.getRawBody().map(bytes -> (long) bytes.length).orElse(0L);
-            total += estimateHeaderBytes(cached.getHeaders());
+        for (CacheEntry<?> entry : variants.values()) {
+            total += entry.body().length;
+            total += estimateHeaderBytes(entry.response().getHeaders());
             total += OBJECT_OVERHEAD_BYTES;
         }
 

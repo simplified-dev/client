@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentMap;
  * @see <a href="https://datatracker.ietf.org/doc/html/rfc5861">RFC 5861 - HTTP Cache-Control Extensions for Stale Content</a>
  */
 @RequiredArgsConstructor
-public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>>> {
+public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> {
 
     /** The absolute upper bound on any cache entry's lifetime, regardless of response-advertised freshness. */
     private final @NotNull Duration safetyFallback;
@@ -45,7 +45,7 @@ public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, Concur
     @Override
     public long expireAfterCreate(
         @NotNull CacheKey.UrlKey key,
-        @NotNull ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>> variants,
+        @NotNull ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants,
         long currentTime
     ) {
         Duration longest = variants.values().stream()
@@ -72,7 +72,7 @@ public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, Concur
     @Override
     public long expireAfterUpdate(
         @NotNull CacheKey.UrlKey key,
-        @NotNull ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>> variants,
+        @NotNull ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants,
         long currentTime,
         long currentDuration
     ) {
@@ -88,7 +88,7 @@ public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, Concur
     @Override
     public long expireAfterRead(
         @NotNull CacheKey.UrlKey key,
-        @NotNull ConcurrentMap<CacheKey.VaryFingerprint, Response.Cached<?>> variants,
+        @NotNull ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants,
         long currentTime,
         long currentDuration
     ) {
@@ -100,10 +100,11 @@ public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, Concur
      * {@code freshnessLifetime + staleIfError}. Variants without a stale-if-error window
      * expire at the end of their freshness lifetime.
      *
-     * @param cached the variant to inspect
+     * @param entry the cached entry whose response is inspected
      * @return the living duration of the variant
      */
-    private @NotNull Duration livingDuration(@NotNull Response.Cached<?> cached) {
+    private @NotNull Duration livingDuration(@NotNull CacheEntry<?> entry) {
+        Response.CachedImpl<?> cached = entry.response();
         return cached.freshnessLifetime().plusSeconds(cached.staleIfError().orElse(0L));
     }
 
