@@ -6,10 +6,8 @@ import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.CacheControl;
 import dev.simplified.client.response.Response;
-import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.collection.tuple.pair.Pair;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -269,14 +267,7 @@ public final class ResponseCache {
             return;
 
         String canonical = CacheKey.UrlKey.canonicalizeUrl(url);
-        Iterator<CacheKey.UrlKey> it = this.cache.asMap().keySet().iterator();
-
-        while (it.hasNext()) {
-            CacheKey.UrlKey key = it.next();
-
-            if (key.url().equals(canonical))
-                it.remove();
-        }
+        this.cache.asMap().keySet().removeIf(key -> key.url().equals(canonical));
     }
 
     /**
@@ -357,52 +348,50 @@ public final class ResponseCache {
 
     /**
      * Builds a copy of the given decoded response with hop-by-hop and transport-framing
-     * headers stripped from its header map.
+     * headers stripped from its anchor's header map.
      *
      * @param decoded the decoded response to sanitize
      * @param <T> the decoded body type
-     * @return a new {@link Response.Impl} carrying the same state but with stripped headers
+     * @return a new {@link Response.Impl} carrying the same anchor bytes and decoder but
+     *         with stripped headers
      */
     private static <T> @NotNull Response.Impl<T> stripTransportHeaders(@NotNull Response.Impl<T> decoded) {
-        ConcurrentMap<String, ConcurrentList<String>> sanitized = decoded.getHeaders().entrySet().stream()
-            .filter(entry -> {
-                String name = entry.getKey().toLowerCase(Locale.ROOT);
-                return !HOP_BY_HOP_HEADERS.contains(name) && !TRANSPORT_HEADERS.contains(name);
-            })
-            .map(entry -> Pair.of(
-                entry.getKey(),
-                (ConcurrentList<String>) Concurrent.newUnmodifiableList(entry.getValue())
-            ))
-            .collect(Concurrent.toUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER));
+        feign.Response anchor = decoded.getAnchor();
+        Map<String, Collection<String>> sanitized = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-        return new Response.Impl<>(
-            decoded.getBody(),
-            decoded.getDetails(),
-            decoded.getStatus(),
-            decoded.getRequest(),
-            sanitized,
-            decoded.getRawBody().orElse(null)
-        );
+        for (Map.Entry<String, Collection<String>> entry : anchor.headers().entrySet()) {
+            String lower = entry.getKey().toLowerCase(Locale.ROOT);
+
+            if (HOP_BY_HOP_HEADERS.contains(lower) || TRANSPORT_HEADERS.contains(lower))
+                continue;
+
+            sanitized.put(entry.getKey(), entry.getValue());
+        }
+
+        feign.Response sanitizedAnchor = anchor.toBuilder()
+            .headers(sanitized)
+            .build();
+
+        return decoded.withAnchor(sanitizedAnchor);
     }
 
     /**
      * Merges the headers from a 304 response into an existing cached variant, producing a
-     * fresh {@link Response.Cached} with the body and non-overwritten fields carried
-     * forward.
+     * fresh {@link Response.Cached} whose anchor carries the merged headers while the body
+     * bytes, status, and request are inherited from the existing variant.
      *
      * @param existing the cached variant to refresh
      * @param new304Headers the headers from the 304 response
      * @param <T> the decoded body type
-     * @return a new {@code Cached} with merged headers and the existing body / request
+     * @return a new {@code Cached} with merged headers and the existing anchor bytes
      */
     private static <T> @NotNull Response.Cached<T> mergeHeaders(
         @NotNull Response.Cached<T> existing,
         @NotNull Map<String, ? extends Collection<String>> new304Headers
     ) {
-        TreeMap<String, ConcurrentList<String>> mutable = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-
-        for (Map.Entry<String, ConcurrentList<String>> entry : existing.getHeaders().entrySet())
-            mutable.put(entry.getKey(), entry.getValue());
+        feign.Response anchor = existing.getAnchor();
+        Map<String, Collection<String>> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        merged.putAll(anchor.headers());
 
         for (Map.Entry<String, ? extends Collection<String>> entry : new304Headers.entrySet()) {
             String name = entry.getKey();
@@ -414,21 +403,14 @@ public final class ResponseCache {
             if (entry.getValue() == null || entry.getValue().isEmpty())
                 continue;
 
-            mutable.put(name, Concurrent.newUnmodifiableList(entry.getValue()));
+            merged.put(name, new ArrayList<>(entry.getValue()));
         }
 
-        ConcurrentMap<String, ConcurrentList<String>> finalHeaders = mutable.entrySet().stream()
-            .map(entry -> Pair.of(entry.getKey(), entry.getValue()))
-            .collect(Concurrent.toUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER));
+        feign.Response mergedAnchor = anchor.toBuilder()
+            .headers(merged)
+            .build();
 
-        return new Response.Cached<>(
-            existing.getBody(),
-            existing.getDetails(),
-            existing.getStatus(),
-            existing.getRequest(),
-            finalHeaders,
-            existing.getRawBody().orElse(null)
-        );
+        return Response.Cached.from(existing.withAnchor(mergedAnchor));
     }
 
     /**

@@ -13,9 +13,11 @@ import dev.simplified.client.response.RetryAfterParser;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.reflection.Reflection;
 import dev.simplified.reflection.accessor.FieldAccessor;
+import feign.Util;
 import feign.codec.ErrorDecoder;
 import org.jetbrains.annotations.NotNull;
 
+import java.io.IOException;
 import java.util.OptionalLong;
 
 /**
@@ -114,26 +116,27 @@ public final class InternalErrorDecoder implements ErrorDecoder {
         //
         // Genuine 4xx/5xx errors still flow to the domain decoder unchanged.
         ApiException exception;
+        feign.Response anchor = bufferBody(response);
 
-        if (HttpState.REDIRECTION.containsCode(response.status())) {
-            exception = new NotModifiedException(methodKey, response);
-        } else if (response.status() == HttpStatus.PRECONDITION_FAILED.getCode()) {
-            exception = new PreconditionFailedException(methodKey, response);
-        } else if (response.status() == HttpStatus.TOO_MANY_REQUESTS.getCode()) {
+        if (HttpState.REDIRECTION.containsCode(anchor.status())) {
+            exception = new NotModifiedException(methodKey, anchor);
+        } else if (anchor.status() == HttpStatus.PRECONDITION_FAILED.getCode()) {
+            exception = new PreconditionFailedException(methodKey, anchor);
+        } else if (anchor.status() == HttpStatus.TOO_MANY_REQUESTS.getCode()) {
             exception = new RateLimitException(
                 methodKey,
-                response,
-                this.routeDiscovery.findMatchingMetadata(response.request().url())
+                anchor,
+                this.routeDiscovery.findMatchingMetadata(anchor.request().url())
             );
         } else {
-            exception = this.customDecoder.decode(methodKey, response);
+            exception = this.customDecoder.decode(methodKey, anchor);
         }
 
         RETRY_ATTEMPTS_FIELD.set(exception, context.retryAttempt);
         this.responseCache.recordLastResponse(exception);
 
         // If retryable, wrap for Feign's retry mechanism
-        OptionalLong retryAfter = RetryAfterParser.parseFromHeaders(response.headers());
+        OptionalLong retryAfter = RetryAfterParser.parseFromHeaders(anchor.headers());
 
         if (retryAfter.isPresent())
             return new RetryableApiException(exception, retryAfter.getAsLong());
@@ -143,6 +146,32 @@ public final class InternalErrorDecoder implements ErrorDecoder {
             this.retryContext.remove();
 
         return exception;
+    }
+
+    /**
+     * Buffers the given Feign response's body into a {@code byte[]}-backed body, so that
+     * the resulting anchor can drive the lazy {@link ApiException} body / headers / details
+     * fields without contending over a consumed stream.
+     * <p>
+     * Returns {@code response} unchanged when the body is already absent.
+     *
+     * @param response the raw Feign response received from the transport
+     * @return a buffered copy whose body is a {@code byte[]} (possibly empty)
+     */
+    private static @NotNull feign.Response bufferBody(@NotNull feign.Response response) {
+        feign.Response.Body raw = response.body();
+
+        if (raw == null)
+            return response.toBuilder().body(new byte[0]).build();
+
+        try {
+            byte[] bytes = Util.toByteArray(raw.asInputStream());
+            return response.toBuilder().body(bytes).build();
+        } catch (IOException ex) {
+            return response.toBuilder().body(new byte[0]).build();
+        } finally {
+            Util.ensureClosed(raw);
+        }
     }
 
     /**

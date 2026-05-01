@@ -3,9 +3,6 @@ package dev.simplified.client.decoder;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiDecodeException;
-import dev.simplified.client.request.HttpMethod;
-import dev.simplified.client.request.Request;
-import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.FeignException;
@@ -13,13 +10,13 @@ import feign.Util;
 import feign.codec.Decoder;
 import feign.codec.DefaultDecoder;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.nio.charset.StandardCharsets;
+import java.util.function.Function;
 
 /**
  * Decorating Feign {@link Decoder} that intercepts every successful response to capture
@@ -31,10 +28,10 @@ import java.nio.charset.StandardCharsets;
  *   <li><b>{@link InputStream}</b> - the raw response body stream is returned directly.
  *       The caller owns the stream lifecycle and must close it to release the underlying
  *       HTTP connection back to the pool. If the return type is {@code Response<InputStream>},
- *       the stream is wrapped in a {@link Response} envelope providing access to
- *       {@link NetworkDetails}, {@link HttpStatus}, and headers. In either case the
- *       envelope is not offered to {@link ResponseCache#store(Response.Impl)} because
- *       streaming bodies are not replayable, but the envelope is still passed to
+ *       the stream is wrapped in a {@link Response.StreamingImpl} envelope providing access
+ *       to {@link NetworkDetails}, status, and headers. In either case the envelope is not
+ *       offered to {@link ResponseCache#store(Response.Impl)} because streaming bodies are
+ *       not replayable, but the envelope is still passed to
  *       {@link ResponseCache#recordLastResponse(Response)} so observability callers see
  *       the latest exchange.</li>
  *   <li><b>{@code byte[]}</b> - delegates to Feign's {@link DefaultDecoder} which reads
@@ -42,12 +39,14 @@ import java.nio.charset.StandardCharsets;
  *       decoding.</li>
  *   <li><b>All other types</b> - delegates to the inner {@link Decoder} (typically a
  *       {@link feign.gson.GsonDecoder}) for JSON deserialization. The response body is
- *       closed after decoding.</li>
+ *       buffered into a {@code byte[]} that backs both the lazy decode driving
+ *       {@link Response.Impl#getBody()} and the {@link Response.Impl#getRawBody()} bytes
+ *       view, and is closed after decoding.</li>
  * </ul>
  * <p>
- * For non-streaming types, a {@link Response.Impl} envelope is built carrying the decoded
- * body, {@link HttpStatus}, {@link NetworkDetails}, request information, response headers,
- * and the raw wire bytes. The envelope is then offered to
+ * For non-streaming types, a {@link Response.Impl} envelope is built carrying the buffered
+ * anchor and a body decoder closure; the typed body is materialized on demand via the
+ * envelope's {@link Response.Impl#getBody()}. The envelope is then offered to
  * {@link ResponseCache#store(Response.Impl)}, which applies the RFC 7234 §3 storage
  * predicate and either caches the envelope or drops it. The envelope is always passed to
  * {@link ResponseCache#recordLastResponse(Response)} regardless of caching decisions so
@@ -61,9 +60,10 @@ import java.nio.charset.StandardCharsets;
  * extension on cache hits.
  * <p>
  * If the declared return type is {@code Response<T>} (a parameterized type), the full
- * envelope is returned to the caller. Otherwise only the unwrapped body object is
- * returned, keeping the {@link Response} metadata available solely through
- * {@link Client#getLastResponse()}.
+ * envelope is returned to the caller and body decoding is deferred until the caller invokes
+ * {@link Response#getBody()}. Otherwise the body is materialized eagerly here so the
+ * unwrapped object can be returned to Feign; decode failures surface as
+ * {@link ApiDecodeException} on this synchronous path.
  * <p>
  * This decoder requires {@link feign.Feign.Builder#doNotCloseAfterDecode()} to be set
  * on the Feign builder so that {@link InputStream} responses are not prematurely closed
@@ -120,7 +120,7 @@ public final class InternalResponseDecoder implements Decoder {
             InputStream stream = feignResponse.body().asInputStream();
 
             if (shouldWrap) {
-                Response<?> wrapped = this.buildResponse(feignResponse, stream, null);
+                Response.StreamingImpl<InputStream> wrapped = new Response.StreamingImpl<>(feignResponse, stream);
                 this.responseCache.recordLastResponse(wrapped);
                 return wrapped;
             }
@@ -128,60 +128,50 @@ public final class InternalResponseDecoder implements Decoder {
             return stream;
         }
 
-        // Non-streaming: decode body, then close it
+        // Non-streaming: buffer the body, build a lazy envelope, then close the body
         try {
-            Object decodedBody;
-            byte[] bodyData = null;
+            feign.Response bufferedResponse;
+            Function<feign.Response, Object> bodyDecoder;
 
             if (byte[].class.equals(bodyType)) {
-                decodedBody = this.binaryDecoder.decode(feignResponse, bodyType);
-
-                if (decodedBody instanceof byte[] raw)
-                    bodyData = raw;
+                Object eagerBody = this.binaryDecoder.decode(feignResponse, bodyType);
+                byte[] bodyData = eagerBody instanceof byte[] raw ? raw : new byte[0];
+                bufferedResponse = feignResponse.toBuilder().body(bodyData).build();
+                bodyDecoder = ignored -> eagerBody;
             } else {
-                bodyData = Util.toByteArray(feignResponse.body().asInputStream());
-                feign.Response bufferedResponse = feignResponse.toBuilder().body(bodyData).build();
-
-                try {
-                    decodedBody = this.delegate.decode(bufferedResponse, bodyType);
-                } catch (Exception ex) {
-                    ApiDecodeException error = new ApiDecodeException(ex, feignResponse, new String(bodyData, StandardCharsets.UTF_8));
-                    this.responseCache.recordLastResponse(error);
-                    throw error;
-                }
+                byte[] bodyData = Util.toByteArray(feignResponse.body().asInputStream());
+                feignResponse.body().asInputStream();
+                bufferedResponse = feignResponse.toBuilder().body(bodyData).build();
+                Type finalBodyType = bodyType;
+                bodyDecoder = anchor -> {
+                    try {
+                        return this.delegate.decode(anchor, finalBodyType);
+                    } catch (IOException ioex) {
+                        throw new UncheckedIOException(ioex);
+                    } catch (FeignException fex) {
+                        throw fex;
+                    } catch (Exception ex) {
+                        throw new ApiDecodeException(ex, anchor);
+                    }
+                };
             }
 
-            Response.Impl<?> response = this.buildResponse(feignResponse, decodedBody, bodyData);
+            Response.Impl<Object> response = new Response.Impl<>(bufferedResponse, bodyDecoder);
             this.responseCache.recordLastResponse(response);
             this.responseCache.store(response);
-            return shouldWrap ? response : decodedBody;
+
+            if (shouldWrap)
+                return response;
+
+            try {
+                return response.getBody();
+            } catch (ApiDecodeException ex) {
+                this.responseCache.recordLastResponse(ex);
+                throw ex;
+            }
         } finally {
             Util.ensureClosed(feignResponse.body());
         }
-    }
-
-    /**
-     * Constructs a {@link Response.Impl} envelope from a raw Feign response, a decoded body,
-     * and optionally the raw wire bytes.
-     *
-     * @param feignResponse the raw Feign HTTP response containing status, headers, and request info
-     * @param body the deserialized body object produced by the delegate decoder
-     * @param rawBody the raw response bytes captured at decode time, or {@code null} for
-     *                streaming responses
-     * @return a new {@link Response.Impl} instance bundling the body with network and HTTP metadata
-     */
-    private @NotNull Response.Impl<?> buildResponse(@NotNull feign.Response feignResponse, Object body, byte @Nullable [] rawBody) {
-        return new Response.Impl<>(
-            body,
-            new NetworkDetails(feignResponse),
-            HttpStatus.of(feignResponse.status()),
-            new Request.Impl(
-                HttpMethod.of(feignResponse.request().httpMethod().name()),
-                feignResponse.request().url()
-            ),
-            Response.getHeaders(feignResponse.headers()),
-            rawBody
-        );
     }
 
 }

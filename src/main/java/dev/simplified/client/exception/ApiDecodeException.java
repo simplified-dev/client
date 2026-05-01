@@ -9,7 +9,8 @@ import org.jetbrains.annotations.NotNull;
  * Unlike other {@link ApiException} subclasses which represent HTTP error responses,
  * this exception indicates that the server returned a successful status code but the
  * response body could not be decoded by the configured deserializer (e.g. Gson).
- * The full response body is preserved in {@link #getBody()} for debugging.
+ * The full response body is preserved in {@link #getBody()} - lazily decoded on demand
+ * from the buffered anchor's bytes - for debugging.
  *
  * @see ApiException
  */
@@ -23,13 +24,16 @@ public final class ApiDecodeException extends ApiException {
      * paying the cost of a redundant {@link Throwable#fillInStackTrace()} on the inner
      * wrapper. The outer {@code ApiDecodeException} retains its own writable stack trace,
      * and the original {@code cause} is preserved for full diagnostic context.
+     * <p>
+     * The response body is read on demand from {@code anchor}'s buffered bytes via
+     * {@link ApiException#getBody()}, eliminating the duplicate UTF-8 decode that the prior
+     * pre-read-body constructor performed at the decode-error site.
      *
      * @param cause the exception thrown during deserialization
-     * @param response the raw Feign HTTP response that could not be decoded
-     * @param body the pre-read response body text
+     * @param anchor the buffered Feign HTTP response whose bytes carry the undecodable body
      */
-    public ApiDecodeException(@NotNull Exception cause, @NotNull feign.Response response, @NotNull String body) {
-        super(new StacklessDecodeException(response.status(), cause.getMessage(), response.request(), cause), response, "Decode", body);
+    public ApiDecodeException(@NotNull Exception cause, @NotNull feign.Response anchor) {
+        super(new StacklessDecodeException(anchor.status(), cause.getMessage(), anchor.request(), cause), anchor, "Decode");
     }
 
     /**

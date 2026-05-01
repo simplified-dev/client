@@ -11,13 +11,15 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.util.StringUtil;
+import dev.simplified.util.Lazy;
 import feign.FeignException;
+import feign.Util;
 import lombok.AccessLevel;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
@@ -31,15 +33,20 @@ import java.util.Optional;
  * {@code try/catch} blocks and interrogate it as if it were a normal response
  * object.
  * <p>
- * Instances are created by the {@link ClientErrorDecoder}
- * pipeline during Feign request processing.  Subclasses such as
- * {@link RateLimitException} add domain-specific metadata on top of the base
- * HTTP error information.
+ * Instances are created by the {@link ClientErrorDecoder} pipeline during Feign
+ * request processing.  Subclasses such as {@link RateLimitException} add
+ * domain-specific metadata on top of the base HTTP error information.
+ * <p>
+ * The exception is anchored on a buffered {@link feign.Response}; the body, headers,
+ * network details, and originating request are all derived lazily from that anchor
+ * via memoizing {@link Lazy} holders. Callers that only inspect {@link #getStatus()}
+ * pay zero allocation cost beyond the eager fields ({@code anchor}, {@code name},
+ * {@code feignRequest}, {@code status}).
  * <p>
  * The {@link #response} field holds a parsed {@link ApiErrorResponse} whose
- * concrete type is determined by each {@link Client} subclass's
- * error decoder.  When JSON deserialization of the error body fails, a fallback
- * implementation returning the raw exception message is used instead.
+ * concrete type is determined by each {@link Client} subclass's error decoder.
+ * When JSON deserialization of the error body fails, a fallback implementation
+ * returning the raw exception message is used instead.
  *
  * @see RateLimitException
  * @see RetryableApiException
@@ -57,21 +64,25 @@ public class ApiException extends RuntimeException implements Response<Optional<
     /** The HTTP status code and message associated with the failed request. */
     private final @NotNull HttpStatus status;
 
-    /** The raw response body, if one was present in the HTTP response. */
-    private final @NotNull Optional<String> body;
-
-    /** Network-level timing and connection details captured during the request lifecycle. */
-    private final @NotNull NetworkDetails details;
-
-    /** The HTTP response headers returned by the remote server. */
-    private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
-
-    /** The original HTTP request that triggered this exception. */
-    private final @NotNull Request request;
+    /** The buffered Feign response that anchors every lazily-derived field. */
+    private final @NotNull feign.Response anchor;
 
     /** The original Feign request, retained for retry reconstruction in {@link RetryableApiException}. */
     @Getter(AccessLevel.PACKAGE)
     private final @NotNull feign.Request feignRequest;
+
+    /** Memoized UTF-8 view of the response body bytes, or {@link Optional#empty()} if the body was absent. */
+    @Getter(AccessLevel.NONE)
+    private final @NotNull Lazy<Optional<String>> body;
+
+    /** Memoized network timing and TLS metadata derived from {@link #anchor}. */
+    private final @NotNull Lazy<NetworkDetails> details;
+
+    /** Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}. */
+    private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
+
+    /** Memoized originating request derived from {@link #feignRequest}. */
+    private final @NotNull Lazy<Request> request;
 
     /** The structured error response parsed from the response body. */
     protected @NotNull ApiErrorResponse response;
@@ -80,81 +91,27 @@ public class ApiException extends RuntimeException implements Response<Optional<
     private int retryAttempts = 0;
 
     /**
-     * Constructs an {@code ApiException} from a raw Feign response.
+     * Constructs an {@code ApiException} from a {@link FeignException} and its associated
+     * buffered anchor, capturing a writable stack trace.
      * <p>
-     * Internally converts the method key and response into a {@link FeignException}
-     * via {@link FeignException#errorStatus(String, feign.Response)} and delegates
-     * to {@link #ApiException(FeignException, feign.Response, String)}.
+     * The {@link #response} field is initialized with a fallback {@link ApiErrorResponse}
+     * that returns the exception message; subclass error decoders typically replace it
+     * with a properly deserialized instance. The body, headers, network details, and
+     * originating request are derived lazily from the anchor on first access.
      *
-     * @param methodKey the Feign method key identifying the endpoint that failed
-     * @param response the raw Feign HTTP response
+     * @param source the Feign exception wrapping the HTTP error
+     * @param anchor the buffered Feign HTTP response - must carry a {@code byte[]}-backed
+     *               body so lazy reads of {@link #getBody()} and {@link #getRawBody()}
+     *               do not contend over a consumed stream
      * @param name a short name classifying this error type
      */
-    public ApiException(@NotNull String methodKey, @NotNull feign.Response response, @NotNull String name) {
-        this(FeignException.errorStatus(methodKey, response), response, name);
+    public ApiException(@NotNull FeignException source, @NotNull feign.Response anchor, @NotNull String name) {
+        this(source, anchor, name, true);
     }
 
     /**
-     * Constructs an {@code ApiException} from a {@link FeignException} and its
-     * associated raw response.
-     * <p>
-     * Extracts the HTTP status, response body, headers, network details, and
-     * original request from the Feign exception.  The {@link #response} field
-     * is initialized with a fallback {@link ApiErrorResponse} that returns the
-     * exception message; subclass error decoders typically replace it with a
-     * properly deserialized instance.
-     *
-     * @param exception the Feign exception wrapping the HTTP error
-     * @param response the raw Feign HTTP response used to capture {@link NetworkDetails}
-     * @param name a short name classifying this error type
-     */
-    public ApiException(@NotNull FeignException exception, @NotNull feign.Response response, @NotNull String name) {
-        super(exception.getMessage(), exception.getCause(), true, true);
-        this.name = name;
-        this.status = HttpStatus.of(exception.status());
-        this.body = exception.responseBody().map(byteBuffer -> StringUtil.toEncodedString(byteBuffer.array(), StandardCharsets.UTF_8));
-        this.details = new NetworkDetails(response);
-        this.headers = Response.getHeaders(exception.responseHeaders());
-        this.response = exception::getMessage;
-        this.feignRequest = exception.request();
-        this.request = new Request.Impl(
-            HttpMethod.of(exception.request().httpMethod().name()),
-            exception.request().url()
-        );
-    }
-
-    /**
-     * Constructs an {@code ApiException} from a {@link FeignException} and its
-     * associated raw response, with a pre-read body.
-     * <p>
-     * Used internally for failures that occur during response processing (e.g.
-     * deserialization errors on successful HTTP responses) where the exception
-     * does not carry the response body itself. The body is provided as a pre-read
-     * string because the response stream may already be consumed.
-     *
-     * @param exception the Feign exception wrapping the failure
-     * @param response the raw Feign HTTP response
-     * @param name a short name classifying this error type
-     * @param body the pre-read response body text
-     */
-    ApiException(@NotNull FeignException exception, @NotNull feign.Response response, @NotNull String name, @NotNull String body) {
-        super(exception.getMessage(), exception.getCause(), true, true);
-        this.name = name;
-        this.status = HttpStatus.of(exception.status());
-        this.body = Optional.of(body);
-        this.details = new NetworkDetails(response);
-        this.headers = Response.getHeaders(response.headers());
-        this.response = exception::getMessage;
-        this.feignRequest = exception.request();
-        this.request = new Request.Impl(
-            HttpMethod.of(exception.request().httpMethod().name()),
-            exception.request().url()
-        );
-    }
-
-    /**
-     * Constructs an {@code ApiException} from a {@link FeignException} and its
-     * associated raw response, with control over whether a stack trace is captured.
+     * Constructs an {@code ApiException} from a {@link FeignException} and its associated
+     * buffered anchor, with control over whether a stack trace is captured.
      * <p>
      * Subclasses representing expected, high-frequency error conditions (e.g. rate
      * limiting) pass {@code false} for {@code writableStackTrace} to avoid the
@@ -162,24 +119,97 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * (status, headers, body, request URL, {@link NetworkDetails}) carried by
      * {@code ApiException} is sufficient for diagnosis in those cases.
      *
-     * @param exception the Feign exception wrapping the HTTP error
-     * @param response the raw Feign HTTP response used to capture {@link NetworkDetails}
+     * @param source the Feign exception wrapping the HTTP error
+     * @param anchor the buffered Feign HTTP response used as the single source of truth
+     *               for body, headers, network details, and request derivation
      * @param name a short name classifying this error type
      * @param writableStackTrace whether this exception should capture a stack trace
      */
-    protected ApiException(@NotNull FeignException exception, @NotNull feign.Response response, @NotNull String name, boolean writableStackTrace) {
-        super(exception.getMessage(), exception.getCause(), true, writableStackTrace);
+    protected ApiException(@NotNull FeignException source, @NotNull feign.Response anchor, @NotNull String name, boolean writableStackTrace) {
+        super(source.getMessage(), source.getCause(), true, writableStackTrace);
         this.name = name;
-        this.status = HttpStatus.of(exception.status());
-        this.body = exception.responseBody().map(byteBuffer -> StringUtil.toEncodedString(byteBuffer.array(), StandardCharsets.UTF_8));
-        this.details = new NetworkDetails(response);
-        this.headers = Response.getHeaders(exception.responseHeaders());
-        this.response = exception::getMessage;
-        this.feignRequest = exception.request();
-        this.request = new Request.Impl(
-            HttpMethod.of(exception.request().httpMethod().name()),
-            exception.request().url()
-        );
+        this.anchor = anchor;
+        this.feignRequest = source.request();
+        this.status = HttpStatus.of(source.status());
+        this.body = Lazy.of(() -> decodeBodyUtf8(this.anchor));
+        this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
+        this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
+        this.request = Lazy.of(() -> new Request.Impl(
+            HttpMethod.of(this.feignRequest.httpMethod().name()),
+            this.feignRequest.url()
+        ));
+        this.response = source::getMessage;
+    }
+
+    /**
+     * Constructs an {@code ApiException} from a Feign method key and a buffered anchor.
+     * <p>
+     * Wraps the anchor in a {@link FeignException} via
+     * {@link FeignException#errorStatus(String, feign.Response)} and delegates to the
+     * canonical {@link #ApiException(FeignException, feign.Response, String) public
+     * constructor}.
+     *
+     * @param methodKey the Feign method key identifying the endpoint that failed
+     * @param anchor the buffered Feign HTTP response
+     * @param name a short name classifying this error type
+     * @return a new {@code ApiException} anchored on {@code anchor}
+     */
+    public static @NotNull ApiException fromMethodKey(@NotNull String methodKey, @NotNull feign.Response anchor, @NotNull String name) {
+        return new ApiException(FeignException.errorStatus(methodKey, anchor), anchor, name);
+    }
+
+    @Override
+    public @NotNull Optional<String> getBody() {
+        return this.body.get();
+    }
+
+    @Override
+    public @NotNull NetworkDetails getDetails() {
+        return this.details.get();
+    }
+
+    @Override
+    public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
+        return this.headers.get();
+    }
+
+    @Override
+    public @NotNull Request getRequest() {
+        return this.request.get();
+    }
+
+    @Override
+    public @NotNull Optional<byte[]> getRawBody() {
+        feign.Response.Body raw = this.anchor.body();
+
+        if (raw == null)
+            return Optional.empty();
+
+        try {
+            return Optional.of(Util.toByteArray(raw.asInputStream()));
+        } catch (IOException ex) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Reads the buffered anchor body into a UTF-8 string.
+     *
+     * @param anchor the buffered Feign response whose body bytes are decoded
+     * @return the body as a UTF-8 string, or {@link Optional#empty()} if the body is
+     *         {@code null} or cannot be read
+     */
+    private static @NotNull Optional<String> decodeBodyUtf8(@NotNull feign.Response anchor) {
+        feign.Response.Body raw = anchor.body();
+
+        if (raw == null)
+            return Optional.empty();
+
+        try {
+            return Optional.of(new String(Util.toByteArray(raw.asInputStream()), StandardCharsets.UTF_8));
+        } catch (IOException ex) {
+            return Optional.empty();
+        }
     }
 
     /**

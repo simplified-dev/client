@@ -3,6 +3,7 @@ package dev.simplified.client.exception;
 import dev.simplified.client.decoder.InternalErrorDecoder;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.HttpStatus;
+import feign.FeignException;
 import org.jetbrains.annotations.NotNull;
 
 /**
@@ -52,7 +53,7 @@ public class PreconditionFailedException extends ApiException {
      *                 accompanying headers
      */
     public PreconditionFailedException(@NotNull String methodKey, @NotNull feign.Response response) {
-        super(methodKey, response, NAME);
+        super(FeignException.errorStatus(methodKey, response), response, NAME);
     }
 
 }
