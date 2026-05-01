@@ -4,7 +4,6 @@ import dev.simplified.client.request.HttpMethod;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.collection.tuple.pair.Pair;
-import dev.simplified.collection.unmodifiable.ConcurrentUnmodifiableMap;
 import org.jetbrains.annotations.NotNull;
 
 import java.net.URLDecoder;
@@ -29,7 +28,7 @@ import java.util.TreeMap;
  * canonicalizes query strings by sorting parameters alphabetically so that a HashMap-based
  * {@code @QueryMap} with non-deterministic iteration order cannot silently fragment the
  * cache across logically identical requests. {@code VaryFingerprint} backs its value map
- * with a {@link ConcurrentUnmodifiableMap} built via the project's standard
+ * with an unmodifiable {@link ConcurrentMap} built via the project's standard
  * {@link Concurrent#toUnmodifiableTreeMap(java.util.Comparator) toUnmodifiableSortedMap}
  * collector, inheriting content-based equality through the
  * {@code dev.simplified.collection.atomic.AtomicMap#equals(Object)} delegate.
@@ -150,7 +149,7 @@ public final class CacheKey {
      * Content-negotiation fingerprint for a cached response variant, built from the
      * subset of request headers listed in the stored response's {@code Vary} header.
      * <p>
-     * The backing map is a {@link ConcurrentUnmodifiableMap} produced by
+     * The backing map is an unmodifiable {@link ConcurrentMap} produced by
      * {@link Concurrent#toUnmodifiableTreeMap(java.util.Comparator)} with
      * {@link String#CASE_INSENSITIVE_ORDER}. Record equality delegates to the map's
      * {@code equals}, which in turn delegates through
