@@ -3,7 +3,7 @@ package dev.simplified.client.codec;
 import com.rometools.rome.feed.synd.SyndFeed;
 import com.rometools.rome.io.FeedException;
 import com.rometools.rome.io.SyndFeedOutput;
-import dev.simplified.client.Client;
+import dev.simplified.client.ClientConfig;
 import feign.RequestTemplate;
 import feign.codec.EncodeException;
 import feign.codec.Encoder;
@@ -43,11 +43,11 @@ import java.util.function.Function;
  * touching a {@link RequestTemplate}.
  *
  * <p><b>Lifecycle.</b> This encoder is typically returned from
- * {@link Client#configureEncoder()} when the surrounding client exposes RSS/Atom write
+ * {@link ClientConfig#getEncoderFactory()} when the surrounding client exposes RSS/Atom write
  * endpoints, or instantiated on demand as a standalone serializer for clients whose
  * remote APIs are read-only (such as the Hypixel forum feeds).
  *
- * @see Client#configureEncoder()
+ * @see ClientConfig#getEncoderFactory()
  * @see XmlDecoder
  * @see SyndFeedOutput
  */

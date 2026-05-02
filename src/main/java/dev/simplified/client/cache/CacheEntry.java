@@ -18,5 +18,4 @@ import org.jetbrains.annotations.NotNull;
  * @param body the captured raw body bytes used at decode time
  * @param <T> the decoded body type of {@code response}
  */
-public record CacheEntry<T>(@NotNull Response.CachedImpl<T> response, byte @NotNull [] body) {
-}
+public record CacheEntry<T>(@NotNull Response.CachedImpl<T> response, byte @NotNull [] body) { }

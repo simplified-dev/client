@@ -1,5 +1,6 @@
 package dev.simplified.client.cache;
 
+import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.NetworkDetails;
@@ -47,8 +48,7 @@ import java.util.TreeMap;
  *       {@code Location} and {@code Content-Location} redirects.</li>
  * </ul>
  * <p>
- * Storage of fresh responses is handled by
- * {@link dev.simplified.client.decoder.InternalResponseDecoder} after decoding, not here,
+ * Storage of fresh responses is handled by {@link InternalResponseDecoder} after decoding, not here,
  * so that only responses that successfully passed the decoder are ever stored and so that
  * the stored {@link Response.Impl} carries its decoded body alongside the raw bytes for
  * direct observability.

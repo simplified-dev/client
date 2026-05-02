@@ -1,6 +1,7 @@
 package dev.simplified.client.cache;
 
 import com.github.benmanes.caffeine.cache.Weigher;
+import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
 import org.jetbrains.annotations.NotNull;
@@ -19,7 +20,7 @@ import java.util.Map;
  *   <li>an approximation of the stored response headers' wire size
  *       ({@code sum(key.length() + value.length())})</li>
  *   <li>a fixed {@code 512} byte overhead for the Java object graph (envelope,
- *       {@link dev.simplified.client.response.NetworkDetails}, request record)</li>
+ *       {@link NetworkDetails}, request record)</li>
  * </ul>
  * <p>
  * The body-byte length dominates real-world usage, so the header and overhead terms are

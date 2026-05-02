@@ -4,6 +4,8 @@ import dev.simplified.client.request.HttpMethod;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.collection.tuple.pair.Pair;
+import lombok.AccessLevel;
+import lombok.NoArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
 import java.net.URLDecoder;
@@ -35,9 +37,8 @@ import java.util.TreeMap;
  *
  * @see ResponseCache
  */
+@NoArgsConstructor(access = AccessLevel.PRIVATE)
 public final class CacheKey {
-
-    private CacheKey() {}
 
     /**
      * Canonical identifier for an HTTP response keyed by method and canonicalized URL.

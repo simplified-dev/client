@@ -9,14 +9,14 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
-import dev.simplified.client.Client;
+import dev.simplified.client.ClientConfig;
 import dev.simplified.client.decoder.InternalResponseDecoder;
-import feign.FeignException;
 import feign.Response;
 import feign.codec.DecodeException;
 import feign.codec.Decoder;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
+import org.jspecify.annotations.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -56,14 +56,14 @@ import java.util.function.UnaryOperator;
  * collision (such as RSS {@code <link>} versus {@code <atom:link>}) down to the expected
  * scalar before Gson attempts to bind the DTO field.
  *
- * <p><b>Lifecycle.</b> This decoder is typically returned from {@link Client#configureDecoder()}
+ * <p><b>Lifecycle.</b> This decoder is typically returned from {@link ClientConfig#getEncoderFactory()}
  * and wrapped by {@link InternalResponseDecoder}, which handles {@link InputStream} and
  * {@code byte[]} return types and closes the response body after decoding. Exceptions thrown
  * by this decoder are caught by {@link InternalResponseDecoder} and re-wrapped as
  * {@link dev.simplified.client.exception.ApiDecodeException ApiDecodeException}, so this
  * class does not need to do its own exception wrapping.
  *
- * @see Client#configureDecoder()
+ * @see ClientConfig#getEncoderFactory()
  * @see XmlEncoder
  * @see InternalResponseDecoder
  */
@@ -149,7 +149,7 @@ public final class XmlDecoder implements Decoder {
      * {@inheritDoc}
      */
     @Override
-    public Object decode(@NotNull Response response, @NotNull Type type) throws IOException, DecodeException, FeignException {
+    public @Nullable Object decode(@NotNull Response response, @NotNull Type type) throws IOException, DecodeException {
         if (response.body() == null)
             return null;
 
