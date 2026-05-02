@@ -20,9 +20,9 @@ repositories {
 
 dependencies {
     // Simplified Libraries
-    api("com.github.simplified-dev:collections:master-SNAPSHOT")
-    api("com.github.simplified-dev:utils:master-SNAPSHOT")
-    api("com.github.simplified-dev:reflection:master-SNAPSHOT")
+    api("com.github.simplified-dev:collections") { version { strictly("a5f41e0") } }
+    api("com.github.simplified-dev:utils") { version { strictly("5c6c96a") } }
+    api("com.github.simplified-dev:reflection") { version { strictly("ed2e17c") } }
 
     // JetBrains Annotations
     api(libs.annotations)
