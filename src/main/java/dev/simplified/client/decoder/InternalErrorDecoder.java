@@ -3,6 +3,7 @@ package dev.simplified.client.decoder;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.NotModifiedException;
 import dev.simplified.client.exception.PreconditionFailedException;
 import dev.simplified.client.exception.RateLimitException;
@@ -28,16 +29,24 @@ import java.util.OptionalLong;
  * When an error response is received the decoder executes the following pipeline:
  * <ol>
  *   <li>Maintains a per-thread {@link RetryContext} that tracks consecutive retry attempts
- *       for the same method key.</li>
+ *       for the same method key. The {@code methodKey} parameter from feign is referenced
+ *       only here and never propagated past this method.</li>
+ *   <li>Buffers the response body into a {@code byte[]} once and builds a primitive
+ *       {@link ErrorContext} via {@link ErrorContext#fromFeign(feign.Response, byte[])}.
+ *       That single boundary call is the only feign-touch site involved in producing typed
+ *       exceptions.</li>
  *   <li>If the response status is {@link HttpStatus#TOO_MANY_REQUESTS 429}, it constructs a
- *       {@link RateLimitException} directly; otherwise it delegates to the
+ *       {@link RateLimitException} directly; if {@link HttpStatus#PRECONDITION_FAILED}, a
+ *       {@link PreconditionFailedException}; if a 3xx redirection, a
+ *       {@link NotModifiedException}. Otherwise it delegates to the client-supplied
  *       {@link ClientErrorDecoder} for domain-specific error parsing.</li>
  *   <li>Reflectively sets the cumulative {@code retryAttempts} count on the resulting
  *       {@link ApiException} via the shared {@link Reflection} accessor.</li>
  *   <li>Records the exception via {@link ResponseCache#recordLastResponse(dev.simplified.client.response.Response)}
  *       so it is visible through {@link dev.simplified.client.Client#getLastResponse()}.</li>
  *   <li>If a {@code Retry-After} header is present, wraps the exception in a
- *       {@link RetryableApiException} that Feign's retry mechanism can act upon.</li>
+ *       {@link RetryableApiException} - the only place after this point where a feign
+ *       {@link feign.Request} reference still flows, so feign's retry pipeline can act on it.</li>
  *   <li>Cleans up the thread-local retry context once a request sequence completes without
  *       further retries.</li>
  * </ol>
@@ -86,18 +95,26 @@ public final class InternalErrorDecoder implements ErrorDecoder {
      */
     @Override
     public @NotNull Exception decode(@NotNull String methodKey, feign.Response response) {
-        RetryContext context = this.retryContext.get();
+        RetryContext retryCtx = this.retryContext.get();
 
-        // Check if this is a retry of the same request
-        boolean isRetry = methodKey.equals(context.lastMethodKey);
+        // Check if this is a retry of the same request. methodKey is used here and only here -
+        // it is feign-specific retry-tracking jargon and never crosses into ErrorContext,
+        // ApiException, decoder interfaces, or domain subclasses.
+        boolean isRetry = methodKey.equals(retryCtx.lastMethodKey);
 
         if (isRetry) {
-            context.retryAttempt++;
+            retryCtx.retryAttempt++;
         } else {
-            // New request - reset counter
-            context.retryAttempt = 0;
-            context.lastMethodKey = methodKey;
+            retryCtx.retryAttempt = 0;
+            retryCtx.lastMethodKey = methodKey;
         }
+
+        // Buffer the body once; rebuild the feign anchor solely so a retryable wrapper can later
+        // hand feign back its own Request object. The primitive ErrorContext is the canonical
+        // input to every typed exception below.
+        byte[] bodyBytes = bufferBodyBytes(response);
+        feign.Response anchor = response.toBuilder().body(bodyBytes).build();
+        ErrorContext context = ErrorContext.fromFeign(anchor, bodyBytes);
 
         // Framework-typed HTTP statuses short-circuit the domain ClientErrorDecoder so callers
         // can catch them explicitly without inspecting numeric status codes:
@@ -116,30 +133,30 @@ public final class InternalErrorDecoder implements ErrorDecoder {
         //
         // Genuine 4xx/5xx errors still flow to the domain decoder unchanged.
         ApiException exception;
-        feign.Response anchor = bufferBody(response);
 
-        if (HttpState.REDIRECTION.containsCode(anchor.status())) {
-            exception = new NotModifiedException(methodKey, anchor);
-        } else if (anchor.status() == HttpStatus.PRECONDITION_FAILED.getCode()) {
-            exception = new PreconditionFailedException(methodKey, anchor);
-        } else if (anchor.status() == HttpStatus.TOO_MANY_REQUESTS.getCode()) {
+        if (HttpState.REDIRECTION.containsCode(context.status().getCode())) {
+            exception = new NotModifiedException(context);
+        } else if (context.status() == HttpStatus.PRECONDITION_FAILED) {
+            exception = new PreconditionFailedException(context);
+        } else if (context.status() == HttpStatus.TOO_MANY_REQUESTS) {
             exception = new RateLimitException(
-                methodKey,
-                anchor,
-                this.routeDiscovery.findMatchingMetadata(anchor.request().url())
+                context,
+                this.routeDiscovery.findMatchingMetadata(context.requestUrl())
             );
         } else {
-            exception = this.customDecoder.decode(methodKey, anchor);
+            exception = this.customDecoder.decode(context);
         }
 
-        RETRY_ATTEMPTS_FIELD.set(exception, context.retryAttempt);
+        RETRY_ATTEMPTS_FIELD.set(exception, retryCtx.retryAttempt);
         this.responseCache.recordLastResponse(exception);
 
-        // If retryable, wrap for Feign's retry mechanism
-        OptionalLong retryAfter = RetryAfterParser.parseFromHeaders(anchor.headers());
+        // If retryable, wrap for Feign's retry mechanism. The feign.Request flows through here
+        // and into RetryableException's own retained field - it is never stored on the wrapper
+        // or on the underlying ApiException.
+        OptionalLong retryAfter = RetryAfterParser.parseFromHeaders(context.responseHeaders());
 
         if (retryAfter.isPresent())
-            return new RetryableApiException(exception, retryAfter.getAsLong());
+            return new RetryableApiException(exception, retryAfter.getAsLong(), anchor.request());
 
         // If this was the final attempt (no retry-after), clean up context
         if (!isRetry)
@@ -149,26 +166,25 @@ public final class InternalErrorDecoder implements ErrorDecoder {
     }
 
     /**
-     * Buffers the given Feign response's body into a {@code byte[]}-backed body, so that
-     * the resulting anchor can drive the lazy {@link ApiException} body / headers / details
-     * fields without contending over a consumed stream.
+     * Buffers the given Feign response's body into a {@code byte[]} so the resulting bytes
+     * can drive both the rebuilt anchor for retry plumbing and the primitive
+     * {@link ErrorContext} fed to every typed exception.
      * <p>
-     * Returns {@code response} unchanged when the body is already absent.
+     * Returns an empty array when the body is absent or unreadable.
      *
      * @param response the raw Feign response received from the transport
-     * @return a buffered copy whose body is a {@code byte[]} (possibly empty)
+     * @return the buffered body bytes (possibly empty)
      */
-    private static @NotNull feign.Response bufferBody(@NotNull feign.Response response) {
+    private static byte @NotNull [] bufferBodyBytes(@NotNull feign.Response response) {
         feign.Response.Body raw = response.body();
 
         if (raw == null)
-            return response.toBuilder().body(new byte[0]).build();
+            return new byte[0];
 
         try {
-            byte[] bytes = Util.toByteArray(raw.asInputStream());
-            return response.toBuilder().body(bytes).build();
+            return Util.toByteArray(raw.asInputStream());
         } catch (IOException ex) {
-            return response.toBuilder().body(new byte[0]).build();
+            return new byte[0];
         } finally {
             Util.ensureClosed(raw);
         }

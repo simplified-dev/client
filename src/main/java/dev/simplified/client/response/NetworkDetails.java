@@ -2,6 +2,7 @@ package dev.simplified.client.response;
 
 import dev.simplified.util.time.Stopwatch;
 import lombok.Getter;
+import org.apache.http.protocol.BasicHttpContext;
 import org.apache.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
@@ -96,16 +97,35 @@ public final class NetworkDetails {
      * @param response the Feign response from which to extract network timing and TLS metadata
      */
     public NetworkDetails(@NotNull feign.Response response) {
-        Instant requestStart = extractInstant(response.request().headers(), REQUEST_START);
-        Instant responseReceived = extractInstant(response.headers(), RESPONSE_RECEIVED);
+        this(response.headers(), response.request().headers());
+    }
+
+    /**
+     * Constructs a {@link NetworkDetails} from raw response and request header maps.
+     * <p>
+     * Response headers supply only the response-received timestamp; every other timing
+     * marker plus the TLS protocol and cipher are read from the request headers (where the
+     * interceptor injected them at send time). Any missing header defaults to
+     * {@link Instant#EPOCH} for timestamps and {@link Optional#empty()} for strings.
+     *
+     * @param responseHeaders the response headers carrying the response-received marker
+     * @param requestHeaders the request headers carrying the timing and TLS markers injected
+     *                       by the interceptor layer
+     */
+    public NetworkDetails(
+        @NotNull Map<String, Collection<String>> responseHeaders,
+        @NotNull Map<String, Collection<String>> requestHeaders
+    ) {
+        Instant requestStart = extractInstant(requestHeaders, REQUEST_START);
+        Instant responseReceived = extractInstant(responseHeaders, RESPONSE_RECEIVED);
         this.roundTrip = Stopwatch.of(requestStart, responseReceived);
 
-        this.dnsResolution = extractStopwatch(response.request().headers(), DNS_START, DNS_END);
-        this.tcpConnection = extractStopwatch(response.request().headers(), TCP_CONNECT_START, TCP_CONNECT_END);
-        this.tlsHandshake = extractStopwatch(response.request().headers(), TLS_HANDSHAKE_START, TLS_HANDSHAKE_END);
+        this.dnsResolution = extractStopwatch(requestHeaders, DNS_START, DNS_END);
+        this.tcpConnection = extractStopwatch(requestHeaders, TCP_CONNECT_START, TCP_CONNECT_END);
+        this.tlsHandshake = extractStopwatch(requestHeaders, TLS_HANDSHAKE_START, TLS_HANDSHAKE_END);
 
-        this.tlsProtocol = extractHeader(response.request().headers(), TLS_PROTOCOL);
-        this.tlsCipher = extractHeader(response.request().headers(), TLS_CIPHER);
+        this.tlsProtocol = extractHeader(requestHeaders, TLS_PROTOCOL);
+        this.tlsCipher = extractHeader(requestHeaders, TLS_CIPHER);
     }
 
     /**
@@ -129,6 +149,21 @@ public final class NetworkDetails {
 
         this.tlsProtocol = Optional.ofNullable(getAttribute(context, TLS_PROTOCOL, null));
         this.tlsCipher = Optional.ofNullable(getAttribute(context, TLS_CIPHER, null));
+    }
+
+    /**
+     * Returns an empty {@link NetworkDetails} with all timestamps at {@link Instant#EPOCH}
+     * and empty TLS metadata.
+     * <p>
+     * Useful for synthesizing exceptions or responses that did not produce a real network
+     * exchange (e.g. client-side rate-limit rejections), so callers reading
+     * {@link #getRoundTrip()} or the TLS optionals see consistent "no exchange" defaults
+     * rather than {@code null}.
+     *
+     * @return a NetworkDetails carrying zero-duration stopwatches and empty TLS info
+     */
+    public static @NotNull NetworkDetails empty() {
+        return new NetworkDetails(new BasicHttpContext());
     }
 
     /**

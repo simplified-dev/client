@@ -44,15 +44,13 @@ public class PreconditionFailedException extends ApiException {
     public static final @NotNull String NAME = "PreconditionFailed";
 
     /**
-     * Constructs a new {@code PreconditionFailedException} from a Feign method key and the raw
-     * {@code 412} response.
+     * Constructs a new {@code PreconditionFailedException} from a primitive HTTP context.
      *
-     * @param methodKey the Feign method key identifying the endpoint that was probed
-     * @param response the raw Feign HTTP response carrying the {@code 412} status and any
-     *                 accompanying headers
+     * @param context the primitive HTTP context carrying the {@code 412} status and any
+     *                accompanying headers
      */
-    public PreconditionFailedException(@NotNull String methodKey, @NotNull feign.Response response) {
-        super(methodKey, response, NAME);
+    public PreconditionFailedException(@NotNull ErrorContext context) {
+        super(null, NAME, context);
     }
 
 }

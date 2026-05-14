@@ -13,7 +13,7 @@ import java.lang.reflect.Constructor;
  * Abstract {@link ApiException} base that lazily decodes the HTTP error body into an
  * {@link ApiErrorResponse} via a caller-supplied {@link Gson}.
  *
- * <p>Subclasses delegate to the 3-arg superclass constructor and follow up with a
+ * <p>Subclasses delegate to the 2-arg superclass constructor and follow up with a
  * {@link #resolve(Gson, Class)} call that wires the lazy decoder. The Gson parse is
  * deferred until the first {@link #getResponse()} call. When the body is absent or
  * deserialization fails, a fresh instance of the response type is constructed
@@ -25,8 +25,8 @@ import java.lang.reflect.Constructor;
  *
  * <pre>{@code
  * public final class FooApiException extends JsonApiException {
- *     public FooApiException(Gson gson, String methodKey, feign.Response response) {
- *         super(methodKey, response, "Foo");
+ *     public FooApiException(Gson gson, ErrorContext context) {
+ *         super(context, "Foo");
  *         this.resolve(gson, FooErrorResponse.class);
  *     }
  *
@@ -57,16 +57,15 @@ public abstract class JsonApiException extends ApiException {
     private @NotNull Lazy<? extends ApiErrorResponse> typedResponse = Lazy.of(() -> this.response);
 
     /**
-     * Constructs a new {@code JsonApiException} from a Feign method key and buffered
-     * anchor. Subclasses invoke {@link #resolve(Gson, Class)} from their constructor
-     * body to wire the lazy typed response decoder.
+     * Constructs a new {@code JsonApiException} from a primitive HTTP context. Subclasses
+     * invoke {@link #resolve(Gson, Class)} from their constructor body to wire the lazy
+     * typed response decoder.
      *
-     * @param methodKey the Feign method key identifying the endpoint that failed
-     * @param response the buffered Feign HTTP response
+     * @param context the primitive HTTP context bundle carrying status, headers, body, and request metadata
      * @param name a short name classifying this error type (e.g. {@code "Hypixel"})
      */
-    protected JsonApiException(@NotNull String methodKey, @NotNull feign.Response response, @NotNull String name) {
-        super(methodKey, response, name);
+    protected JsonApiException(@NotNull ErrorContext context, @NotNull String name) {
+        super(null, name, context);
     }
 
     /**
