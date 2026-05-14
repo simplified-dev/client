@@ -234,7 +234,7 @@ public final class ClientConfig<C extends Contract> {
          * @return this builder
          */
         public @NotNull Builder<C> withErrorDecoder(@NotNull GsonAwareErrorDecoder errorDecoder) {
-            return this.withErrorDecoder((methodKey, response) -> errorDecoder.decode(this.gson, methodKey, response));
+            return this.withErrorDecoder(context -> errorDecoder.decode(this.gson, context));
         }
 
         /**
@@ -373,7 +373,7 @@ public final class ClientConfig<C extends Contract> {
      * @return the default error decoder
      */
     private static @NotNull ClientErrorDecoder defaultErrorDecoder() {
-        return (methodKey, response) -> new ApiException(methodKey, response, "Client");
+        return context -> new ApiException(null, "Client", context);
     }
 
 }

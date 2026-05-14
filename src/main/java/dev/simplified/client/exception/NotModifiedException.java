@@ -68,15 +68,13 @@ public class NotModifiedException extends ApiException {
     public static final @NotNull String NAME = "NotModified";
 
     /**
-     * Constructs a new {@code NotModifiedException} from a Feign method key and the raw
-     * {@code 304} response.
+     * Constructs a new {@code NotModifiedException} from a primitive HTTP context.
      *
-     * @param methodKey the Feign method key identifying the endpoint that was probed
-     * @param response the raw Feign HTTP response carrying the {@code 304} status and any
-     *                 accompanying headers ({@code ETag}, {@code Last-Modified}, etc.)
+     * @param context the primitive HTTP context carrying the {@code 304} status and any
+     *                accompanying headers ({@code ETag}, {@code Last-Modified}, etc.)
      */
-    public NotModifiedException(@NotNull String methodKey, @NotNull feign.Response response) {
-        super(methodKey, response, NAME);
+    public NotModifiedException(@NotNull ErrorContext context) {
+        super(null, NAME, context);
     }
 
 }

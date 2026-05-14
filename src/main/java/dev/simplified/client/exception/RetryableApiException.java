@@ -10,7 +10,7 @@ import org.jetbrains.annotations.NotNull;
  * <p>
  * When the client's error-handling pipeline determines that a failed request is
  * eligible for automatic retry (e.g. after a rate-limit back-off period), it wraps
- * the original {@link ApiException} in a {@code RetryableApiException}.  Feign's
+ * the original {@link ApiException} in a {@code RetryableApiException}. Feign's
  * built-in {@link feign.Retryer} recognizes instances of {@link RetryableException}
  * and will re-attempt the request according to its configured policy.
  * <p>
@@ -18,6 +18,12 @@ import org.jetbrains.annotations.NotNull;
  * unwrapping proxy intercepts this exception and re-throws the original
  * {@link ApiException} via {@link #getWrappedException()}, ensuring that callers
  * never observe the internal Feign wrapper type.
+ * <p>
+ * This class is the lone touchpoint between the exception hierarchy and feign
+ * types - {@link feign.Retryer} dispatches on {@code instanceof RetryableException},
+ * so the supertype anchor is mandatory. The {@link feign.Request} parameter is
+ * handed straight to {@link RetryableException}'s constructor (which retains it on
+ * its own internal field) and is never stored on {@code this}.
  *
  * @see ApiException
  * @see RateLimitException
@@ -31,23 +37,30 @@ public final class RetryableApiException extends RetryableException {
     /**
      * Constructs a retryable wrapper around the given {@link ApiException}.
      * <p>
-     * The HTTP status code, message, request method, cause, and a synthetic
-     * {@link feign.Request} are forwarded to the {@link RetryableException}
-     * superclass so that Feign's retry infrastructure can inspect them.
+     * The HTTP status code, message, request method, cause, retry-after timestamp, and
+     * {@code feignRequest} are forwarded to the {@link RetryableException} superclass so
+     * that Feign's retry infrastructure can inspect them. The {@code feignRequest} is
+     * consumed by {@code super(...)} and retained on feign's own field; it is never
+     * stored on this instance.
      *
      * @param apiException the original API exception to wrap for retry
-     * @param retryAfter epoch-millisecond timestamp indicating the earliest time
-     *                     at which the request should be retried, typically derived
-     *                     from a {@code Retry-After} header or a rate-limit reset timestamp
+     * @param retryAfter epoch-millisecond timestamp indicating the earliest time at which
+     *                   the request should be retried, typically derived from a
+     *                   {@code Retry-After} header or a rate-limit reset timestamp
+     * @param feignRequest the originating feign request, forwarded to feign's retry pipeline
      */
-    public RetryableApiException(@NotNull ApiException apiException, long retryAfter) {
+    public RetryableApiException(
+        @NotNull ApiException apiException,
+        long retryAfter,
+        @NotNull feign.Request feignRequest
+    ) {
         super(
             apiException.getStatus().getCode(),
             apiException.getMessage(),
-            apiException.getFeignRequest().httpMethod(),
+            feignRequest.httpMethod(),
             apiException.getCause(),
             retryAfter,
-            apiException.getFeignRequest()
+            feignRequest
         );
 
         this.wrappedException = apiException;

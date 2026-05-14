@@ -3,6 +3,7 @@ package dev.simplified.client.decoder;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiDecodeException;
+import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.FeignException;
@@ -30,7 +31,7 @@ import java.util.function.Supplier;
  *       HTTP connection back to the pool. If the return type is {@code Response<InputStream>},
  *       the stream is wrapped in a {@link Response.StreamingImpl} envelope providing access
  *       to {@link NetworkDetails}, status, and headers. In either case the envelope is not
- *       offered to {@link ResponseCache#store(Response.Impl, byte[])} because streaming
+ *       offered to {@link ResponseCache#store(Response, byte[])} because streaming
  *       bodies are not replayable, but the envelope is still passed to
  *       {@link ResponseCache#recordLastResponse(Response)} so observability callers see
  *       the latest exchange.</li>
@@ -49,7 +50,7 @@ import java.util.function.Supplier;
  * anchor (used for status / headers / request) plus a body supplier that closes over the
  * captured bytes; the typed body is materialized on demand via the envelope's
  * {@link Response.Impl#getBody()}. The envelope and the captured bytes are then offered
- * to {@link ResponseCache#store(Response.Impl, byte[])}, which applies the RFC 7234 §3
+ * to {@link ResponseCache#store(Response, byte[])}, which applies the RFC 7234 §3
  * storage predicate and either stores the entry or drops it. The envelope is always
  * passed to
  * {@link ResponseCache#recordLastResponse(Response)} regardless of caching decisions so
@@ -153,7 +154,7 @@ public final class InternalResponseDecoder implements Decoder {
                     } catch (FeignException fex) {
                         throw fex;
                     } catch (Exception ex) {
-                        throw new ApiDecodeException(ex, synthetic);
+                        throw new ApiDecodeException(ex, ErrorContext.fromFeign(synthetic, capturedBody));
                     }
                 };
             }

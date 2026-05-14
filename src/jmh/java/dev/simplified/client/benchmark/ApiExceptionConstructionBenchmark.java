@@ -1,6 +1,7 @@
 package dev.simplified.client.benchmark;
 
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.request.Request;
 import dev.simplified.client.response.HttpStatus;
@@ -8,7 +9,6 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import feign.FeignException;
 import org.jetbrains.annotations.NotNull;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -26,6 +26,7 @@ import org.openjdk.jmh.infra.Blackhole;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,8 +34,9 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Benchmarks the construction cost of an {@link ApiException} under the new lazy anchor
- * model versus the prior eager construction style, across two access patterns.
+ * Benchmarks the construction cost of an {@link ApiException} under the new primitive
+ * {@link ErrorContext} model versus the prior eager construction style, across two access
+ * patterns.
  *
  * <p>Scenarios:</p>
  * <ul>
@@ -42,7 +44,7 @@ import java.util.concurrent.TimeUnit;
  *       {@code status}. Pays the body / headers / details / request allocation cost
  *       up front.</li>
  *   <li>{@code lazyConstruct_statusOnly} - New lazy pattern, caller reads only
- *       {@code status}. Skips body / headers / details / request work entirely.</li>
+ *       {@code status}. Skips body / headers / request work entirely.</li>
  *   <li>{@code eagerConstruct_allFields} - Old eager pattern, caller reads all four
  *       lazy-eligible fields. Establishes the upper bound of what laziness must
  *       eventually defer.</li>
@@ -52,7 +54,7 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  *
  * <p>Each iteration constructs from a fixed, realistic 200 B JSON body plus 15 headers
- * and a stable {@link feign.Request}.</p>
+ * and a stable primitive {@link ErrorContext}.</p>
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
@@ -68,14 +70,8 @@ public class ApiExceptionConstructionBenchmark {
     /** 15 realistic response headers. */
     private Map<String, Collection<String>> responseHeaders;
 
-    /** Stable request used for every constructed exception. */
-    private feign.Request feignRequest;
-
-    /** Buffered Feign response anchor used by every iteration. */
-    private feign.Response anchor;
-
-    /** Pre-built FeignException so each iteration only measures ApiException construction. */
-    private FeignException feignException;
+    /** Stable primitive context used for every constructed exception. */
+    private ErrorContext context;
 
     @Setup(Level.Trial)
     public void setUp() {
@@ -101,45 +97,31 @@ public class ApiExceptionConstructionBenchmark {
         this.responseHeaders.put("ETag", List.of("\"a1b2c3d4e5f60718\""));
         this.responseHeaders.put("Set-Cookie", List.of("session=abcdef; Path=/; HttpOnly"));
 
-        Map<String, Collection<String>> requestHeaders = new HashMap<>(2);
-        requestHeaders.put("Accept", List.of("application/json"));
-        requestHeaders.put("User-Agent", List.of("simplified-client-bench/1.0"));
-
-        this.feignRequest = feign.Request.create(
-            feign.Request.HttpMethod.GET,
+        this.context = new ErrorContext(
+            HttpStatus.of(500),
+            NetworkDetails.empty(),
+            HttpMethod.GET,
             "https://api.example.com/v1/resource/42",
-            requestHeaders,
-            null,
-            StandardCharsets.UTF_8,
-            null
+            this.responseHeaders,
+            this.bodyBytes
         );
-
-        this.anchor = feign.Response.builder()
-            .status(500)
-            .reason("Internal Server Error")
-            .request(this.feignRequest)
-            .headers(this.responseHeaders)
-            .body(this.bodyBytes)
-            .build();
-
-        this.feignException = FeignException.errorStatus("getResource", this.anchor);
     }
 
     @Benchmark
     public void eagerConstruct_statusOnly(Blackhole bh) {
-        EagerApiException ex = new EagerApiException(this.feignException, this.anchor, "Bench");
+        EagerApiException ex = new EagerApiException(this.context, "Bench");
         bh.consume(ex.getStatus());
     }
 
     @Benchmark
     public void lazyConstruct_statusOnly(Blackhole bh) {
-        ApiException ex = new ApiException(this.feignException, this.anchor, "Bench");
+        ApiException ex = new ApiException(null, "Bench", this.context);
         bh.consume(ex.getStatus());
     }
 
     @Benchmark
     public void eagerConstruct_allFields(Blackhole bh) {
-        EagerApiException ex = new EagerApiException(this.feignException, this.anchor, "Bench");
+        EagerApiException ex = new EagerApiException(this.context, "Bench");
         bh.consume(ex.getStatus());
         bh.consume(ex.getBody());
         bh.consume(ex.getDetails());
@@ -149,7 +131,7 @@ public class ApiExceptionConstructionBenchmark {
 
     @Benchmark
     public void lazyConstruct_allFields(Blackhole bh) {
-        ApiException ex = new ApiException(this.feignException, this.anchor, "Bench");
+        ApiException ex = new ApiException(null, "Bench", this.context);
         bh.consume(ex.getStatus());
         bh.consume(ex.getBody());
         bh.consume(ex.getDetails());
@@ -172,17 +154,14 @@ public class ApiExceptionConstructionBenchmark {
         private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
         private final @NotNull Request request;
 
-        EagerApiException(@NotNull FeignException source, @NotNull feign.Response response, @NotNull String name) {
-            super(source.getMessage(), source.getCause(), true, true);
+        EagerApiException(@NotNull ErrorContext context, @NotNull String name) {
+            super("bench", null, true, true);
             this.name = name;
-            this.status = HttpStatus.of(source.status());
-            this.body = source.responseBody().map(buf -> buf.array().clone());
-            this.details = new NetworkDetails(response);
-            this.headers = Response.getHeaders(toMutableHeaders(source.responseHeaders()));
-            this.request = new Request.Impl(
-                HttpMethod.of(source.request().httpMethod().name()),
-                source.request().url()
-            );
+            this.status = context.status();
+            this.body = context.bodyBytes().length == 0 ? Optional.empty() : Optional.of(context.bodyBytes());
+            this.details = context.details();
+            this.headers = Response.getHeaders(toMutableHeaders(context.responseHeaders()));
+            this.request = new Request.Impl(context.requestMethod(), context.requestUrl());
         }
 
         @NotNull HttpStatus getStatus() { return this.status; }
@@ -193,6 +172,9 @@ public class ApiExceptionConstructionBenchmark {
         @NotNull String getName() { return this.name; }
 
         private static @NotNull Map<String, Collection<String>> toMutableHeaders(@NotNull Map<String, Collection<String>> source) {
+            if (source.isEmpty())
+                return Collections.emptyMap();
+
             Map<String, Collection<String>> copy = new HashMap<>(source.size());
             for (Map.Entry<String, Collection<String>> entry : source.entrySet())
                 copy.put(entry.getKey(), new ArrayList<>(entry.getValue()));
