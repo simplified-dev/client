@@ -85,6 +85,8 @@ jmh {
     if (warmupProp != null) warmupIterations.set(warmupProp.toInt())
     val iterProp = providers.gradleProperty("jmhIter").orNull
     if (iterProp != null) iterations.set(iterProp.toInt())
+    val threadsProp = providers.gradleProperty("jmhThreads").orNull
+    if (threadsProp != null) threads.set(threadsProp.toInt())
 }
 
 idea {
