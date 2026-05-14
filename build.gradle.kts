@@ -70,11 +70,21 @@ jmh {
     iterations.set(5)
     timeOnIteration.set("2s")
     warmup.set("1s")
-    benchmarkMode.set(listOf("avgt"))
-    timeUnit.set("ns")
+    // benchmarkMode and timeUnit deliberately not set here so each @Benchmark class can
+    // declare its own via @BenchmarkMode / @OutputTimeUnit (e.g. e2e suites that want both
+    // AverageTime and Throughput, expressed in microseconds rather than nanoseconds).
     profilers.set(listOf("gc"))
     resultFormat.set("JSON")
     resultsFile.set(project.layout.buildDirectory.file("reports/jmh/results.json"))
+
+    val includeProp = providers.gradleProperty("jmhInclude").orNull
+    if (includeProp != null) includes.set(listOf(includeProp))
+    val forkProp = providers.gradleProperty("jmhFork").orNull
+    if (forkProp != null) fork.set(forkProp.toInt())
+    val warmupProp = providers.gradleProperty("jmhWarmup").orNull
+    if (warmupProp != null) warmupIterations.set(warmupProp.toInt())
+    val iterProp = providers.gradleProperty("jmhIter").orNull
+    if (iterProp != null) iterations.set(iterProp.toInt())
 }
 
 idea {

@@ -81,9 +81,13 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /** The immutable configuration bundle used to construct this client. */
     private final @NotNull ClientConfig<C> options;
 
-    /** The underlying Apache HTTP client wrapped by Feign for connection pooling and transport. */
+    /**
+     * The underlying Feign transport used for request execution. Normally a pooling
+     * {@link ApacheHttpClient}, but may be a benchmark- or test-supplied stand-in when
+     * {@link ClientConfig#getCustomFeignClient()} is set.
+     */
     @Getter(AccessLevel.NONE)
-    private final @NotNull ApacheHttpClient internalClient;
+    private final @NotNull feign.Client internalClient;
 
     /** The route discovery instance that maps endpoint methods to target URLs and rate-limit configurations. */
     private final @NotNull RouteDiscovery routeDiscovery;
@@ -297,7 +301,10 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      *
      * @return a fully configured {@link ApacheHttpClient} ready for use by Feign
      */
-    private @NotNull ApacheHttpClient buildInternalClient() {
+    private @NotNull feign.Client buildInternalClient() {
+        feign.Client override = this.options.getCustomFeignClient();
+        if (override != null) return override;
+
         return new ApacheHttpClient(ApacheClientFactory.configure(
             this.options.getTimings(),
             this.options.getQueries(),
