@@ -15,6 +15,7 @@ import feign.gson.GsonEncoder;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -83,6 +84,15 @@ public final class ClientConfig<C extends Contract> {
     private final @NotNull Function<Gson, Decoder> decoderFactory;
 
     /**
+     * Optional override that supplies a custom Feign transport in place of the default
+     * {@link feign.httpclient.ApacheHttpClient}. Reserved for in-process benchmarks and tests
+     * that want to bypass the socket stack while keeping every other layer (interceptors,
+     * decoders, rate limit, route discovery, response cache) intact.
+     */
+    @ApiStatus.Internal
+    private final @Nullable feign.Client customFeignClient;
+
+    /**
      * Returns a new {@link Builder} seeded with safe defaults for the given contract type and
      * {@link Gson} instance.
      * <p>
@@ -143,6 +153,7 @@ public final class ClientConfig<C extends Contract> {
         private final @NotNull ConcurrentMap<String, Supplier<Optional<String>>> dynamicHeaders = Concurrent.newMap();
         private @NotNull Function<Gson, Encoder> encoderFactory = GsonEncoder::new;
         private @NotNull Function<Gson, Decoder> decoderFactory = GsonDecoder::new;
+        private @Nullable feign.Client customFeignClient;
 
         private Builder(@NotNull Class<C> target, @NotNull Gson gson) {
             this.target = target;
@@ -160,6 +171,7 @@ public final class ClientConfig<C extends Contract> {
             this.dynamicHeaders.putAll(existing.dynamicHeaders);
             this.encoderFactory = existing.encoderFactory;
             this.decoderFactory = existing.decoderFactory;
+            this.customFeignClient = existing.customFeignClient;
         }
 
         /**
@@ -339,6 +351,24 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
+         * Installs a custom Feign transport in place of the default
+         * {@link feign.httpclient.ApacheHttpClient}.
+         * <p>
+         * Reserved for in-process benchmarks and tests that want to exercise the full client
+         * pipeline (interceptors, decoders, rate limit, route discovery, response cache) while
+         * skipping the socket stack. Passing {@code null} clears any previously set override
+         * and restores the default Apache transport.
+         *
+         * @param customFeignClient the Feign client to use as transport, or {@code null} for the default
+         * @return this builder
+         */
+        @ApiStatus.Internal
+        public @NotNull Builder<C> withCustomFeignClient(@Nullable feign.Client customFeignClient) {
+            this.customFeignClient = customFeignClient;
+            return this;
+        }
+
+        /**
          * Constructs an immutable {@link ClientConfig} from the current builder state.
          * <p>
          * The mutable maps held by the builder are sealed into unmodifiable copies on the
@@ -360,7 +390,8 @@ public final class ClientConfig<C extends Contract> {
                 Concurrent.newUnmodifiableMap(this.headers),
                 Concurrent.newUnmodifiableMap(this.dynamicHeaders),
                 this.encoderFactory,
-                this.decoderFactory
+                this.decoderFactory,
+                this.customFeignClient
             );
         }
 
