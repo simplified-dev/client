@@ -6,15 +6,17 @@ import lombok.experimental.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.text.DateFormat;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoField;
 import java.util.Collection;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.TimeZone;
 
 /**
  * Non-instantiable utility class for parsing HTTP date header values into {@link Instant}.
@@ -35,11 +37,11 @@ import java.util.TimeZone;
  * {@link Optional#empty()} when the value is missing, blank, or not parseable in any
  * accepted format, making them safe to use without exception handling.
  * <p>
- * {@link SimpleDateFormat} is not thread-safe; each format instance is guarded by its
- * own intrinsic lock. This class is the canonical HTTP-date parser for the client
- * library and is used by {@link RetryAfterParser} for the {@code Retry-After} HTTP-date
- * branch and by {@link CacheControl} / {@code Response.Cached} for {@code Date},
- * {@code Expires}, and {@code Last-Modified} header resolution.
+ * Each format is held as an immutable, thread-safe {@link DateTimeFormatter}; parses run
+ * lock-free. This is the canonical HTTP-date parser for the client library and is used by
+ * {@link RetryAfterParser} for the {@code Retry-After} HTTP-date branch and by
+ * {@link CacheControl} / {@code Response.Cached} for {@code Date}, {@code Expires}, and
+ * {@code Last-Modified} header resolution.
  *
  * @see <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.1">RFC 7231 - Date/Time Formats</a>
  * @see RetryAfterParser
@@ -47,14 +49,38 @@ import java.util.TimeZone;
 @UtilityClass
 public final class HttpDates {
 
-    /** Fixed-length RFC 5322 / RFC 1123 style (IMF-fixdate), the preferred HTTP date format. */
-    private static final @NotNull DateFormat IMF_FIXDATE = gmt(new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US));
+    /**
+     * Fixed-length RFC 5322 / RFC 1123 style (IMF-fixdate) with the leading day-of-week
+     * prefix stripped before parsing. Matches the lenient day-of-week handling of the
+     * legacy {@link java.text.SimpleDateFormat} - servers sometimes emit an inconsistent
+     * day name for the encoded date, and we accept the date the way browsers do.
+     */
+    private static final @NotNull DateTimeFormatter IMF_FIXDATE = DateTimeFormatter
+        .ofPattern("dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+        .withZone(ZoneOffset.UTC);
 
-    /** Obsolete RFC 850 style with a spelled-out day name and a two-digit year. */
-    private static final @NotNull DateFormat RFC_850 = gmt(new SimpleDateFormat("EEEE, dd-MMM-yy HH:mm:ss 'GMT'", Locale.US));
+    /**
+     * Obsolete RFC 850 style with the spelled-out day-name prefix stripped. The two-digit
+     * year is pivoted at 1970 so {@code 70-99} resolves to {@code 1970-1999} and
+     * {@code 00-69} to {@code 2000-2069}, matching the sliding-window behaviour of the
+     * legacy {@link java.text.SimpleDateFormat} for HTTP-era dates.
+     */
+    private static final @NotNull DateTimeFormatter RFC_850 = new DateTimeFormatterBuilder()
+        .appendPattern("dd-MMM-")
+        .appendValueReduced(ChronoField.YEAR, 2, 2, 1970)
+        .appendPattern(" HH:mm:ss 'GMT'")
+        .toFormatter(Locale.US)
+        .withZone(ZoneOffset.UTC);
 
-    /** ANSI C {@code asctime()} output format, with whitespace padding on single-digit days. */
-    private static final @NotNull DateFormat ASCTIME = gmt(new SimpleDateFormat("EEE MMM d HH:mm:ss yyyy", Locale.US));
+    /**
+     * ANSI C {@code asctime()} output format with the leading day-of-week prefix stripped.
+     * The day-of-month field is space-padded for single-digit days
+     * ({@code "Nov  6 08:49:37 1994"}), so the input is normalised by collapsing the
+     * doubled space before parsing with a single-space pattern.
+     */
+    private static final @NotNull DateTimeFormatter ASCTIME = DateTimeFormatter
+        .ofPattern("MMM d HH:mm:ss yyyy", Locale.US)
+        .withZone(ZoneOffset.UTC);
 
     /**
      * Parses an HTTP date header value from a collection of header values.
@@ -116,49 +142,69 @@ public final class HttpDates {
         assert raw != null;
         String trimmed = raw.trim();
 
-        Optional<Instant> imf = tryParse(IMF_FIXDATE, trimmed);
+        int afterComma = stripDayPrefix(trimmed, ',');
+        if (afterComma > 0) {
+            String body = trimmed.substring(afterComma).trim();
+            Optional<Instant> imf = tryParse(IMF_FIXDATE, body);
+            if (imf.isPresent()) return imf;
 
-        if (imf.isPresent())
-            return imf;
+            Optional<Instant> rfc850 = tryParse(RFC_850, body);
+            if (rfc850.isPresent()) return rfc850;
+        }
 
-        Optional<Instant> rfc850 = tryParse(RFC_850, trimmed);
+        int afterSpace = stripDayPrefix(trimmed, ' ');
+        if (afterSpace > 0)
+            return tryParse(ASCTIME, collapseDoubleSpace(trimmed.substring(afterSpace).trim()));
 
-        if (rfc850.isPresent())
-            return rfc850;
-
-        return tryParse(ASCTIME, trimmed);
+        return Optional.empty();
     }
 
     /**
-     * Attempts to parse the given value using the supplied {@link DateFormat}.
+     * Attempts to parse the given value using the supplied {@link DateTimeFormatter}.
      * <p>
-     * Access to the shared {@code format} instance is synchronized on its intrinsic lock
-     * because {@link SimpleDateFormat} is not thread-safe.
+     * The formatter is immutable and thread-safe; no synchronisation is required.
      *
-     * @param format the date format to attempt
+     * @param formatter the formatter to attempt
      * @param value the raw value to parse
      * @return the parsed {@link Instant}, or {@link Optional#empty()} if the value does
-     *         not conform to {@code format}
+     *         not conform to {@code formatter}
      */
-    private static @NotNull Optional<Instant> tryParse(@NotNull DateFormat format, @NotNull String value) {
-        synchronized (format) {
-            try {
-                return Optional.of(format.parse(value).toInstant());
-            } catch (ParseException e) {
-                return Optional.empty();
-            }
+    private static @NotNull Optional<Instant> tryParse(@NotNull DateTimeFormatter formatter, @NotNull String value) {
+        try {
+            return Optional.of(LocalDateTime.parse(value, formatter).toInstant(ZoneOffset.UTC));
+        } catch (DateTimeParseException e) {
+            return Optional.empty();
         }
     }
 
     /**
-     * Configures the given date format to interpret parsed timestamps in GMT.
+     * Collapses the doubled-space padding the asctime spec uses for single-digit days
+     * ({@code "Nov  6"}) into a single space so a one-space pattern can parse both
+     * one- and two-digit day forms. Returns the input unchanged when no doubled space is
+     * present, so the common two-digit-day branch pays no allocation.
      *
-     * @param format the date format to configure
-     * @return the same date format, with its time zone set to GMT
+     * @param value the raw asctime candidate
+     * @return the input with the first occurrence of {@code "  "} collapsed to {@code " "}
      */
-    private static @NotNull DateFormat gmt(@NotNull DateFormat format) {
-        format.setTimeZone(TimeZone.getTimeZone("GMT"));
-        return format;
+    private static @NotNull String collapseDoubleSpace(@NotNull String value) {
+        int idx = value.indexOf("  ");
+        if (idx < 0) return value;
+        return value.substring(0, idx) + value.substring(idx + 1);
+    }
+
+    /**
+     * Returns the index immediately after the first occurrence of {@code delimiter} in
+     * {@code value}, or {@code -1} if the delimiter is absent. Used to strip the leading
+     * day-of-week prefix (whose contents we deliberately ignore for parser leniency).
+     *
+     * @param value the raw input
+     * @param delimiter the character separating the prefix from the date body
+     *                  ({@code ','} for IMF-fixdate / RFC 850, {@code ' '} for asctime)
+     * @return the index just after the delimiter, or {@code -1} if not found
+     */
+    private static int stripDayPrefix(@NotNull String value, char delimiter) {
+        int idx = value.indexOf(delimiter);
+        return idx < 0 ? -1 : idx + 1;
     }
 
 }
