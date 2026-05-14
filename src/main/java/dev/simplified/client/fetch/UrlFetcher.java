@@ -334,7 +334,7 @@ public final class UrlFetcher {
         Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
             cached.getStatus(),
             request,
-            NetworkDetails::empty,
+            () -> NetworkDetails.EMPTY,
             headers,
             entry::body
         );
