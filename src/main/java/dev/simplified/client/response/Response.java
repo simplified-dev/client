@@ -513,11 +513,15 @@ public interface Response<T> {
      * and a carrier of freshness and revalidation logic; the body bytes for replay live
      * alongside in the cache's storage tuple.
      * <p>
-     * Because directive parsing and header lookups are cheap (a handful of microseconds),
-     * storing parsed fields on the entry would offer no meaningful performance benefit over
-     * re-deriving them on each cache operation, while adding duplicated state and a risk of
-     * drift from the authoritative headers. The wrapped source's headers and timings are
-     * the single source of truth.
+     * The wrapped source's headers and timings remain the single source of truth - this
+     * class stores no decoded body or duplicated header state of its own. Parsed
+     * {@code Cache-Control} directives are the one exception: each {@code CachedImpl}
+     * memoises its directives in a {@link Lazy} populated from {@link #headers} on first
+     * access, because the same lookup runs three to four times per cache decision
+     * ({@code isFresh}, {@code mustRevalidate}, {@code canServeStaleOnError} via
+     * {@code staleIfError} plus {@code freshnessLifetime}). Mutations through
+     * {@link #withHeaders} produce a fresh {@code CachedImpl} with a fresh {@code Lazy},
+     * so the memoised view never outlives the headers that produced it.
      * <p>
      * Streaming responses cannot be cached - the storage contract requires buffered body
      * bytes alongside the entry, so {@link StreamingImpl} envelopes never reach this class.
@@ -537,6 +541,15 @@ public interface Response<T> {
         private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
 
         /**
+         * Lazily-parsed {@code Cache-Control} directives derived from {@link #headers}.
+         * Populated on first access via {@link Lazy#get()} and reused for the lifetime of
+         * this {@code CachedImpl} - {@code freshnessLifetime}, {@code mustRevalidate},
+         * {@code staleIfError}, and {@code canServeStaleOnError} all consult the same
+         * memoised view.
+         */
+        private final @NotNull Lazy<CacheControl> cacheControl;
+
+        /**
          * Constructs a cached view wrapping the given source with the given headers.
          *
          * @param source the wrapped source response
@@ -545,6 +558,7 @@ public interface Response<T> {
         private CachedImpl(@NotNull Response<T> source, @NotNull ConcurrentMap<String, ConcurrentList<String>> headers) {
             this.source = source;
             this.headers = headers;
+            this.cacheControl = Lazy.of(() -> CacheControl.parseFromHeaders(headers));
         }
 
         /**
@@ -604,14 +618,19 @@ public interface Response<T> {
         }
 
         /**
-         * Parsed {@code Cache-Control} directives for this response, re-computed from the
-         * inherited headers on each call.
+         * Parsed {@code Cache-Control} directives for this response.
+         * <p>
+         * Memoised in a {@link Lazy} that closes over {@link #headers}, so the directive
+         * lookup runs at most once per {@code CachedImpl} instance regardless of how many
+         * cache-decision methods consult it. {@link #withHeaders} produces a fresh
+         * {@code CachedImpl} whose memo is rebuilt against the overridden header set, so
+         * the memoised view never outlives the headers that produced it.
          *
          * @return the parsed directives, or {@link CacheControl#EMPTY} if the header is
          *         absent
          */
         public @NotNull CacheControl cacheControl() {
-            return CacheControl.parseFromHeaders(this.getHeaders());
+            return this.cacheControl.get();
         }
 
         /**
