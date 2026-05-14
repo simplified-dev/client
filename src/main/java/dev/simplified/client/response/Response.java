@@ -381,12 +381,14 @@ public interface Response<T> {
      * Buffered response implementation constructed directly from resolved values without a
      * {@link feign.Response} anchor.
      * <p>
-     * Sibling to {@link Impl}: status, request, network details, and headers are eagerly held
-     * (the caller has already resolved them outside of any Feign pipeline), while the body
-     * decode stays lazy via the supplied {@link Supplier} so callers reading only
-     * {@link #getStatus()} pay zero decode cost. Used by callers that issue HTTP directly
-     * against a transport (e.g. the standalone URL fetcher) and synthesize the envelope
-     * themselves rather than letting Feign anchor it.
+     * Sibling to {@link Impl}: status and request are eagerly held, while network details,
+     * headers, and the body decode are deferred via {@link Lazy} so callers reading only
+     * {@link #getStatus()} or {@link #getRequest()} pay zero allocation cost beyond the
+     * envelope fields. Used by callers that issue HTTP directly against a transport (e.g.
+     * the standalone URL fetcher) and synthesize the envelope themselves rather than
+     * letting Feign anchor it. {@link #withBody(Supplier)} retypes the body while sharing
+     * the existing lazy state, so chained typed accessors do not re-clean headers or
+     * re-parse timing metadata.
      *
      * @param <T> the deserialized type of the response body
      */
@@ -399,44 +401,102 @@ public interface Response<T> {
         /** The originating request, supplied at construction. */
         private final @NotNull Request request;
 
-        /** The network timing and TLS metadata captured by the transport, supplied at construction. */
-        private final @NotNull NetworkDetails details;
+        /** Memoized network timing and TLS metadata; materialized on the first call to {@link #getDetails()}. */
+        @Getter(AccessLevel.NONE)
+        private final @NotNull Lazy<NetworkDetails> details;
 
-        /** The response headers (internal {@code X-Internal-} prefixed entries filtered out). */
-        private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
+        /** Memoized response headers (internal {@code X-Internal-} prefixed entries filtered out); materialized on the first call to {@link #getHeaders()}. */
+        @Getter(AccessLevel.NONE)
+        private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
 
         /** Memoized decoded body, materialized on the first call to {@link #getBody()}. */
         @Getter(AccessLevel.NONE)
         private final @NotNull Lazy<T> body;
 
         /**
-         * Constructs a directly-built buffered response.
+         * Constructs a directly-built buffered response with deferred details, headers, and body.
          *
          * @param status the HTTP status code and classification
          * @param request the originating request
-         * @param details the network timing and TLS metadata captured during the exchange
+         * @param detailsSupplier the supplier that builds the {@link NetworkDetails} on first access
          * @param headers the raw response headers; internal {@code X-Internal-} prefixed
          *                entries and empty values are filtered out by {@link #getHeaders(Map)}
+         *                on first {@link #getHeaders()} access
          * @param bodyDecoder the supplier that materializes the typed body on first access,
          *                    typically closing over previously-buffered body bytes
          */
         public DirectImpl(
             @NotNull HttpStatus status,
             @NotNull Request request,
-            @NotNull NetworkDetails details,
+            @NotNull Supplier<NetworkDetails> detailsSupplier,
             @NotNull Map<String, ? extends Collection<String>> headers,
             @NotNull Supplier<T> bodyDecoder
+        ) {
+            this(
+                status,
+                request,
+                Lazy.of(detailsSupplier),
+                Lazy.of(() -> Response.getHeaders(headers)),
+                Lazy.of(bodyDecoder)
+            );
+        }
+
+        /**
+         * State-sharing constructor used by {@link #withBody(Supplier)} to retype the body
+         * decoder without rebuilding the details / headers lazies.
+         *
+         * @param status the HTTP status code, shared with the source envelope
+         * @param request the originating request, shared with the source envelope
+         * @param details the memoized network details, shared with the source envelope
+         * @param headers the memoized cleaned headers, shared with the source envelope
+         * @param body the new body lazy for the retyped envelope
+         */
+        private DirectImpl(
+            @NotNull HttpStatus status,
+            @NotNull Request request,
+            @NotNull Lazy<NetworkDetails> details,
+            @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers,
+            @NotNull Lazy<T> body
         ) {
             this.status = status;
             this.request = request;
             this.details = details;
-            this.headers = Response.getHeaders(headers);
-            this.body = Lazy.of(bodyDecoder);
+            this.headers = headers;
+            this.body = body;
+        }
+
+        @Override
+        public @NotNull NetworkDetails getDetails() {
+            return this.details.get();
+        }
+
+        @Override
+        public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
+            return this.headers.get();
         }
 
         @Override
         public @NotNull T getBody() {
             return this.body.get();
+        }
+
+        /**
+         * Returns a new {@code DirectImpl} sharing this envelope's status, request, network
+         * details, and headers but exposing a different body type via {@code bodyDecoder}.
+         * <p>
+         * Lazy state is carried forward by reference: if the source's
+         * {@link #getDetails()} / {@link #getHeaders()} have already been resolved, the
+         * retype sees the cached values; if not, the original suppliers are still in play
+         * and the first access on either envelope resolves both. Used to retype a buffered
+         * byte body into a typed body (e.g. {@code String}, a Gson-deserialized object)
+         * without re-cleaning headers or re-parsing timing metadata.
+         *
+         * @param bodyDecoder the supplier that materializes the new typed body on first access
+         * @param <U> the new deserialized body type
+         * @return a new {@code DirectImpl<U>} sharing this envelope's metadata
+         */
+        public <U> @NotNull DirectImpl<U> withBody(@NotNull Supplier<U> bodyDecoder) {
+            return new DirectImpl<>(this.status, this.request, this.details, this.headers, Lazy.of(bodyDecoder));
         }
 
     }
