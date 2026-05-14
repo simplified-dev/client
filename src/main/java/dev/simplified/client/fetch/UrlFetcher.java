@@ -255,7 +255,8 @@ public final class UrlFetcher {
 
             if (response.isError())
                 throw new UrlFetchException(
-                    new ErrorContext(status, details, HttpMethod.GET, url.toString(), headers, body),
+                    new ErrorContext(status, HttpMethod.GET, url.toString(), headers, Collections.emptyMap(), body),
+                    details,
                     "Origin returned %d %s for URL '%s'",
                     status.getCode(),
                     status.getMessage(),

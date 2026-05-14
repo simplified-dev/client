@@ -64,6 +64,49 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
+     * Constructs a new {@code UrlFetchException} with a pre-built {@link NetworkDetails},
+     * bypassing the header-map lazy build inside {@link ApiException}.
+     * <p>
+     * Used by subtypes whose timing data originates from Apache's
+     * {@link org.apache.http.protocol.HttpContext} rather than feign-style header injection -
+     * the {@code X-Internal-*} markers consumed by the standard lazy path are absent in that
+     * source, so the prebuilt snapshot preserves real round-trip / DNS / TCP / TLS timings.
+     *
+     * @param context the HTTP context bundle
+     * @param details a pre-built network timing snapshot to expose via {@link #getDetails()}
+     * @param message the detail message describing the failure
+     * @param args optional format arguments for {@code message}
+     */
+    public UrlFetchException(
+        @NotNull ErrorContext context,
+        @NotNull NetworkDetails details,
+        @NotNull @PrintFormat String message,
+        @Nullable Object... args
+    ) {
+        this(null, context, details, message, args);
+    }
+
+    /**
+     * Constructs a new {@code UrlFetchException} with a cause and a pre-built
+     * {@link NetworkDetails}, bypassing the header-map lazy build inside {@link ApiException}.
+     *
+     * @param cause the underlying transport or decode failure, or {@code null} if none
+     * @param context the HTTP context bundle
+     * @param details a pre-built network timing snapshot to expose via {@link #getDetails()}
+     * @param message the detail message describing the failure
+     * @param args optional format arguments for {@code message}
+     */
+    public UrlFetchException(
+        @Nullable Throwable cause,
+        @NotNull ErrorContext context,
+        @NotNull NetworkDetails details,
+        @NotNull @PrintFormat String message,
+        @Nullable Object... args
+    ) {
+        super(cause, NAME, context, details, args.length == 0 ? message : String.format(message, args), true);
+    }
+
+    /**
      * Returns the URL that was being fetched when the failure occurred.
      * <p>
      * Convenience accessor that parses {@link #getRequest()}'s URL string back into a
@@ -77,13 +120,17 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
-     * Builds an {@link ErrorContext} carrying an empty body and empty response headers for
+     * Builds an {@link ErrorContext} carrying an empty body and empty request headers for
      * pre-response failures - rate-limit rejections, transport faults - where no exchange
      * actually completed.
+     * <p>
+     * Subtypes whose timing data comes from a non-feign source (e.g. Apache's
+     * {@link org.apache.http.protocol.HttpContext}) feed that {@link NetworkDetails} into the
+     * prebuilt-details {@link UrlFetchException} constructor instead of threading it through
+     * this helper. The empty request-headers map ensures the lazy {@link NetworkDetails} build
+     * in the standard path produces the same result as {@link NetworkDetails#empty()}.
      *
      * @param status the synthetic status to expose
-     * @param details the timing snapshot to expose ({@link NetworkDetails#empty()} for
-     *                pre-network failures)
      * @param url the URL that was being fetched
      * @param responseHeaders the headers received before the failure, or
      *                        {@link Collections#emptyMap()} when none were received
@@ -91,16 +138,15 @@ public class UrlFetchException extends ApiException {
      */
     static @NotNull ErrorContext syntheticContext(
         @NotNull HttpStatus status,
-        @NotNull NetworkDetails details,
         @NotNull URI url,
         @NotNull Map<String, Collection<String>> responseHeaders
     ) {
         return new ErrorContext(
             status,
-            details,
             HttpMethod.GET,
             url.toString(),
             responseHeaders,
+            Collections.emptyMap(),
             new byte[0]
         );
     }
@@ -128,7 +174,7 @@ public class UrlFetchException extends ApiException {
          */
         public RateLimited(@NotNull URI url, @NotNull String bucketId, @NotNull RateLimit rateLimit) {
             super(
-                syntheticContext(HttpStatus.TOO_MANY_REQUESTS, NetworkDetails.empty(), url, Collections.emptyMap()),
+                syntheticContext(HttpStatus.TOO_MANY_REQUESTS, url, Collections.emptyMap()),
                 "Rate limit exceeded for bucket '%s' on URL '%s'",
                 bucketId,
                 url
@@ -164,7 +210,8 @@ public class UrlFetchException extends ApiException {
             long maxBytes
         ) {
             super(
-                syntheticContext(HttpStatus.IO_ERROR, details, url, responseHeaders),
+                syntheticContext(HttpStatus.IO_ERROR, url, responseHeaders),
+                details,
                 "Response body exceeded cap of %d bytes for URL '%s'",
                 maxBytes,
                 url
@@ -190,7 +237,8 @@ public class UrlFetchException extends ApiException {
         public Transport(@NotNull Throwable cause, @NotNull URI url, @NotNull NetworkDetails details) {
             super(
                 cause,
-                syntheticContext(HttpStatus.IO_ERROR, details, url, Collections.emptyMap()),
+                syntheticContext(HttpStatus.IO_ERROR, url, Collections.emptyMap()),
+                details,
                 "Transport failure fetching URL '%s'",
                 url
             );

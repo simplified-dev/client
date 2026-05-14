@@ -99,10 +99,10 @@ public class ApiExceptionConstructionBenchmark {
 
         this.context = new ErrorContext(
             HttpStatus.of(500),
-            NetworkDetails.empty(),
             HttpMethod.GET,
             "https://api.example.com/v1/resource/42",
             this.responseHeaders,
+            java.util.Collections.emptyMap(),
             this.bodyBytes
         );
     }
@@ -159,7 +159,7 @@ public class ApiExceptionConstructionBenchmark {
             this.name = name;
             this.status = context.status();
             this.body = context.bodyBytes().length == 0 ? Optional.empty() : Optional.of(context.bodyBytes());
-            this.details = context.details();
+            this.details = new NetworkDetails(context.responseHeaders(), context.requestHeaders());
             this.headers = Response.getHeaders(toMutableHeaders(context.responseHeaders()));
             this.request = new Request.Impl(context.requestMethod(), context.requestUrl());
         }

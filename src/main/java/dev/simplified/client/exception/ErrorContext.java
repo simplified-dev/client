@@ -16,23 +16,26 @@ import java.util.Map;
  * <p>
  * Instances are built once at the {@link InternalErrorDecoder} boundary via
  * {@link #fromFeign(feign.Response, byte[])} and then handed to typed exception
- * constructors. The eager {@link NetworkDetails} field avoids retaining the raw
- * request-headers map indefinitely, while {@code bodyBytes} carries the buffered body
- * for lazy reconstruction inside {@link ApiException#getBody()}.
+ * constructors. Both header maps are retained so {@link ApiException} can lazily
+ * construct its {@link NetworkDetails} on demand; the request-headers map is otherwise
+ * unused by the public {@link ApiException} surface, but holding one extra reference
+ * is far cheaper than eagerly parsing the timing instants for every exception that is
+ * inspected only via {@link ApiException#getStatus()}.
  *
  * @param status the HTTP status code returned by the remote server
- * @param details the network timing and TLS metadata captured during the exchange
  * @param requestMethod the HTTP method of the originating request
  * @param requestUrl the URL of the originating request
  * @param responseHeaders the raw response headers, including internal instrumentation entries
+ * @param requestHeaders the raw request headers, carrying the {@code X-Internal-*} timing
+ *                       markers consumed by {@link NetworkDetails}
  * @param bodyBytes the buffered response body bytes - empty when the body was absent
  */
 public record ErrorContext(
     @NotNull HttpStatus status,
-    @NotNull NetworkDetails details,
     @NotNull HttpMethod requestMethod,
     @NotNull String requestUrl,
     @NotNull Map<String, Collection<String>> responseHeaders,
+    @NotNull Map<String, Collection<String>> requestHeaders,
     byte @NotNull [] bodyBytes
 ) {
 
@@ -50,10 +53,10 @@ public record ErrorContext(
     public static @NotNull ErrorContext fromFeign(@NotNull feign.Response anchor, byte @NotNull [] bodyBytes) {
         return new ErrorContext(
             HttpStatus.of(anchor.status()),
-            new NetworkDetails(anchor.headers(), anchor.request().headers()),
             HttpMethod.of(anchor.request().httpMethod().name()),
             anchor.request().url(),
             anchor.headers(),
+            anchor.request().headers(),
             bodyBytes
         );
     }

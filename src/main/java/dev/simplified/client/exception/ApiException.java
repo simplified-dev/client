@@ -37,10 +37,13 @@ import java.util.Optional;
  * domain-specific metadata on top of the base HTTP error information.
  * <p>
  * The exception stores a single immutable {@link ErrorContext} record carrying only
- * non-feign primitives; {@link #getBody()}, {@link #getHeaders()}, and
- * {@link #getRequest()} are memoized via {@link Lazy} holders that close over the
- * context. Callers that only inspect {@link #getStatus()} or {@link #getDetails()}
- * pay zero allocation cost beyond the context reference.
+ * non-feign primitives. {@link #getStatus()}, {@link #getBody()}, and {@link #getRequest()}
+ * resolve via eagerly-populated fields (the underlying allocations are cheaper than the
+ * {@link Lazy} holder overhead would be). {@link #getDetails()} and {@link #getHeaders()}
+ * are memoized via {@link Lazy} because their suppliers do non-trivial work
+ * ({@code Instant} parsing for {@link NetworkDetails}, {@code TreeMap} construction +
+ * filter + {@code Concurrent} wrappers for the cleaned headers) that the dominant
+ * status-only access pattern can skip entirely.
  * <p>
  * The {@link #response} field holds a parsed {@link ApiErrorResponse} whose
  * concrete type is determined by each {@link Client} subclass's error decoder.
@@ -63,14 +66,17 @@ public class ApiException extends RuntimeException implements Response<Optional<
     /** The primitive HTTP context bundle carrying status, network details, request method/url, headers, and body bytes. */
     private final @NotNull ErrorContext context;
 
-    /** Memoized response body bytes, or {@link Optional#empty()} if the body was absent. */
-    private final @NotNull Lazy<Optional<byte[]>> body;
+    /** The response body bytes, or {@link Optional#empty()} if the body was absent. */
+    private final @NotNull Optional<byte[]> body;
+
+    /** The originating request, eagerly wrapped around {@code context}'s method and URL. */
+    private final @NotNull Request request;
+
+    /** Memoized network timing and TLS metadata, lazily built from {@code context}'s header maps. */
+    private final @NotNull Lazy<NetworkDetails> details;
 
     /** Memoized response headers (internal instrumentation headers excluded) derived from {@link #context}. */
     private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
-
-    /** Memoized originating request derived from {@link #context}. */
-    private final @NotNull Lazy<Request> request;
 
     /** The structured error response parsed from the response body. */
     protected @NotNull ApiErrorResponse response;
@@ -83,9 +89,9 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * <p>
      * The {@link #response} field is initialized with a fallback {@link ApiErrorResponse}
      * that returns the synthesized exception message; subclass error decoders typically
-     * replace it with a properly deserialized instance. The body, headers, and originating
-     * request are derived lazily from {@code context} on first access; the status and
-     * network details delegate to the eagerly-built record fields.
+     * replace it with a properly deserialized instance. The status, body, and originating
+     * request are populated eagerly from {@code context}; the headers and network details
+     * are deferred via {@link Lazy} until first access.
      *
      * @param cause the underlying cause of the failure, or {@code null} if none
      * @param name a short name classifying this error type
@@ -135,15 +141,71 @@ public class ApiException extends RuntimeException implements Response<Optional<
         @NotNull String message,
         boolean writableStackTrace
     ) {
+        this(
+            cause,
+            name,
+            context,
+            Lazy.of(() -> new NetworkDetails(context.responseHeaders(), context.requestHeaders())),
+            message,
+            writableStackTrace
+        );
+    }
+
+    /**
+     * Constructs an {@code ApiException} with a caller-supplied detail message and a pre-built
+     * {@link NetworkDetails}, bypassing the header-map lazy build.
+     * <p>
+     * Used when the caller obtains timing metadata from a non-feign source - typically Apache's
+     * {@link org.apache.http.protocol.HttpContext} via the standalone {@code UrlFetcher} - so
+     * the timing data is preserved without round-tripping through the request-headers map.
+     * The supplied {@code NetworkDetails} is held inside a resolved-on-first-access {@link Lazy}
+     * to share the lookup path with the header-map case; first {@link #getDetails()} call
+     * returns the supplied instance directly with no parsing.
+     *
+     * @param cause the underlying cause of the failure, or {@code null} if none
+     * @param name a short name classifying this error type
+     * @param context the primitive HTTP context bundle carrying status, headers, body, and request metadata
+     * @param prebuiltDetails a pre-resolved network timing snapshot
+     * @param message the pre-formatted detail message
+     * @param writableStackTrace whether this exception should capture a stack trace
+     */
+    protected ApiException(
+        @Nullable Throwable cause,
+        @NotNull String name,
+        @NotNull ErrorContext context,
+        @NotNull NetworkDetails prebuiltDetails,
+        @NotNull String message,
+        boolean writableStackTrace
+    ) {
+        this(cause, name, context, Lazy.of(() -> prebuiltDetails), message, writableStackTrace);
+    }
+
+    /**
+     * Canonical constructor that all sibling forms delegate to.
+     *
+     * @param cause the underlying cause of the failure, or {@code null} if none
+     * @param name a short name classifying this error type
+     * @param context the primitive HTTP context bundle
+     * @param details the lazy holder driving {@link #getDetails()}
+     * @param message the pre-formatted detail message
+     * @param writableStackTrace whether this exception should capture a stack trace
+     */
+    private ApiException(
+        @Nullable Throwable cause,
+        @NotNull String name,
+        @NotNull ErrorContext context,
+        @NotNull Lazy<NetworkDetails> details,
+        @NotNull String message,
+        boolean writableStackTrace
+    ) {
         super(message, cause, true, writableStackTrace);
         this.name = name;
         this.context = context;
-        this.body = Lazy.of(() -> {
-            byte[] bytes = context.bodyBytes();
-            return bytes.length == 0 ? Optional.empty() : Optional.of(bytes);
-        });
+        byte[] bytes = context.bodyBytes();
+        this.body = bytes.length == 0 ? Optional.empty() : Optional.of(bytes);
+        this.request = new Request.Impl(context.requestMethod(), context.requestUrl());
+        this.details = details;
         this.headers = Lazy.of(() -> Response.getHeaders(context.responseHeaders()));
-        this.request = Lazy.of(() -> new Request.Impl(context.requestMethod(), context.requestUrl()));
         this.response = super::getMessage;
     }
 
@@ -154,12 +216,12 @@ public class ApiException extends RuntimeException implements Response<Optional<
 
     @Override
     public @NotNull NetworkDetails getDetails() {
-        return this.context.details();
+        return this.details.get();
     }
 
     @Override
     public @NotNull Optional<byte[]> getBody() {
-        return this.body.get();
+        return this.body;
     }
 
     @Override
@@ -169,7 +231,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
 
     @Override
     public @NotNull Request getRequest() {
-        return this.request.get();
+        return this.request;
     }
 
     /**

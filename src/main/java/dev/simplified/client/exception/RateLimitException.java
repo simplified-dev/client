@@ -86,9 +86,9 @@ public final class RateLimitException extends ApiException {
             "RateLimit",
             new ErrorContext(
                 HttpStatus.TOO_MANY_REQUESTS,
-                NetworkDetails.empty(),
                 HttpMethod.of(template.request().httpMethod().name()),
                 template.request().url(),
+                Collections.emptyMap(),
                 Collections.emptyMap(),
                 new byte[0]
             ),
