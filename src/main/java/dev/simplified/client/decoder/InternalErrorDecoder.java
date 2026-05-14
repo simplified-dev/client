@@ -1,6 +1,5 @@
 package dev.simplified.client.decoder;
 
-import dev.simplified.client.Client;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.ErrorContext;
@@ -10,7 +9,7 @@ import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.exception.RetryableApiException;
 import dev.simplified.client.response.HttpState;
 import dev.simplified.client.response.HttpStatus;
-import dev.simplified.client.response.RetryAfterParser;
+import dev.simplified.client.util.RetryAfterParser;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.reflection.Reflection;
 import dev.simplified.reflection.accessor.FieldAccessor;

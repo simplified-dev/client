@@ -1,6 +1,6 @@
 package dev.simplified.client.benchmark;
 
-import dev.simplified.client.response.CloudflareCacheStatus;
+import dev.simplified.client.cache.CloudflareCacheStatus;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;

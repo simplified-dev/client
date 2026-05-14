@@ -1,5 +1,6 @@
-package dev.simplified.client.response;
+package dev.simplified.client.cache;
 
+import dev.simplified.client.util.RetryAfterParser;
 import dev.simplified.util.StringUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;

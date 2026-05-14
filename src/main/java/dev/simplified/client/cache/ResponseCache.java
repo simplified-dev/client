@@ -4,8 +4,9 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import dev.simplified.client.request.HttpMethod;
-import dev.simplified.client.response.CacheControl;
+import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
 import org.jetbrains.annotations.NotNull;
@@ -95,8 +96,9 @@ public final class ResponseCache {
      * <p>
      * Deliberately <b>not</b> prefixed with {@code X-Internal-} so that
      * {@link Response#getHeaders(Map)} preserves it in the public view. This lets callers
-     * observe cache hits and lets {@link #store(Response.Impl, byte[])} skip re-storing
-     * entries that originated from the cache itself.
+     * observe cache hits via {@link Response#isFromCache()} and lets
+     * {@link #store(Response, byte[])} skip re-storing entries that originated from the
+     * cache itself.
      */
     public static final @NotNull String CACHE_HIT_HEADER = "X-Cache-Hit";
 
@@ -243,7 +245,7 @@ public final class ResponseCache {
      * @param decoded the decoded response to consider for caching
      * @param body the captured body bytes to store alongside {@code decoded} for replay
      */
-    public void store(@NotNull Response.Impl<?> decoded, byte @NotNull [] body) {
+    public void store(@NotNull Response<?> decoded, byte @NotNull [] body) {
         if (!shouldStore(decoded))
             return;
 
@@ -267,9 +269,9 @@ public final class ResponseCache {
      * @param <T> the decoded body type, captured from the wildcard at the call site
      * @return a new entry pairing the sanitized cached view with the body bytes
      */
-    private static <T> @NotNull CacheEntry<T> buildEntry(@NotNull Response.Impl<T> decoded, byte @NotNull [] body) {
-        Response.Impl<T> sanitized = stripTransportHeaders(decoded);
-        return new CacheEntry<>(Response.CachedImpl.from(sanitized), body);
+    private static <T> @NotNull CacheEntry<T> buildEntry(@NotNull Response<T> decoded, byte @NotNull [] body) {
+        ConcurrentMap<String, ConcurrentList<String>> sanitized = stripTransportHeaders(decoded);
+        return new CacheEntry<>(Response.CachedImpl.from(decoded).withHeaders(sanitized), body);
     }
 
     /**
@@ -336,7 +338,7 @@ public final class ResponseCache {
      * @param decoded the decoded response to evaluate
      * @return {@code true} if the response is eligible for caching
      */
-    private static boolean shouldStore(@NotNull Response.Impl<?> decoded) {
+    private static boolean shouldStore(@NotNull Response<?> decoded) {
         HttpMethod method = decoded.getRequest().getMethod();
 
         if (!method.isCacheable())
@@ -363,37 +365,31 @@ public final class ResponseCache {
     }
 
     /**
-     * Builds a copy of the given decoded response with hop-by-hop and transport-framing
-     * headers stripped from its anchor's header map.
+     * Returns a sanitized copy of the given response's headers with hop-by-hop and
+     * transport-framing headers removed.
      *
-     * @param decoded the decoded response to sanitize
-     * @param <T> the decoded body type
-     * @return a new {@link Response.Impl} carrying the same anchor bytes and decoder but
-     *         with stripped headers
+     * @param decoded the decoded response whose headers should be sanitized
+     * @return an unmodifiable case-insensitive header map with hop-by-hop and
+     *         {@code Content-Encoding} / {@code Content-Length} entries removed
      */
-    private static <T> @NotNull Response.Impl<T> stripTransportHeaders(@NotNull Response.Impl<T> decoded) {
-        feign.Response anchor = decoded.getAnchor();
-        Map<String, Collection<String>> sanitized = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+    private static @NotNull ConcurrentMap<String, ConcurrentList<String>> stripTransportHeaders(@NotNull Response<?> decoded) {
+        TreeMap<String, ConcurrentList<String>> sanitized = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-        for (Map.Entry<String, Collection<String>> entry : anchor.headers().entrySet()) {
-            String lower = entry.getKey().toLowerCase(Locale.ROOT);
+        decoded.getHeaders().forEach((name, values) -> {
+            String lower = name.toLowerCase(Locale.ROOT);
 
             if (HOP_BY_HOP_HEADERS.contains(lower) || TRANSPORT_HEADERS.contains(lower))
-                continue;
+                return;
 
-            sanitized.put(entry.getKey(), entry.getValue());
-        }
+            sanitized.put(name, values);
+        });
 
-        feign.Response sanitizedAnchor = anchor.toBuilder()
-            .headers(sanitized)
-            .build();
-
-        return decoded.withAnchor(sanitizedAnchor);
+        return Concurrent.newUnmodifiableTreeMap(String.CASE_INSENSITIVE_ORDER, sanitized);
     }
 
     /**
      * Merges the headers from a 304 response into an existing cached entry, producing a
-     * fresh {@link CacheEntry} whose response anchor carries the merged headers while the
+     * fresh {@link CacheEntry} whose cached view exposes the merged headers while the
      * body bytes, status, and request are inherited from the existing entry.
      *
      * @param existing the cached entry to refresh
@@ -406,9 +402,8 @@ public final class ResponseCache {
         @NotNull Map<String, ? extends Collection<String>> new304Headers
     ) {
         Response.CachedImpl<T> existingResponse = existing.response();
-        feign.Response anchor = existingResponse.getAnchor();
-        Map<String, Collection<String>> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        merged.putAll(anchor.headers());
+        TreeMap<String, ConcurrentList<String>> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        merged.putAll(existingResponse.getHeaders());
 
         for (Map.Entry<String, ? extends Collection<String>> entry : new304Headers.entrySet()) {
             String name = entry.getKey();
@@ -417,17 +412,23 @@ public final class ResponseCache {
             if (HOP_BY_HOP_HEADERS.contains(lower) || TRANSPORT_HEADERS.contains(lower))
                 continue;
 
-            if (entry.getValue() == null || entry.getValue().isEmpty())
+            if (NetworkDetails.isInternalHeader(name))
                 continue;
 
-            merged.put(name, new ArrayList<>(entry.getValue()));
+            Collection<String> values = entry.getValue();
+
+            if (values == null || values.isEmpty())
+                continue;
+
+            merged.put(name, Concurrent.newUnmodifiableList(values));
         }
 
-        feign.Response mergedAnchor = anchor.toBuilder()
-            .headers(merged)
-            .build();
+        ConcurrentMap<String, ConcurrentList<String>> mergedView = Concurrent.newUnmodifiableTreeMap(
+            String.CASE_INSENSITIVE_ORDER,
+            merged
+        );
 
-        return new CacheEntry<>(Response.CachedImpl.from(existingResponse.withAnchor(mergedAnchor)), existing.body());
+        return new CacheEntry<>(existingResponse.withHeaders(mergedView), existing.body());
     }
 
     /**
