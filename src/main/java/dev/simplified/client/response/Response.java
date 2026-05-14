@@ -1,7 +1,11 @@
 package dev.simplified.client.response;
 
+import dev.simplified.client.cache.CacheControl;
+import dev.simplified.client.cache.CloudflareCacheStatus;
+import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.request.Request;
+import dev.simplified.client.util.HttpDates;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
@@ -35,13 +39,14 @@ import java.util.stream.Collectors;
  * {@link #getCloudflareCacheStatus()} and {@link #isError()} provide quick access to
  * commonly needed response characteristics.
  * <p>
- * Three default implementations are provided as nested classes: {@link Impl} carries a
- * lazily-decoded body driven by a caller-supplied {@link Supplier}, {@link StreamingImpl}
- * wraps a streaming body whose decode runs eagerly while metadata stays lazy, and
- * {@link CachedImpl} extends {@code Impl} with behavioral accessors that compute RFC 7234 cache
- * semantics (freshness, age, revalidation capability) from the inherited headers and
- * {@link NetworkDetails}. {@code Cached} adds no new fields - every cache-specific value is
- * derived on demand.
+ * Four default implementations are provided as nested classes: {@link Impl} anchors a
+ * lazily-decoded body on a {@link feign.Response}, {@link StreamingImpl} wraps a streaming
+ * body whose decode runs eagerly while metadata stays lazy, {@link DirectImpl} is a sibling
+ * to {@code Impl} for callers that build a buffered response without a Feign anchor (e.g. the
+ * standalone URL fetcher), and {@link CachedImpl} wraps any {@code Response} with behavioral
+ * accessors that compute RFC 7234 cache semantics (freshness, age, revalidation capability)
+ * from the wrapped headers and {@link NetworkDetails}. {@code CachedImpl} carries no decoded
+ * body of its own; every cache-specific value is derived on demand from the source response.
  *
  * @param <T> the deserialized type of the response body
  * @see Request
@@ -122,6 +127,49 @@ public interface Response<T> {
     }
 
     /**
+     * Retrieves the value of the {@code Content-Type} response header, if present.
+     * <p>
+     * Returns the first value of the case-insensitive {@code Content-Type} header verbatim
+     * (including any {@code charset} or boundary parameters). Header lookup is
+     * case-insensitive because {@link #getHeaders(Map)} collects into a case-insensitive map.
+     *
+     * @return the {@code Content-Type} header value, or {@link Optional#empty()} if absent
+     */
+    default @NotNull Optional<String> getContentType() {
+        return this.getHeaders()
+            .getOptional("Content-Type")
+            .flatMap(ConcurrentList::findFirst);
+    }
+
+    /**
+     * Determines whether this response was served from the local response cache as a fresh
+     * hit or {@code 304 Not Modified} replay.
+     * <p>
+     * Detected by the presence of the {@link ResponseCache#CACHE_HIT_HEADER} marker, which
+     * cache-replay paths stamp on synthesized responses and which survives the
+     * {@link #getHeaders(Map)} filter because it is not prefixed with {@code X-Internal-}.
+     *
+     * @return {@code true} if this response is a cache replay; {@code false} otherwise
+     */
+    default boolean isFromCache() {
+        return this.getHeaders().containsKey(ResponseCache.CACHE_HIT_HEADER);
+    }
+
+    /**
+     * Determines whether this response is a stale-if-error replay served from the local
+     * response cache.
+     * <p>
+     * Detected by the presence of the {@link ResponseCache#CACHE_STALE_HEADER} marker,
+     * complementing {@link #isFromCache()} to distinguish stale replays from fresh hits and
+     * 304 revalidations.
+     *
+     * @return {@code true} if this response is a stale-if-error replay; {@code false} otherwise
+     */
+    default boolean isStaleFromCache() {
+        return this.getHeaders().containsKey(ResponseCache.CACHE_STALE_HEADER);
+    }
+
+    /**
      * Converts a standard {@link Map} of header names to value collections into an
      * unmodifiable {@link ConcurrentMap}, filtering out empty entries and internal
      * instrumentation headers.
@@ -137,10 +185,10 @@ public interface Response<T> {
      * @return an unmodifiable case-insensitive {@link ConcurrentMap} of header names to
      *         unmodifiable {@link ConcurrentList} value lists, with internal headers removed
      */
-    static @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders(@NotNull Map<String, Collection<String>> headers) {
+    static @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders(@NotNull Map<String, ? extends Collection<String>> headers) {
         TreeMap<String, ConcurrentList<String>> sorted = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-        for (Map.Entry<String, Collection<String>> entry : headers.entrySet()) {
+        for (Map.Entry<String, ? extends Collection<String>> entry : headers.entrySet()) {
             Collection<String> values = entry.getValue();
 
             if (values.isEmpty())
@@ -330,57 +378,169 @@ public interface Response<T> {
     }
 
     /**
-     * A {@link Response.Impl} augmented with RFC 7234 cache semantics.
+     * Buffered response implementation constructed directly from resolved values without a
+     * {@link feign.Response} anchor.
      * <p>
-     * {@code Cached} holds <b>no additional state</b> of its own - every cache-specific value
-     * is derived on demand from the inherited {@link NetworkDetails} (request / response
-     * timings via {@link NetworkDetails#getRoundTrip()}) and the inherited response
-     * headers ({@code Cache-Control}, {@code Expires}, {@code Date}, {@code Age},
-     * {@code Vary}, {@code Last-Modified}). Used as the response side of
-     * {@code ResponseCache}'s entry tuple, where the cached entry is both a first-class
-     * {@link Response} (status, headers, body) and a carrier of freshness and revalidation
-     * logic; the body bytes for replay live alongside in the cache's storage tuple.
+     * Sibling to {@link Impl}: status, request, network details, and headers are eagerly held
+     * (the caller has already resolved them outside of any Feign pipeline), while the body
+     * decode stays lazy via the supplied {@link Supplier} so callers reading only
+     * {@link #getStatus()} pay zero decode cost. Used by callers that issue HTTP directly
+     * against a transport (e.g. the standalone URL fetcher) and synthesize the envelope
+     * themselves rather than letting Feign anchor it.
+     *
+     * @param <T> the deserialized type of the response body
+     */
+    @Getter
+    final class DirectImpl<T> implements Response<T> {
+
+        /** The HTTP status code and classification, supplied at construction. */
+        private final @NotNull HttpStatus status;
+
+        /** The originating request, supplied at construction. */
+        private final @NotNull Request request;
+
+        /** The network timing and TLS metadata captured by the transport, supplied at construction. */
+        private final @NotNull NetworkDetails details;
+
+        /** The response headers (internal {@code X-Internal-} prefixed entries filtered out). */
+        private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
+
+        /** Memoized decoded body, materialized on the first call to {@link #getBody()}. */
+        @Getter(AccessLevel.NONE)
+        private final @NotNull Lazy<T> body;
+
+        /**
+         * Constructs a directly-built buffered response.
+         *
+         * @param status the HTTP status code and classification
+         * @param request the originating request
+         * @param details the network timing and TLS metadata captured during the exchange
+         * @param headers the raw response headers; internal {@code X-Internal-} prefixed
+         *                entries and empty values are filtered out by {@link #getHeaders(Map)}
+         * @param bodyDecoder the supplier that materializes the typed body on first access,
+         *                    typically closing over previously-buffered body bytes
+         */
+        public DirectImpl(
+            @NotNull HttpStatus status,
+            @NotNull Request request,
+            @NotNull NetworkDetails details,
+            @NotNull Map<String, ? extends Collection<String>> headers,
+            @NotNull Supplier<T> bodyDecoder
+        ) {
+            this.status = status;
+            this.request = request;
+            this.details = details;
+            this.headers = Response.getHeaders(headers);
+            this.body = Lazy.of(bodyDecoder);
+        }
+
+        @Override
+        public @NotNull T getBody() {
+            return this.body.get();
+        }
+
+    }
+
+    /**
+     * Cache-aware view that wraps any {@link Response} with RFC 7234 cache semantics.
+     * <p>
+     * {@code CachedImpl} holds no decoded body of its own - every getter except
+     * {@link #getHeaders()} delegates straight through to the wrapped source response, while
+     * {@code getHeaders()} returns a snapshot that may have been sanitized (transport headers
+     * stripped) or merged with a {@code 304 Not Modified} update without rebuilding the
+     * underlying envelope. Used as the response side of {@code ResponseCache}'s entry tuple,
+     * where the cached entry is both a first-class {@link Response} (status, headers, body)
+     * and a carrier of freshness and revalidation logic; the body bytes for replay live
+     * alongside in the cache's storage tuple.
      * <p>
      * Because directive parsing and header lookups are cheap (a handful of microseconds),
      * storing parsed fields on the entry would offer no meaningful performance benefit over
      * re-deriving them on each cache operation, while adding duplicated state and a risk of
-     * drift from the authoritative headers. The inherited {@link Response.Impl} fields are
+     * drift from the authoritative headers. The wrapped source's headers and timings are
      * the single source of truth.
      * <p>
-     * Streaming responses cannot be cached - {@code Cached} extends only {@link Impl} and
-     * never {@link StreamingImpl}, mirroring the storage contract that requires buffered
-     * body bytes alongside the entry.
+     * Streaming responses cannot be cached - the storage contract requires buffered body
+     * bytes alongside the entry, so {@link StreamingImpl} envelopes never reach this class.
      *
      * @param <T> the deserialized type of the response body
      * @see <a href="https://datatracker.ietf.org/doc/html/rfc7234">RFC 7234 - HTTP/1.1 Caching</a>
      */
-    final class CachedImpl<T> extends Impl<T> {
+    final class CachedImpl<T> implements Response<T> {
+
+        /** The wrapped source response supplying body, status, request, and timings. */
+        private final @NotNull Response<T> source;
 
         /**
-         * Constructs a cached view over an anchor and body supplier, using the same fields
-         * that drive {@link Impl}.
-         *
-         * @param anchor the Feign response supplying cached headers and metadata
-         * @param bodyDecoder the supplier that materializes the typed body on demand
+         * The headers exposed by this cached view, possibly distinct from
+         * {@code source.getHeaders()} after sanitization or {@code 304} merging.
          */
-        private CachedImpl(@NotNull feign.Response anchor, @NotNull Supplier<T> bodyDecoder) {
-            super(anchor, bodyDecoder);
+        private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
+
+        /**
+         * Constructs a cached view wrapping the given source with the given headers.
+         *
+         * @param source the wrapped source response
+         * @param headers the headers to expose from this cached view
+         */
+        private CachedImpl(@NotNull Response<T> source, @NotNull ConcurrentMap<String, ConcurrentList<String>> headers) {
+            this.source = source;
+            this.headers = headers;
         }
 
         /**
-         * Builds a {@code Cached} view over an existing decoded response, reusing its anchor
-         * and decoder rather than copying any materialized state.
+         * Builds a {@code CachedImpl} wrapping the given source response.
          * <p>
-         * Any laziness in {@code source} is preserved - a cached entry that was never
-         * {@link #getBody()}-ed defers its decode until the next reader, including the cache
-         * replay path.
+         * The wrapped source's headers are exposed as-is; any laziness in {@code source}
+         * (e.g. a deferred body decoder on {@link Impl} or {@link DirectImpl}) is preserved -
+         * a cached entry that was never {@link #getBody()}-ed defers its decode until the
+         * next reader, including the cache replay path.
          *
          * @param source the source response to wrap
          * @param <U> the deserialized body type
-         * @return a new {@code Cached} instance sharing {@code source}'s anchor and decoder
+         * @return a new {@code CachedImpl} wrapping {@code source}
          */
-        public static <U> @NotNull CachedImpl<U> from(@NotNull Impl<U> source) {
-            return new CachedImpl<>(source.anchor, source.bodyDecoder);
+        public static <U> @NotNull CachedImpl<U> from(@NotNull Response<U> source) {
+            return new CachedImpl<>(source, source.getHeaders());
+        }
+
+        /**
+         * Returns a new {@code CachedImpl} wrapping the same source but exposing the given
+         * headers in place of the source's.
+         * <p>
+         * Used by {@link ResponseCache} to expose a sanitized header view (transport-framing
+         * headers stripped before storage) and to refresh entries after {@code 304 Not Modified}
+         * revalidations without rebuilding the body decoder.
+         *
+         * @param overridden the headers to expose from the returned view
+         * @return a new cached view sharing this source but exposing {@code overridden}
+         */
+        public @NotNull CachedImpl<T> withHeaders(@NotNull ConcurrentMap<String, ConcurrentList<String>> overridden) {
+            return new CachedImpl<>(this.source, overridden);
+        }
+
+        @Override
+        public @NotNull T getBody() {
+            return this.source.getBody();
+        }
+
+        @Override
+        public @NotNull HttpStatus getStatus() {
+            return this.source.getStatus();
+        }
+
+        @Override
+        public @NotNull NetworkDetails getDetails() {
+            return this.source.getDetails();
+        }
+
+        @Override
+        public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
+            return this.headers;
+        }
+
+        @Override
+        public @NotNull Request getRequest() {
+            return this.source.getRequest();
         }
 
         /**

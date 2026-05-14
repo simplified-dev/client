@@ -12,6 +12,7 @@ import dev.simplified.client.factory.TimedPlainConnectionSocketFactory;
 import dev.simplified.client.factory.TimedSecureConnectionSocketFactory;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
+import dev.simplified.client.factory.ApacheClientFactory;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
@@ -26,22 +27,11 @@ import feign.Feign;
 import feign.httpclient.ApacheHttpClient;
 import lombok.AccessLevel;
 import lombok.Getter;
-import org.apache.http.HttpRequest;
-import org.apache.http.HttpRequestInterceptor;
-import org.apache.http.client.config.RequestConfig;
-import org.apache.http.config.RegistryBuilder;
-import org.apache.http.conn.socket.ConnectionSocketFactory;
-import org.apache.http.conn.socket.PlainConnectionSocketFactory;
-import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
-import org.apache.http.impl.client.DefaultConnectionKeepAliveStrategy;
-import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.apache.http.impl.conn.SystemDefaultDnsResolver;
 import org.apache.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.InvocationTargetException;
-import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -308,60 +298,13 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * @return a fully configured {@link ApacheHttpClient} ready for use by Feign
      */
     private @NotNull ApacheHttpClient buildInternalClient() {
-        Timings timings = this.options.getTimings();
-
-        @SuppressWarnings("deprecation")
-        HttpClientBuilder httpClient = HttpClientBuilder.create()
-            .setConnectionManager(new PoolingHttpClientConnectionManager(
-                RegistryBuilder.<ConnectionSocketFactory>create()
-                    .register("http", new TimedPlainConnectionSocketFactory(
-                        PlainConnectionSocketFactory.getSocketFactory(),
-                        SystemDefaultDnsResolver.INSTANCE
-                    ))
-                    .register("https", new TimedSecureConnectionSocketFactory(
-                        SSLConnectionSocketFactory.getSocketFactory(),
-                        SystemDefaultDnsResolver.INSTANCE
-                    ))
-                    .build()
-            ))
-            .addInterceptorFirst((HttpRequestInterceptor) (request, context) -> {
-                context.setAttribute(NetworkDetails.REQUEST_START, Instant.now());
-
-                // Store all available connection details in headers
-                addHeader(request, context, NetworkDetails.REQUEST_START);
-                addHeader(request, context, NetworkDetails.DNS_START);
-                addHeader(request, context, NetworkDetails.DNS_END);
-                addHeader(request, context, NetworkDetails.TCP_CONNECT_START);
-                addHeader(request, context, NetworkDetails.TCP_CONNECT_END);
-                addHeader(request, context, NetworkDetails.TLS_HANDSHAKE_START);
-                addHeader(request, context, NetworkDetails.TLS_HANDSHAKE_END);
-                addHeader(request, context, NetworkDetails.TLS_PROTOCOL);
-                addHeader(request, context, NetworkDetails.TLS_CIPHER);
-
-                // Append Custom Queries and Headers
-                this.options.getQueries().forEach((key, value) -> request.getParams().setParameter(key, value));
-                this.options.getHeaders().forEach((key, value) -> request.addHeader(key, value));
-                this.options.getDynamicHeaders().forEach((key, supplier) -> supplier.get()
-                    .ifPresent(value -> request.addHeader(key, value))
-                );
-            })
-            .setMaxConnTotal(timings.maxConnections())
-            .setMaxConnPerRoute(timings.maxConnectionsPerRoute())
-            .evictIdleConnections(timings.connectionIdleTimeout(), TimeUnit.MILLISECONDS)
-            .setConnectionTimeToLive(timings.connectionTimeToLive(), TimeUnit.MILLISECONDS)
-            .setKeepAliveStrategy((response, context) -> {
-                long keepAlive = DefaultConnectionKeepAliveStrategy.INSTANCE.getKeepAliveDuration(response, context);
-                return (keepAlive == -1) ? timings.connectionKeepAlive() : Math.min(keepAlive, 60_000);
-            });
-
-        // Custom Local Address
-        this.options.getInet6Address().ifPresent(inet6Address -> httpClient.setDefaultRequestConfig(
-            RequestConfig.copy(RequestConfig.DEFAULT)
-                .setLocalAddress(inet6Address)
-                .build()
-        ));
-
-        return new ApacheHttpClient(httpClient.build());
+        return new ApacheHttpClient(ApacheClientFactory.configure(
+            this.options.getTimings(),
+            this.options.getQueries(),
+            this.options.getHeaders(),
+            this.options.getDynamicHeaders(),
+            this.options.getInet6Address()
+        ).build());
     }
 
     /**
@@ -452,24 +395,6 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                 }
             }
         );
-    }
-
-    /**
-     * Copies a named attribute from the {@link HttpContext} into the {@link HttpRequest} as a
-     * header, if the attribute is present.
-     * <p>
-     * Used internally by the request interceptor to propagate network timing attributes from the
-     * connection layer into request headers so they can be captured by {@link NetworkDetails}.
-     *
-     * @param request the outbound HTTP request to add the header to
-     * @param context the HTTP context containing connection-layer attributes
-     * @param id the attribute name and header name to propagate
-     */
-    private static void addHeader(@NotNull HttpRequest request, @NotNull HttpContext context, @NotNull String id) {
-        Object value = context.getAttribute(id);
-
-        if (value != null)
-            request.addHeader(id, String.valueOf(value));
     }
 
 }

@@ -102,7 +102,9 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * limiting) pass {@code false} for {@code writableStackTrace} to avoid the
      * per-instance cost of {@link Throwable#fillInStackTrace()}. The HTTP context
      * (status, headers, body, request URL, {@link NetworkDetails}) carried by
-     * {@code ApiException} is sufficient for diagnosis in those cases.
+     * {@code ApiException} is sufficient for diagnosis in those cases. The detail
+     * message is synthesized from {@code context} via
+     * {@link #synthesizeMessage(ErrorContext)}.
      *
      * @param cause the underlying cause of the failure, or {@code null} if none
      * @param name a short name classifying this error type
@@ -110,7 +112,30 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * @param writableStackTrace whether this exception should capture a stack trace
      */
     protected ApiException(@Nullable Throwable cause, @NotNull String name, @NotNull ErrorContext context, boolean writableStackTrace) {
-        super(synthesizeMessage(context), cause, true, writableStackTrace);
+        this(cause, name, context, synthesizeMessage(context), writableStackTrace);
+    }
+
+    /**
+     * Constructs an {@code ApiException} with a caller-supplied detail message.
+     * <p>
+     * Subclasses such as {@link UrlFetchException} that want their
+     * own message format (e.g. {@code "Rate limit exceeded for bucket 'X' on URL 'Y'"})
+     * delegate here instead of the synthesized-message constructor.
+     *
+     * @param cause the underlying cause of the failure, or {@code null} if none
+     * @param name a short name classifying this error type
+     * @param context the primitive HTTP context bundle carrying status, headers, body, and request metadata
+     * @param message the pre-formatted detail message
+     * @param writableStackTrace whether this exception should capture a stack trace
+     */
+    protected ApiException(
+        @Nullable Throwable cause,
+        @NotNull String name,
+        @NotNull ErrorContext context,
+        @NotNull String message,
+        boolean writableStackTrace
+    ) {
+        super(message, cause, true, writableStackTrace);
         this.name = name;
         this.context = context;
         this.body = Lazy.of(() -> {

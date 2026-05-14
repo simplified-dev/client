@@ -1,5 +1,6 @@
-package dev.simplified.client.response;
+package dev.simplified.client.cache;
 
+import dev.simplified.client.response.Response;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;

@@ -1,4 +1,4 @@
-package dev.simplified.client.response;
+package dev.simplified.client.util;
 
 import dev.simplified.util.StringUtil;
 import lombok.experimental.UtilityClass;
