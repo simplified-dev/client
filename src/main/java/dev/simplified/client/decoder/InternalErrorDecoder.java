@@ -13,6 +13,7 @@ import dev.simplified.client.util.RetryAfterParser;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.reflection.Reflection;
 import dev.simplified.reflection.accessor.FieldAccessor;
+import dev.simplified.client.util.BodyBuffering;
 import feign.Util;
 import feign.codec.ErrorDecoder;
 import org.jetbrains.annotations.NotNull;
@@ -181,7 +182,7 @@ public final class InternalErrorDecoder implements ErrorDecoder {
             return new byte[0];
 
         try {
-            return Util.toByteArray(raw.asInputStream());
+            return BodyBuffering.toByteArray(raw, response.headers());
         } catch (IOException ex) {
             return new byte[0];
         } finally {
