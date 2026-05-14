@@ -242,8 +242,8 @@ public interface Response<T> {
         /** Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}. */
         private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
 
-        /** Memoized originating request derived from {@link #anchor}. */
-        private final @NotNull Lazy<Request> request;
+        /** Eagerly-built originating request wrapper around {@link #anchor}'s method and URL. */
+        private final @NotNull Request request;
 
         /**
          * Constructs a lazy buffered response.
@@ -260,10 +260,10 @@ public interface Response<T> {
             this.body = Lazy.of(this.bodyDecoder);
             this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
             this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
-            this.request = Lazy.of(() -> new Request.Impl(
-                HttpMethod.of(this.anchor.request().httpMethod().name()),
-                this.anchor.request().url()
-            ));
+            this.request = new Request.Impl(
+                HttpMethod.of(anchor.request().httpMethod().name()),
+                anchor.request().url()
+            );
         }
 
         @Override
@@ -283,7 +283,7 @@ public interface Response<T> {
 
         @Override
         public @NotNull Request getRequest() {
-            return this.request.get();
+            return this.request;
         }
 
         /**
@@ -339,8 +339,8 @@ public interface Response<T> {
         /** Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}. */
         private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
 
-        /** Memoized originating request derived from {@link #anchor}. */
-        private final @NotNull Lazy<Request> request;
+        /** Eagerly-built originating request wrapper around {@link #anchor}'s method and URL. */
+        private final @NotNull Request request;
 
         /**
          * Constructs a streaming response.
@@ -354,10 +354,10 @@ public interface Response<T> {
             this.status = HttpStatus.of(anchor.status());
             this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
             this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
-            this.request = Lazy.of(() -> new Request.Impl(
-                HttpMethod.of(this.anchor.request().httpMethod().name()),
-                this.anchor.request().url()
-            ));
+            this.request = new Request.Impl(
+                HttpMethod.of(anchor.request().httpMethod().name()),
+                anchor.request().url()
+            );
         }
 
         @Override
@@ -372,7 +372,7 @@ public interface Response<T> {
 
         @Override
         public @NotNull Request getRequest() {
-            return this.request.get();
+            return this.request;
         }
 
     }
