@@ -51,10 +51,23 @@ import java.util.concurrent.TimeUnit;
  *                      this interval. Default: 10,000 (10 seconds).
  * @param maxConnections maximum total concurrent HTTP connections across all routes. Passed to
  *                       {@link PoolingHttpClientConnectionManager#setMaxTotal(int)
- *                       PoolingHttpClientConnectionManager.setMaxTotal()}. Default: 200.
+ *                       PoolingHttpClientConnectionManager.setMaxTotal()}. Treat this as a
+ *                       calibrated ceiling rather than a floor to raise: loopback benchmarks
+ *                       show that bumping to 2,000 or uncapped halves throughput and inflates
+ *                       p99 latency, because a thinly-utilised pool pays more connection
+ *                       churn, eviction-sweep, and TLS-handshake cost than a smaller hot pool
+ *                       can avoid through keep-alive reuse. High-RTT WAN traffic may justify
+ *                       a larger value (each connection is in use longer), but verify with a
+ *                       measurement before changing. Default: 200.
  * @param maxConnectionsPerRoute maximum concurrent HTTP connections per individual route. Passed to
  *                               {@link PoolingHttpClientConnectionManager#setDefaultMaxPerRoute(int)
- *                               PoolingHttpClientConnectionManager.setDefaultMaxPerRoute()}. Default: 50.
+ *                               PoolingHttpClientConnectionManager.setDefaultMaxPerRoute()}.
+ *                               A small, hot per-route pool with high keep-alive reuse
+ *                               outperforms a large, lukewarm pool with frequent fresh TLS
+ *                               handshakes on the same workload. Raising this value rarely
+ *                               improves throughput on short-RTT links and frequently
+ *                               regresses it; treat as a calibrated ceiling and verify with
+ *                               a measurement before changing. Default: 50.
  * @param maxCacheBytes maximum total weight of all cached response variants, in bytes. Includes raw body bytes,
  *                      approximate header byte size, and a fixed per-entry overhead. Default: 16,777,216 (16 MiB).
  * @param cacheSafetyFallback absolute upper bound on any cache entry's lifetime in milliseconds, regardless of
