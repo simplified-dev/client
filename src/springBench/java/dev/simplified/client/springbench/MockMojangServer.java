@@ -3,12 +3,9 @@ package dev.simplified.client.springbench;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
+import dev.simplified.client.cache.CachingFeignClient;
 import org.jetbrains.annotations.NotNull;
 
-import javax.net.ssl.KeyManagerFactory;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -21,6 +18,10 @@ import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.UUID;
 import java.util.concurrent.Executors;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 /**
  * Mock Mojang HTTPS server backing the Spring bench. Serves the
@@ -38,7 +39,7 @@ import java.util.concurrent.Executors;
  * <ul>
  *   <li>{@code /minecraft/profile/lookup/name/{username}} - no {@code Cache-Control}
  *       header. Every call is a fresh decode through the library; the
- *       {@link dev.simplified.client.cache.CachingFeignClient} sees no
+ *       {@link CachingFeignClient} sees no
  *       fresh-hit opportunity. <b>This is the cache-miss path.</b></li>
  *   <li>{@code /minecraft/profile/lookup/name-cached/{username}} - emits
  *       {@code Cache-Control: public, max-age=60}. Repeat calls for the same
@@ -48,7 +49,9 @@ import java.util.concurrent.Executors;
  */
 public final class MockMojangServer {
 
-    /** Fixed loopback port chosen to match the JMH benchmark fixture. */
+    /**
+     * Fixed loopback port chosen to match the JMH benchmark fixture.
+     */
     public static final int PORT = 47652;
 
     private static final @NotNull String KEYSTORE_RESOURCE =

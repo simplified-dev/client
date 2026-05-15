@@ -1,22 +1,24 @@
 package dev.simplified.client.factory;
 
+import dev.simplified.client.Client;
 import dev.simplified.client.response.NetworkDetails;
+import org.apache.hc.client5.http.ssl.DefaultClientTlsStrategy;
 import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
 import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
-import javax.net.ssl.SSLSession;
-import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.net.Socket;
 import java.time.Instant;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
 
 /**
  * Decorating {@link TlsSocketStrategy} that measures the TLS handshake duration and records
  * the negotiated protocol and cipher into the Apache {@link HttpContext}.
  * <p>
  * All TLS upgrade work is delegated to an inner {@link TlsSocketStrategy} (typically
- * {@link org.apache.hc.client5.http.ssl.DefaultClientTlsStrategy}). This wrapper adds
+ * {@link DefaultClientTlsStrategy}). This wrapper adds
  * nanosecond-precision timing around the {@link TlsSocketStrategy#upgrade(Socket, String, int, Object, HttpContext)
  * upgrade()} call and harvests the negotiated {@link SSLSession} state.
  * <p>
@@ -31,7 +33,7 @@ import java.time.Instant;
  * </ul>
  * <p>
  * These attributes are later propagated as internal headers by the Apache request interceptor
- * configured in {@link dev.simplified.client.Client}, making them available to
+ * configured in {@link Client}, making them available to
  * {@link NetworkDetails} for per-request TLS reporting.
  *
  * <p><b>HC 5 migration note:</b> this class replaces the HC 4-era
@@ -46,7 +48,9 @@ import java.time.Instant;
  */
 public final class TimedTlsSocketStrategy implements TlsSocketStrategy {
 
-    /** The inner strategy that performs the actual TLS upgrade. */
+    /**
+     * The inner strategy that performs the actual TLS upgrade.
+     */
     private final @NotNull TlsSocketStrategy delegate;
 
     /**

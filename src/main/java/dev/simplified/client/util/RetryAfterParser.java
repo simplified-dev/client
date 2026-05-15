@@ -39,13 +39,19 @@ import java.util.regex.Pattern;
 @UtilityClass
 public final class RetryAfterParser {
 
-    /** The header names to search for when extracting retry-after values, covering both canonical and lowercase forms. */
+    /**
+     * The header names to search for when extracting retry-after values, covering both canonical and lowercase forms.
+     */
     private static final @NotNull String[] RETRY_AFTER_HEADERS = { "Retry-After", "retry-after" };
 
-    /** Pattern matching a non-negative integer, optionally followed by a decimal point and trailing zeros. */
+    /**
+     * Pattern matching a non-negative integer, optionally followed by a decimal point and trailing zeros.
+     */
     private static final @NotNull Pattern RETRY_AFTER_PATTERN = Pattern.compile("^[0-9]+\\.?0*$");
 
-    /** Pattern matching a trailing decimal point followed by zeros, used to strip {@code .0...} suffixes from delay-seconds values. */
+    /**
+     * Pattern matching a trailing decimal point followed by zeros, used to strip {@code .0...} suffixes from delay-seconds values.
+     */
     private static final @NotNull Pattern TRAILING_ZERO_DECIMAL = Pattern.compile("\\.0*$");
 
     /**

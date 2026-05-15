@@ -1,5 +1,6 @@
 package dev.simplified.client.exception;
 
+import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.InternalErrorDecoder;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.HttpStatus;
@@ -17,7 +18,7 @@ import org.jetbrains.annotations.NotNull;
  * should re-read the resource, merge or discard the pending change, and retry.
  *
  * <p>The framework's {@link InternalErrorDecoder} routes every {@code 412} response through
- * this type before the domain {@link dev.simplified.client.decoder.ClientErrorDecoder} runs,
+ * this type before the domain {@link ClientErrorDecoder} runs,
  * following the same pattern used for {@code 3xx} ({@link NotModifiedException}) and
  * {@code 429} ({@link RateLimitException}). Domain error decoders therefore cannot intercept
  * {@code 412} responses - if a custom parse is needed, catch this exception at the call site
@@ -40,7 +41,9 @@ import org.jetbrains.annotations.NotNull;
  */
 public class PreconditionFailedException extends ApiException {
 
-    /** The short name identifying this exception type in logs and error tracking. */
+    /**
+     * The short name identifying this exception type in logs and error tracking.
+     */
     public static final @NotNull String NAME = "PreconditionFailed";
 
     /**

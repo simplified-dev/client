@@ -31,46 +31,74 @@ import org.jetbrains.annotations.NotNull;
 @Getter
 public enum HttpState {
 
-    /** Informational responses ({@code 100-199}). */
+    /**
+     * Informational responses ({@code 100-199}).
+     */
     INFORMATIONAL(100, 199),
 
-    /** Successful responses ({@code 200-299}). */
+    /**
+     * Successful responses ({@code 200-299}).
+     */
     SUCCESS(200, 299),
 
-    /** Redirection responses ({@code 300-399}). */
+    /**
+     * Redirection responses ({@code 300-399}).
+     */
     REDIRECTION(300, 399),
 
-    /** Client error responses ({@code 400-451}). */
+    /**
+     * Client error responses ({@code 400-451}).
+     */
     CLIENT_ERROR(400, 451),
 
-    /** General server error responses ({@code 500-599}), used as a catch-all when no more specific server-side state matches. */
+    /**
+     * General server error responses ({@code 500-599}), used as a catch-all when no more specific server-side state matches.
+     */
     SERVER_ERROR(500, 599, true),
 
-    /** Nginx-specific server error responses ({@code 494-499}). */
+    /**
+     * Nginx-specific server error responses ({@code 494-499}).
+     */
     NGINX_ERROR(494, 499, true),
 
-    /** Cloudflare-specific server error responses ({@code 520-530}). */
+    /**
+     * Cloudflare-specific server error responses ({@code 520-530}).
+     */
     CLOUDFLARE_ERROR(520, 530, true),
 
-    /** Network-level timeout error responses ({@code 598-599}). */
+    /**
+     * Network-level timeout error responses ({@code 598-599}).
+     */
     NETWORK_ERROR(598, 599, true),
 
-    /** Application-level Java error responses ({@code 990-999}). */
+    /**
+     * Application-level Java error responses ({@code 990-999}).
+     */
     JAVA_ERROR(990, 999, true);
 
-    /** Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone. */
+    /**
+     * Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone.
+     */
     private static final HttpState @NotNull [] CACHED_VALUES = values();
 
-    /** The human-readable title derived from the constant name, formatted with {@link StringUtil#capitalizeFully(String)}. */
+    /**
+     * The human-readable title derived from the constant name, formatted with {@link StringUtil#capitalizeFully(String)}.
+     */
     private final @NotNull String title;
 
-    /** The lower bound (inclusive) of the status code range represented by this state. */
+    /**
+     * The lower bound (inclusive) of the status code range represented by this state.
+     */
     private final int minCode;
 
-    /** The upper bound (inclusive) of the status code range represented by this state. */
+    /**
+     * The upper bound (inclusive) of the status code range represented by this state.
+     */
     private final int maxCode;
 
-    /** Whether this state represents an error condition. */
+    /**
+     * Whether this state represents an error condition.
+     */
     private final boolean error;
 
     HttpState(int minCode, int maxCode) {

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.JsonApiException;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
 import dev.simplified.collection.Concurrent;
@@ -54,7 +55,9 @@ import java.util.function.Supplier;
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public final class ClientConfig<C extends Contract> {
 
-    /** The contract interface class the resulting client will target. */
+    /**
+     * The contract interface class the resulting client will target.
+     */
     private final @NotNull Class<C> target;
 
     /**
@@ -65,28 +68,44 @@ public final class ClientConfig<C extends Contract> {
      */
     private final @NotNull GsonSettings gsonSettings;
 
-    /** The optional IPv6 address used as the local address for outbound connections. */
+    /**
+     * The optional IPv6 address used as the local address for outbound connections.
+     */
     private final @NotNull Optional<Inet6Address> inet6Address;
 
-    /** The timing configuration governing connection pool sizes, timeouts, keep-alive, and cache duration. */
+    /**
+     * The timing configuration governing connection pool sizes, timeouts, keep-alive, and cache duration.
+     */
     private final @NotNull Timings timings;
 
-    /** The error decoder that transforms HTTP error responses into typed {@link ApiException} instances. */
+    /**
+     * The error decoder that transforms HTTP error responses into typed {@link ApiException} instances.
+     */
     private final @NotNull ClientErrorDecoder errorDecoder;
 
-    /** The static query parameters appended to every outbound HTTP request. */
+    /**
+     * The static query parameters appended to every outbound HTTP request.
+     */
     private final @NotNull ConcurrentMap<String, String> queries;
 
-    /** The static headers appended to every outbound HTTP request. */
+    /**
+     * The static headers appended to every outbound HTTP request.
+     */
     private final @NotNull ConcurrentMap<String, String> headers;
 
-    /** The lazily-evaluated dynamic headers appended to every outbound HTTP request when present. */
+    /**
+     * The lazily-evaluated dynamic headers appended to every outbound HTTP request when present.
+     */
     private final @NotNull ConcurrentMap<String, Supplier<Optional<String>>> dynamicHeaders;
 
-    /** Factory producing the Feign {@link Encoder} for outbound request bodies, given the configured {@link Gson}. */
+    /**
+     * Factory producing the Feign {@link Encoder} for outbound request bodies, given the configured {@link Gson}.
+     */
     private final @NotNull Function<Gson, Encoder> encoderFactory;
 
-    /** Factory producing the Feign {@link Decoder} for inbound response bodies, given the configured {@link Gson}. */
+    /**
+     * Factory producing the Feign {@link Decoder} for inbound response bodies, given the configured {@link Gson}.
+     */
     private final @NotNull Function<Gson, Decoder> decoderFactory;
 
     /**
@@ -229,7 +248,7 @@ public final class ClientConfig<C extends Contract> {
          * Sets the error decoder to a {@link GsonAwareErrorDecoder} that receives a
          * {@link Gson} derived from the builder's current {@link GsonSettings} at decode
          * time. Pairs naturally with a
-         * {@link dev.simplified.client.exception.JsonApiException JsonApiException}
+         * {@link JsonApiException JsonApiException}
          * subclass and a constructor reference:
          *
          * <pre>{@code

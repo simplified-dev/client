@@ -30,13 +30,19 @@ import java.util.concurrent.atomic.AtomicReference;
 @Getter
 class RateLimitBucket {
 
-    /** The epoch-millisecond timestamp marking the start of the current window. */
+    /**
+     * The epoch-millisecond timestamp marking the start of the current window.
+     */
     private final @NotNull AtomicLong windowStart;
 
-    /** The number of requests recorded in the current window. */
+    /**
+     * The number of requests recorded in the current window.
+     */
     private final @NotNull AtomicLong requestCount;
 
-    /** The rate-limit policy governing this bucket, updatable from server headers. */
+    /**
+     * The rate-limit policy governing this bucket, updatable from server headers.
+     */
     private final @NotNull AtomicReference<RateLimit> rateLimit;
 
     /**

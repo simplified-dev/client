@@ -21,6 +21,7 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Concurrent end-to-end JMH benchmark - 16 threads hammering the loopback HTTPS path.
@@ -31,7 +32,7 @@ import java.util.concurrent.TimeUnit;
  * benchmark is the canary for the HC 4 -&gt; HC 5 migration: HC 4's
  * {@code PoolingHttpClientConnectionManager} uses {@code synchronized} blocks that pin
  * virtual-thread carriers on Java 21; HC 5 replaced them with
- * {@link java.util.concurrent.locks.ReentrantLock} and runs flat with thread count.</p>
+ * {@link ReentrantLock} and runs flat with thread count.</p>
  *
  * <p>Scenarios:</p>
  * <ul>

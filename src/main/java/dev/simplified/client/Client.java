@@ -1,5 +1,6 @@
 package dev.simplified.client;
 
+import com.google.gson.Gson;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.decoder.ClientErrorDecoder;
@@ -8,20 +9,22 @@ import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.exception.ApiDecodeException;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.RetryableApiException;
+import dev.simplified.client.factory.ApacheClientFactory;
 import dev.simplified.client.factory.TimedConnectionOperator;
 import dev.simplified.client.factory.TimedTlsSocketStrategy;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
-import dev.simplified.client.factory.ApacheClientFactory;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import dev.simplified.client.route.DynamicRoute;
 import dev.simplified.client.route.DynamicRouteProvider;
 import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
+import dev.simplified.gson.GsonSettings;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
 import feign.hc5.ApacheHttp5Client;
@@ -29,6 +32,7 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
+import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -45,7 +49,7 @@ import java.util.concurrent.TimeUnit;
  * requests.
  * <p>
  * During construction the client discovers routes from {@link Route @Route} or
- * {@link dev.simplified.client.route.DynamicRoute @DynamicRoute} annotations on the contract
+ * {@link DynamicRoute @DynamicRoute} annotations on the contract
  * interface through {@link RouteDiscovery}, instantiates a {@link ResponseCache} for both
  * conditional revalidation and {@code getLastResponse()} observability, builds a pooling
  * Apache {@link ApacheHttp5Client} with {@link TimedConnectionOperator} and
@@ -76,27 +80,37 @@ import java.util.concurrent.TimeUnit;
 @Getter
 public final class Client<C extends Contract> implements AsyncAccess<C> {
 
-    /** The immutable configuration bundle used to construct this client. */
+    /**
+     * The immutable configuration bundle used to construct this client.
+     */
     private final @NotNull ClientConfig<C> options;
 
-    /** The pooling Apache HTTP/5 transport used for request execution. */
+    /**
+     * The pooling Apache HTTP/5 transport used for request execution.
+     */
     @Getter(AccessLevel.NONE)
     private final @NotNull feign.Client internalClient;
 
-    /** The route discovery instance that maps endpoint methods to target URLs and rate-limit configurations. */
+    /**
+     * The route discovery instance that maps endpoint methods to target URLs and rate-limit configurations.
+     */
     private final @NotNull RouteDiscovery routeDiscovery;
 
-    /** The rate-limit manager that tracks per-route request budgets and enforces throttling. */
+    /**
+     * The rate-limit manager that tracks per-route request budgets and enforces throttling.
+     */
     private final @NotNull RateLimitManager rateLimitManager;
 
-    /** The Feign-generated proxy implementing the contract interface, wrapped to unwrap internal exceptions. */
+    /**
+     * The Feign-generated proxy implementing the contract interface, wrapped to unwrap internal exceptions.
+     */
     private final @NotNull C contract;
 
     /**
      * The Gson instance built once from {@link ClientConfig#getGsonSettings()} with the
      * contract's return types injected as prewarm targets. Cached here so the encoder,
      * decoder, and custom error-decoder factories receive a single warm Gson instead of
-     * each independently invoking {@link dev.simplified.gson.GsonSettings#create()}.
+     * each independently invoking {@link GsonSettings#create()}.
      */
     @Getter(AccessLevel.NONE)
     private final @NotNull com.google.gson.Gson gson;
@@ -319,7 +333,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /**
      * Walks the contract interface's declared methods and extracts the deserialized payload
      * type of every {@code Response<T>}-returning method. The resulting list seeds the
-     * {@link dev.simplified.gson.GsonSettings#getPrewarmTypes() Gson prewarm list} so adapter
+     * {@link GsonSettings#getPrewarmTypes() Gson prewarm list} so adapter
      * generation for known response shapes runs at construction time rather than on first
      * decode.
      *
@@ -350,10 +364,10 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * revalidation, and unsafe-method invalidation happen transparently below Feign. The
      * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
      * {@linkplain ClientConfig#getDecoderFactory() decoder factory} from the options are
-     * each invoked once with the configured {@link com.google.gson.Gson Gson}.
+     * each invoked once with the configured {@link Gson Gson}.
      * {@link feign.Feign.Builder#doNotCloseAfterDecode()} is set so that
      * {@link InternalResponseDecoder} can manage response body lifecycle for
-     * {@link java.io.InputStream} return types.
+     * {@link InputStream} return types.
      * <p>
      * The returned proxy is subsequently wrapped by {@link #wrapContractProxy(Contract)} to
      * strip internal exception wrappers before they reach callers.

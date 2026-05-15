@@ -9,6 +9,7 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
+import dev.simplified.util.Lazy;
 import org.jetbrains.annotations.NotNull;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -49,7 +50,7 @@ import java.util.concurrent.TimeUnit;
  *       lazy-eligible fields. Establishes the upper bound of what laziness must
  *       eventually defer.</li>
  *   <li>{@code lazyConstruct_allFields} - New lazy pattern, caller reads all four
- *       lazy-eligible fields. Quantifies the {@link dev.simplified.util.Lazy}
+ *       lazy-eligible fields. Quantifies the {@link Lazy}
  *       wrapper overhead when every field is materialized anyway.</li>
  * </ul>
  *
@@ -64,13 +65,19 @@ import java.util.concurrent.TimeUnit;
 @State(Scope.Benchmark)
 public class ApiExceptionConstructionBenchmark {
 
-    /** Realistic 200 B response body. */
+    /**
+     * Realistic 200 B response body.
+     */
     private byte[] bodyBytes;
 
-    /** 15 realistic response headers. */
+    /**
+     * 15 realistic response headers.
+     */
     private Map<String, Collection<String>> responseHeaders;
 
-    /** Stable primitive context used for every constructed exception. */
+    /**
+     * Stable primitive context used for every constructed exception.
+     */
     private ErrorContext context;
 
     @Setup(Level.Trial)

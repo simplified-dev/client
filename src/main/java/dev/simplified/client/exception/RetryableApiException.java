@@ -31,7 +31,9 @@ import org.jetbrains.annotations.NotNull;
  */
 public final class RetryableApiException extends RetryableException {
 
-    /** The original {@link ApiException} that triggered the retry. */
+    /**
+     * The original {@link ApiException} that triggered the retry.
+     */
     private final @NotNull ApiException wrappedException;
 
     /**

@@ -6,6 +6,7 @@ import lombok.experimental.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.text.SimpleDateFormat;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -52,7 +53,7 @@ public final class HttpDates {
     /**
      * Fixed-length RFC 5322 / RFC 1123 style (IMF-fixdate) with the leading day-of-week
      * prefix stripped before parsing. Matches the lenient day-of-week handling of the
-     * legacy {@link java.text.SimpleDateFormat} - servers sometimes emit an inconsistent
+     * legacy {@link SimpleDateFormat} - servers sometimes emit an inconsistent
      * day name for the encoded date, and we accept the date the way browsers do.
      */
     private static final @NotNull DateTimeFormatter IMF_FIXDATE = DateTimeFormatter
@@ -63,7 +64,7 @@ public final class HttpDates {
      * Obsolete RFC 850 style with the spelled-out day-name prefix stripped. The two-digit
      * year is pivoted at 1970 so {@code 70-99} resolves to {@code 1970-1999} and
      * {@code 00-69} to {@code 2000-2069}, matching the sliding-window behaviour of the
-     * legacy {@link java.text.SimpleDateFormat} for HTTP-era dates.
+     * legacy {@link SimpleDateFormat} for HTTP-era dates.
      */
     private static final @NotNull DateTimeFormatter RFC_850 = new DateTimeFormatterBuilder()
         .appendPattern("dd-MMM-")

@@ -1,6 +1,7 @@
 package dev.simplified.client.interceptor;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.response.NetworkDetails;
@@ -31,7 +32,7 @@ import java.lang.reflect.Method;
  * <p>
  * HTTP cache concerns (conditional revalidation header attachment, fresh-hit
  * short-circuiting) live in
- * {@link dev.simplified.client.cache.CachingFeignClient CachingFeignClient}, which wraps
+ * {@link CachingFeignClient CachingFeignClient}, which wraps
  * the underlying Feign client below this interceptor and handles {@code If-None-Match} /
  * {@code If-Modified-Since} attachment itself.
  * <p>
@@ -47,13 +48,19 @@ import java.lang.reflect.Method;
 @RequiredArgsConstructor
 public final class InternalRequestInterceptor implements RequestInterceptor {
 
-    /** The manager responsible for tracking and enforcing per-route rate limits. */
+    /**
+     * The manager responsible for tracking and enforcing per-route rate limits.
+     */
     private final @NotNull RateLimitManager rateLimitManager;
 
-    /** The discovery engine that maps endpoint methods to their route metadata. */
+    /**
+     * The discovery engine that maps endpoint methods to their route metadata.
+     */
     private final @NotNull RouteDiscovery routeDiscovery;
 
-    /** Internal header key used to carry the resolved route identifier from request to response interceptor. */
+    /**
+     * Internal header key used to carry the resolved route identifier from request to response interceptor.
+     */
     static final @NotNull String ROUTE_ID_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Route-Id";
 
     /**

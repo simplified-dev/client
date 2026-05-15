@@ -1,6 +1,7 @@
 package dev.simplified.client.decoder;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiDecodeException;
 import dev.simplified.client.exception.ErrorContext;
@@ -55,11 +56,11 @@ import java.util.function.Supplier;
  * storage predicate and either stores the entry or drops it. The envelope is always
  * passed to
  * {@link ResponseCache#recordLastResponse(Response)} regardless of caching decisions so
- * that {@link dev.simplified.client.Client#getLastResponse() Client.getLastResponse()}
+ * that {@link Client#getLastResponse() Client.getLastResponse()}
  * observes every outcome.
  * <p>
  * Responses replayed from the cache via
- * {@link dev.simplified.client.cache.CachingFeignClient CachingFeignClient} flow through
+ * {@link CachingFeignClient CachingFeignClient} flow through
  * this decoder normally; {@code ResponseCache.store} detects the
  * {@link ResponseCache#CACHE_HIT_HEADER} marker and skips re-storing them to avoid TTL
  * extension on cache hits.
@@ -85,13 +86,19 @@ import java.util.function.Supplier;
  */
 public final class InternalResponseDecoder implements Decoder {
 
-    /** The inner decoder that performs JSON deserialization (e.g. Gson). */
+    /**
+     * The inner decoder that performs JSON deserialization (e.g. Gson).
+     */
     private final @NotNull Decoder delegate;
 
-    /** The decoder for binary response types ({@code byte[]}). */
+    /**
+     * The decoder for binary response types ({@code byte[]}).
+     */
     private final @NotNull Decoder binaryDecoder = new DefaultDecoder();
 
-    /** The shared response cache used for observability and RFC 7234 storage. */
+    /**
+     * The shared response cache used for observability and RFC 7234 storage.
+     */
     private final @NotNull ResponseCache responseCache;
 
     /**

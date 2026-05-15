@@ -161,7 +161,9 @@ public final class CacheKey {
      */
     public record VaryFingerprint(@NotNull ConcurrentMap<String, String> values) {
 
-        /** Sentinel fingerprint for cache entries whose stored response had no {@code Vary} header. */
+        /**
+         * Sentinel fingerprint for cache entries whose stored response had no {@code Vary} header.
+         */
         public static final @NotNull VaryFingerprint EMPTY = new VaryFingerprint(Concurrent.newUnmodifiableMap());
 
         /**

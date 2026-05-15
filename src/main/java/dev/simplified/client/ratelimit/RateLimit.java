@@ -45,16 +45,24 @@ public final class RateLimit {
      */
     public static final @NotNull RateLimit UNLIMITED = new RateLimit(Long.MAX_VALUE, Long.MAX_VALUE / 1000L, true);
 
-    /** Maximum number of requests permitted within a single window, mirroring {@code RateLimit-Limit}. */
+    /**
+     * Maximum number of requests permitted within a single window, mirroring {@code RateLimit-Limit}.
+     */
     private final long limit;
 
-    /** Window duration in seconds, mirroring {@code RateLimit-Reset} (delta seconds until quota resets). */
+    /**
+     * Window duration in seconds, mirroring {@code RateLimit-Reset} (delta seconds until quota resets).
+     */
     private final long resetSeconds;
 
-    /** Normalized window duration in milliseconds, pre-computed for efficient elapsed-time comparisons. */
+    /**
+     * Normalized window duration in milliseconds, pre-computed for efficient elapsed-time comparisons.
+     */
     private final long windowDurationMillis;
 
-    /** Whether this instance represents an effectively unlimited policy on the client side. */
+    /**
+     * Whether this instance represents an effectively unlimited policy on the client side.
+     */
     private final boolean unlimited;
 
     /**
@@ -239,13 +247,19 @@ public final class RateLimit {
     @NoArgsConstructor(access = AccessLevel.PRIVATE)
     public static class Builder {
 
-        /** The maximum number of requests allowed in the window (default: 600). */
+        /**
+         * The maximum number of requests allowed in the window (default: 600).
+         */
         private long limit = 600;
 
-        /** The numeric duration of the window (default: 10). */
+        /**
+         * The numeric duration of the window (default: 10).
+         */
         private long windowDuration = 10;
 
-        /** The temporal unit of the window duration (default: {@link ChronoUnit#MINUTES}). */
+        /**
+         * The temporal unit of the window duration (default: {@link ChronoUnit#MINUTES}).
+         */
         private ChronoUnit windowUnit = ChronoUnit.MINUTES;
 
         /**

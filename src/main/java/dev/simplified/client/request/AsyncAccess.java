@@ -8,6 +8,7 @@ import org.jetbrains.annotations.NotNull;
 import java.util.Collection;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ForkJoinPool;
 import java.util.function.Function;
 
 /**
@@ -33,12 +34,14 @@ import java.util.function.Function;
  */
 public interface AsyncAccess<C extends Contract> {
 
-    /** The synchronous Feign-generated proxy implementing the underlying {@link Contract}. */
+    /**
+     * The synchronous Feign-generated proxy implementing the underlying {@link Contract}.
+     */
     @NotNull C getContract();
 
     /**
      * Executes a blocking contract call asynchronously using the common
-     * {@link java.util.concurrent.ForkJoinPool}.
+     * {@link ForkJoinPool}.
      * <p>
      * The supplied function receives the contract proxy and should invoke exactly one
      * Feign-declared method on it. The call is dispatched via

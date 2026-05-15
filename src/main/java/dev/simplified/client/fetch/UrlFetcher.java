@@ -1,5 +1,6 @@
 package dev.simplified.client.fetch;
 
+import com.google.gson.Gson;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CacheEntry;
 import dev.simplified.client.cache.CacheKey;
@@ -79,18 +80,26 @@ import java.util.TreeMap;
  */
 public final class UrlFetcher {
 
-    /** The immutable configuration bundle used to construct this fetcher. */
+    /**
+     * The immutable configuration bundle used to construct this fetcher.
+     */
     @Getter
     private final @NotNull UrlFetcherConfig options;
 
-    /** The pooling Apache HTTP client used as the underlying transport. */
+    /**
+     * The pooling Apache HTTP client used as the underlying transport.
+     */
     private final @NotNull CloseableHttpClient http;
 
-    /** The response cache used for fresh-hit short-circuiting and observability. */
+    /**
+     * The response cache used for fresh-hit short-circuiting and observability.
+     */
     @Getter
     private final @NotNull ResponseCache responseCache;
 
-    /** The rate-limit manager enforcing the per-bucket request budget. */
+    /**
+     * The rate-limit manager enforcing the per-bucket request budget.
+     */
     @Getter
     private final @NotNull RateLimitManager rateLimitManager;
 
@@ -137,7 +146,7 @@ public final class UrlFetcher {
 
     /**
      * Fetches the given URL and deserializes the body into {@code type} via the configured
-     * {@link com.google.gson.Gson Gson} instance. Body bytes are first decoded to a string
+     * {@link Gson Gson} instance. Body bytes are first decoded to a string
      * using the charset advertised by the {@code Content-Type} header (or UTF-8 if absent).
      *
      * @param url the URL to fetch

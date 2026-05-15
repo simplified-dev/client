@@ -1,5 +1,7 @@
 package dev.simplified.client.interceptor;
 
+import dev.simplified.client.Client;
+import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.route.RouteDiscovery;
@@ -33,11 +35,11 @@ import java.util.Collection;
  * feedback loop that keeps client-tracked quotas synchronized with server-advertised quotas.
  * <p>
  * HTTP cache semantics (fresh-hit short-circuiting, conditional revalidation, 304 header
- * merge) live in {@link dev.simplified.client.cache.CachingFeignClient CachingFeignClient},
+ * merge) live in {@link CachingFeignClient CachingFeignClient},
  * which runs below Feign and returns synthesized cache-hit responses directly without
  * touching this interceptor.
  * <p>
- * This class is instantiated internally by {@link dev.simplified.client.Client} during Feign
+ * This class is instantiated internally by {@link Client} during Feign
  * builder configuration and is not intended for direct use by application code.
  *
  * @see InternalRequestInterceptor
@@ -48,10 +50,14 @@ import java.util.Collection;
 @RequiredArgsConstructor
 public final class InternalResponseInterceptor implements ResponseInterceptor {
 
-    /** The manager responsible for tracking and updating per-route rate limits. */
+    /**
+     * The manager responsible for tracking and updating per-route rate limits.
+     */
     private final @NotNull RateLimitManager rateLimitManager;
 
-    /** The discovery engine used to match response URLs back to their route metadata. */
+    /**
+     * The discovery engine used to match response URLs back to their route metadata.
+     */
     private final @NotNull RouteDiscovery routeDiscovery;
 
     /**

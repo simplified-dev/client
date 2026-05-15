@@ -32,7 +32,9 @@ import java.util.Map;
  */
 public final class ResponseCacheWeigher implements Weigher<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> {
 
-    /** Fixed object-graph overhead applied to every cached variant. */
+    /**
+     * Fixed object-graph overhead applied to every cached variant.
+     */
     private static final long OBJECT_OVERHEAD_BYTES = 512L;
 
     @Override

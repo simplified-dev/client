@@ -1,6 +1,9 @@
 package dev.simplified.client.exception;
 
+import dev.simplified.client.cache.CachingFeignClient;
+import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.decoder.InternalErrorDecoder;
+import dev.simplified.client.request.Timings;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.Response;
@@ -22,17 +25,17 @@ import org.jetbrains.annotations.NotNull;
  *
  * <p>In most cases callers will <b>not</b> see this exception thrown. When the framework
  * holds a matching cached variant in
- * {@link dev.simplified.client.cache.ResponseCache ResponseCache},
- * {@link dev.simplified.client.cache.CachingFeignClient CachingFeignClient} transparently
+ * {@link ResponseCache ResponseCache},
+ * {@link CachingFeignClient CachingFeignClient} transparently
  * returns a synthesized replay of the cached body before Feign's error pipeline runs -
  * the method appears to complete successfully and {@link Response#getStatus()} reports
  * {@link HttpStatus#NOT_MODIFIED} as the wire-truth indicator. This exception is reserved
  * for <i>cache-miss revalidations</i>: the server said the cache is fresh, but the
  * framework no longer holds the corresponding response (for example, streaming endpoints
  * are never cached, and cache entries are bounded by
- * {@link dev.simplified.client.request.Timings#maxCacheBytes()} and expire according to
+ * {@link Timings#maxCacheBytes()} and expire according to
  * each entry's {@code Cache-Control} directives capped by
- * {@link dev.simplified.client.request.Timings#cacheSafetyFallback()}).
+ * {@link Timings#cacheSafetyFallback()}).
  *
  * <p>The {@code 3xx} range in general is not an error range: {@code 301}/{@code 302}/
  * {@code 303} redirects are auto-followed by the underlying HTTP transport, {@code 304}
@@ -64,7 +67,9 @@ import org.jetbrains.annotations.NotNull;
  */
 public class NotModifiedException extends ApiException {
 
-    /** The short name identifying this exception type in logs and error tracking. */
+    /**
+     * The short name identifying this exception type in logs and error tracking.
+     */
     public static final @NotNull String NAME = "NotModified";
 
     /**

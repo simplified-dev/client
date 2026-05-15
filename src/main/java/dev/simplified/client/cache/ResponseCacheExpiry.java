@@ -32,7 +32,9 @@ import java.util.concurrent.ConcurrentMap;
 @RequiredArgsConstructor
 public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> {
 
-    /** The absolute upper bound on any cache entry's lifetime, regardless of response-advertised freshness. */
+    /**
+     * The absolute upper bound on any cache entry's lifetime, regardless of response-advertised freshness.
+     */
     private final @NotNull Duration safetyFallback;
 
     /**

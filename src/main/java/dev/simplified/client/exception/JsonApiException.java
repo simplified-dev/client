@@ -8,6 +8,7 @@ import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.Constructor;
+import java.util.function.Supplier;
 
 /**
  * Abstract {@link ApiException} base that lazily decodes the HTTP error body into an
@@ -18,7 +19,7 @@ import java.lang.reflect.Constructor;
  * deferred until the first {@link #getResponse()} call. When the body is absent or
  * deserialization fails, a fresh instance of the response type is constructed
  * reflectively via its no-arg constructor; sensible defaults come from the type's
- * field initializers - no fallback {@link java.util.function.Supplier} is required.</p>
+ * field initializers - no fallback {@link Supplier} is required.</p>
  *
  * <p>Typical usage pairs this class with {@link GsonAwareErrorDecoder} so the {@link Gson}
  * argument flows from {@code ClientConfig} without a service-locator reach-back:</p>

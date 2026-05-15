@@ -6,6 +6,7 @@ import org.jetbrains.annotations.NotNull;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Map;
 
@@ -16,7 +17,7 @@ import java.util.Map;
  * The Feign-provided {@link feign.Util#toByteArray(InputStream)} always opens its
  * {@link ByteArrayOutputStream} with the JDK default 32-byte capacity and additionally
  * allocates a 2 KB read buffer. A 16 KB JSON body therefore triggers a chain of internal
- * array doublings (32 -> 64 -> 128 ...) plus a final {@link java.util.Arrays#copyOf}
+ * array doublings (32 -> 64 -> 128 ...) plus a final {@link Arrays#copyOf}
  * when the bytes are extracted - roughly ten array allocations per medium-size body.
  * <p>
  * When the server advertises a usable {@code Content-Length}, this helper pre-allocates
@@ -29,7 +30,9 @@ import java.util.Map;
 @UtilityClass
 public final class BodyBuffering {
 
-    /** Default initial capacity for the growable fallback when no usable hint is available. */
+    /**
+     * Default initial capacity for the growable fallback when no usable hint is available.
+     */
     private static final int DEFAULT_INITIAL_BUFFER = 1024;
 
     /**
@@ -40,10 +43,14 @@ public final class BodyBuffering {
      */
     private static final int MAX_INITIAL_BUFFER = 64 * 1024;
 
-    /** Read buffer size for the growable fallback drain loop. */
+    /**
+     * Read buffer size for the growable fallback drain loop.
+     */
     private static final int FALLBACK_READ_BUFFER = 2048;
 
-    /** The canonical {@code Content-Length} header name (case-insensitive lookup). */
+    /**
+     * The canonical {@code Content-Length} header name (case-insensitive lookup).
+     */
     private static final @NotNull String CONTENT_LENGTH = "Content-Length";
 
     /**

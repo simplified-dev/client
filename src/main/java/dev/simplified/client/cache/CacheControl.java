@@ -59,10 +59,14 @@ public record CacheControl(
     @NotNull OptionalLong staleIfError
 ) {
 
-    /** The canonical {@code Cache-Control} header name. */
+    /**
+     * The canonical {@code Cache-Control} header name.
+     */
     public static final @NotNull String HEADER_KEY = "Cache-Control";
 
-    /** Sentinel representing an absent {@code Cache-Control} header - all directives default to their empty state. */
+    /**
+     * Sentinel representing an absent {@code Cache-Control} header - all directives default to their empty state.
+     */
     public static final @NotNull CacheControl EMPTY = new CacheControl(
         OptionalLong.empty(),
         OptionalLong.empty(),

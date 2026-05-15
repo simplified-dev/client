@@ -14,6 +14,7 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
+import java.io.InputStream;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
@@ -95,10 +96,14 @@ public interface Response<T> {
             .flatMap(ETag::parse);
     }
 
-    /** The deserialized body of the HTTP response, decoded into the parameterized type {@code T}. */
+    /**
+     * The deserialized body of the HTTP response, decoded into the parameterized type {@code T}.
+     */
     @NotNull T getBody();
 
-    /** The network-level timing and TLS metadata captured during the request/response cycle. */
+    /**
+     * The network-level timing and TLS metadata captured during the request/response cycle.
+     */
     @NotNull NetworkDetails getDetails();
 
     /**
@@ -107,10 +112,14 @@ public interface Response<T> {
      */
     @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders();
 
-    /** The originating {@link Request} that produced this response. */
+    /**
+     * The originating {@link Request} that produced this response.
+     */
     @NotNull Request getRequest();
 
-    /** The {@link HttpStatus} of the response, indicating the numeric code and its classification. */
+    /**
+     * The {@link HttpStatus} of the response, indicating the numeric code and its classification.
+     */
     @NotNull HttpStatus getStatus();
 
     /**
@@ -222,27 +231,41 @@ public interface Response<T> {
     @Getter
     class Impl<T> implements Response<T> {
 
-        /** The buffered Feign response that anchors every lazily-derived field. */
+        /**
+         * The buffered Feign response that anchors every lazily-derived field.
+         */
         private final @NotNull feign.Response anchor;
 
-        /** The HTTP status code and classification, computed eagerly from {@link #anchor}. */
+        /**
+         * The HTTP status code and classification, computed eagerly from {@link #anchor}.
+         */
         private final @NotNull HttpStatus status;
 
-        /** The decoder driving {@link #body} on first access; closes over the call site's body bytes and codec. */
+        /**
+         * The decoder driving {@link #body} on first access; closes over the call site's body bytes and codec.
+         */
         @Getter(AccessLevel.NONE)
         private final @NotNull Supplier<T> bodyDecoder;
 
-        /** Memoized decoded body, materialized on the first call to {@link #getBody()}. */
+        /**
+         * Memoized decoded body, materialized on the first call to {@link #getBody()}.
+         */
         @Getter(AccessLevel.NONE)
         private final @NotNull Lazy<T> body;
 
-        /** Memoized network timing and TLS metadata derived from {@link #anchor}. */
+        /**
+         * Memoized network timing and TLS metadata derived from {@link #anchor}.
+         */
         private final @NotNull Lazy<NetworkDetails> details;
 
-        /** Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}. */
+        /**
+         * Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}.
+         */
         private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
 
-        /** Eagerly-built originating request wrapper around {@link #anchor}'s method and URL. */
+        /**
+         * Eagerly-built originating request wrapper around {@link #anchor}'s method and URL.
+         */
         private final @NotNull Request request;
 
         /**
@@ -311,7 +334,7 @@ public interface Response<T> {
      * Streaming-body implementation of {@link Response} that holds an eagerly-decoded body
      * alongside lazy metadata.
      * <p>
-     * Streaming endpoints (e.g. {@link java.io.InputStream}-returning Feign methods) cannot
+     * Streaming endpoints (e.g. {@link InputStream}-returning Feign methods) cannot
      * defer body materialization because their wire body is consumed as a live stream rather
      * than a buffered {@code byte[]}. The body is therefore stored as a direct field; the
      * status, headers, and originating request are still derived lazily from the anchor so
@@ -319,27 +342,39 @@ public interface Response<T> {
      * Streaming responses are not cacheable - the cache layer never receives a streaming
      * envelope.
      *
-     * @param <T> the deserialized type of the streaming body (typically {@link java.io.InputStream})
+     * @param <T> the deserialized type of the streaming body (typically {@link InputStream})
      */
     @Getter
     final class StreamingImpl<T> implements Response<T> {
 
-        /** The Feign response that anchors the lazily-derived metadata fields. */
+        /**
+         * The Feign response that anchors the lazily-derived metadata fields.
+         */
         private final @NotNull feign.Response anchor;
 
-        /** The HTTP status code and classification, computed eagerly from {@link #anchor}. */
+        /**
+         * The HTTP status code and classification, computed eagerly from {@link #anchor}.
+         */
         private final @NotNull HttpStatus status;
 
-        /** The eagerly-supplied streaming body. */
+        /**
+         * The eagerly-supplied streaming body.
+         */
         private final @NotNull T body;
 
-        /** Memoized network timing and TLS metadata derived from {@link #anchor}. */
+        /**
+         * Memoized network timing and TLS metadata derived from {@link #anchor}.
+         */
         private final @NotNull Lazy<NetworkDetails> details;
 
-        /** Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}. */
+        /**
+         * Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}.
+         */
         private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
 
-        /** Eagerly-built originating request wrapper around {@link #anchor}'s method and URL. */
+        /**
+         * Eagerly-built originating request wrapper around {@link #anchor}'s method and URL.
+         */
         private final @NotNull Request request;
 
         /**
@@ -395,21 +430,31 @@ public interface Response<T> {
     @Getter
     final class DirectImpl<T> implements Response<T> {
 
-        /** The HTTP status code and classification, supplied at construction. */
+        /**
+         * The HTTP status code and classification, supplied at construction.
+         */
         private final @NotNull HttpStatus status;
 
-        /** The originating request, supplied at construction. */
+        /**
+         * The originating request, supplied at construction.
+         */
         private final @NotNull Request request;
 
-        /** Memoized network timing and TLS metadata; materialized on the first call to {@link #getDetails()}. */
+        /**
+         * Memoized network timing and TLS metadata; materialized on the first call to {@link #getDetails()}.
+         */
         @Getter(AccessLevel.NONE)
         private final @NotNull Lazy<NetworkDetails> details;
 
-        /** Memoized response headers (internal {@code X-Internal-} prefixed entries filtered out); materialized on the first call to {@link #getHeaders()}. */
+        /**
+         * Memoized response headers (internal {@code X-Internal-} prefixed entries filtered out); materialized on the first call to {@link #getHeaders()}.
+         */
         @Getter(AccessLevel.NONE)
         private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
 
-        /** Memoized decoded body, materialized on the first call to {@link #getBody()}. */
+        /**
+         * Memoized decoded body, materialized on the first call to {@link #getBody()}.
+         */
         @Getter(AccessLevel.NONE)
         private final @NotNull Lazy<T> body;
 
@@ -531,7 +576,9 @@ public interface Response<T> {
      */
     final class CachedImpl<T> implements Response<T> {
 
-        /** The wrapped source response supplying body, status, request, and timings. */
+        /**
+         * The wrapped source response supplying body, status, request, and timings.
+         */
         private final @NotNull Response<T> source;
 
         /**

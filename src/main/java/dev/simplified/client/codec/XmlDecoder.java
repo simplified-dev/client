@@ -9,8 +9,12 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import com.google.gson.TypeAdapter;
+import com.google.gson.TypeAdapterFactory;
+import com.google.gson.annotations.SerializedName;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.decoder.InternalResponseDecoder;
+import dev.simplified.client.exception.ApiDecodeException;
 import feign.Response;
 import feign.codec.DecodeException;
 import feign.codec.Decoder;
@@ -31,9 +35,9 @@ import java.util.function.UnaryOperator;
  * tree off to a shared {@link Gson} instance for final binding into a typed DTO.
  * <p>
  * The design keeps Jackson strictly in the role of an XML parser: no typed Jackson
- * binding occurs, so every custom {@link com.google.gson.TypeAdapter TypeAdapter},
- * {@link com.google.gson.TypeAdapterFactory TypeAdapterFactory}, and
- * {@link com.google.gson.annotations.SerializedName @SerializedName} annotation
+ * binding occurs, so every custom {@link TypeAdapter TypeAdapter},
+ * {@link TypeAdapterFactory TypeAdapterFactory}, and
+ * {@link SerializedName @SerializedName} annotation
  * already registered on the caller's {@link Gson} instance fires exactly as it would
  * for JSON responses. DTO classes stay 100% Gson-annotated and never need to
  * reference Jackson types.
@@ -60,7 +64,7 @@ import java.util.function.UnaryOperator;
  * and wrapped by {@link InternalResponseDecoder}, which handles {@link InputStream} and
  * {@code byte[]} return types and closes the response body after decoding. Exceptions thrown
  * by this decoder are caught by {@link InternalResponseDecoder} and re-wrapped as
- * {@link dev.simplified.client.exception.ApiDecodeException ApiDecodeException}, so this
+ * {@link ApiDecodeException ApiDecodeException}, so this
  * class does not need to do its own exception wrapping.
  *
  * @see ClientConfig#getEncoderFactory()
@@ -77,10 +81,14 @@ public final class XmlDecoder implements Decoder {
      */
     public static final @NotNull String TEXT_KEY = "$";
 
-    /** The Gson instance used for the final {@link JsonElement} to DTO binding. */
+    /**
+     * The Gson instance used for the final {@link JsonElement} to DTO binding.
+     */
     private final @NotNull Gson gson;
 
-    /** The Jackson {@link XmlMapper} used to parse the raw XML into a {@link JsonNode} tree. */
+    /**
+     * The Jackson {@link XmlMapper} used to parse the raw XML into a {@link JsonNode} tree.
+     */
     private final @NotNull XmlMapper xmlMapper;
 
     /**

@@ -3,6 +3,7 @@ package dev.simplified.client.codec;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.rometools.rome.feed.synd.SyndFeed;
 import lombok.experimental.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 
@@ -23,7 +24,7 @@ import java.util.function.UnaryOperator;
  * These transformers address <b>tree shape</b>, not <b>feed semantics</b>. For feed
  * version normalization (RSS 0.9x vs 1.0 RDF vs 2.0 vs Atom) or extension-element
  * resolution (Media RSS, iTunes, Dublin Core), reach for ROME's
- * {@link com.rometools.rome.feed.synd.SyndFeed SyndFeed} instead - it normalizes
+ * {@link SyndFeed SyndFeed} instead - it normalizes
  * every flavor behind a single model.
  *
  * @see XmlDecoder

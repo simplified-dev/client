@@ -36,55 +36,89 @@ import java.util.Optional;
 @Getter
 public final class NetworkDetails {
 
-    /** The common prefix for all internal headers injected by the HTTP interceptor layer. */
+    /**
+     * The common prefix for all internal headers injected by the HTTP interceptor layer.
+     */
     public static final @NotNull String INTERNAL_HEADER_PREFIX = "X-Internal-";
 
-    /** Internal header key storing the request start timestamp as an ISO-8601 instant. */
+    /**
+     * Internal header key storing the request start timestamp as an ISO-8601 instant.
+     */
     public static final @NotNull String REQUEST_START = INTERNAL_HEADER_PREFIX + "Request-Start";
 
-    /** Internal header key storing the response received timestamp as an ISO-8601 instant. */
+    /**
+     * Internal header key storing the response received timestamp as an ISO-8601 instant.
+     */
     public static final @NotNull String RESPONSE_RECEIVED = INTERNAL_HEADER_PREFIX + "Response-Received";
 
-    /** Internal header key storing the DNS resolution start timestamp. */
+    /**
+     * Internal header key storing the DNS resolution start timestamp.
+     */
     public static final @NotNull String DNS_START = INTERNAL_HEADER_PREFIX + "DNS-Start";
 
-    /** Internal header key storing the DNS resolution end timestamp. */
+    /**
+     * Internal header key storing the DNS resolution end timestamp.
+     */
     public static final @NotNull String DNS_END = INTERNAL_HEADER_PREFIX + "DNS-End";
 
-    /** Internal header key storing the TCP connection start timestamp. */
+    /**
+     * Internal header key storing the TCP connection start timestamp.
+     */
     public static final @NotNull String TCP_CONNECT_START = INTERNAL_HEADER_PREFIX + "TCP-Connect-Start";
 
-    /** Internal header key storing the TCP connection end timestamp. */
+    /**
+     * Internal header key storing the TCP connection end timestamp.
+     */
     public static final @NotNull String TCP_CONNECT_END = INTERNAL_HEADER_PREFIX + "TCP-Connect-End";
 
-    /** Internal header key storing the TLS handshake start timestamp. */
+    /**
+     * Internal header key storing the TLS handshake start timestamp.
+     */
     public static final @NotNull String TLS_HANDSHAKE_START = INTERNAL_HEADER_PREFIX + "TLS-Handshake-Start";
 
-    /** Internal header key storing the TLS handshake end timestamp. */
+    /**
+     * Internal header key storing the TLS handshake end timestamp.
+     */
     public static final @NotNull String TLS_HANDSHAKE_END = INTERNAL_HEADER_PREFIX + "TLS-Handshake-End";
 
-    /** Internal header key storing the negotiated TLS protocol version (e.g. {@code "TLSv1.3"}). */
+    /**
+     * Internal header key storing the negotiated TLS protocol version (e.g. {@code "TLSv1.3"}).
+     */
     public static final @NotNull String TLS_PROTOCOL = INTERNAL_HEADER_PREFIX + "TLS-Protocol";
 
-    /** Internal header key storing the negotiated TLS cipher suite name. */
+    /**
+     * Internal header key storing the negotiated TLS cipher suite name.
+     */
     public static final @NotNull String TLS_CIPHER = INTERNAL_HEADER_PREFIX + "TLS-Cipher";
 
-    /** Timing for the full request/response round trip. */
+    /**
+     * Timing for the full request/response round trip.
+     */
     private final @NotNull Stopwatch roundTrip;
 
-    /** Timing for DNS hostname resolution. */
+    /**
+     * Timing for DNS hostname resolution.
+     */
     private final @NotNull Stopwatch dnsResolution;
 
-    /** Timing for TCP connection establishment. */
+    /**
+     * Timing for TCP connection establishment.
+     */
     private final @NotNull Stopwatch tcpConnection;
 
-    /** Timing for the TLS handshake. */
+    /**
+     * Timing for the TLS handshake.
+     */
     private final @NotNull Stopwatch tlsHandshake;
 
-    /** The negotiated TLS protocol version, or {@link Optional#empty()} if the connection was not secured or the value was not captured. */
+    /**
+     * The negotiated TLS protocol version, or {@link Optional#empty()} if the connection was not secured or the value was not captured.
+     */
     private final @NotNull Optional<String> tlsProtocol;
 
-    /** The negotiated TLS cipher suite name, or {@link Optional#empty()} if the connection was not secured or the value was not captured. */
+    /**
+     * The negotiated TLS cipher suite name, or {@link Optional#empty()} if the connection was not secured or the value was not captured.
+     */
     private final @NotNull Optional<String> tlsCipher;
 
     /**

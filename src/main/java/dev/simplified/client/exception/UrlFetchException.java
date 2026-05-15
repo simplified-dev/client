@@ -2,10 +2,12 @@ package dev.simplified.client.exception;
 
 import dev.simplified.client.fetch.UrlFetcher;
 import dev.simplified.client.ratelimit.RateLimit;
+import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import lombok.Getter;
+import org.apache.http.protocol.HttpContext;
 import org.intellij.lang.annotations.PrintFormat;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -32,7 +34,9 @@ import java.util.Map;
  */
 public class UrlFetchException extends ApiException {
 
-    /** The short name identifying URL-fetch errors in logs and error tracking. */
+    /**
+     * The short name identifying URL-fetch errors in logs and error tracking.
+     */
     public static final @NotNull String NAME = "UrlFetch";
 
     /**
@@ -68,7 +72,7 @@ public class UrlFetchException extends ApiException {
      * bypassing the header-map lazy build inside {@link ApiException}.
      * <p>
      * Used by subtypes whose timing data originates from Apache's
-     * {@link org.apache.http.protocol.HttpContext} rather than feign-style header injection -
+     * {@link HttpContext} rather than feign-style header injection -
      * the {@code X-Internal-*} markers consumed by the standard lazy path are absent in that
      * source, so the prebuilt snapshot preserves real round-trip / DNS / TCP / TLS timings.
      *
@@ -125,7 +129,7 @@ public class UrlFetchException extends ApiException {
      * actually completed.
      * <p>
      * Subtypes whose timing data comes from a non-feign source (e.g. Apache's
-     * {@link org.apache.http.protocol.HttpContext}) feed that {@link NetworkDetails} into the
+     * {@link HttpContext}) feed that {@link NetworkDetails} into the
      * prebuilt-details {@link UrlFetchException} constructor instead of threading it through
      * this helper. The empty request-headers map ensures the lazy {@link NetworkDetails} build
      * in the standard path produces the same result as {@link NetworkDetails#empty()}.
@@ -152,17 +156,21 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
-     * Thrown when the local {@link dev.simplified.client.ratelimit.RateLimitManager RateLimitManager}
+     * Thrown when the local {@link RateLimitManager RateLimitManager}
      * rejects a fetch because the configured request budget for the resolved bucket has been
      * exhausted.
      */
     @Getter
     public static final class RateLimited extends UrlFetchException {
 
-        /** The identifier of the rate-limit bucket that was exceeded. */
+        /**
+         * The identifier of the rate-limit bucket that was exceeded.
+         */
         private final @NotNull String bucketId;
 
-        /** The {@link RateLimit} policy associated with the exceeded bucket. */
+        /**
+         * The {@link RateLimit} policy associated with the exceeded bucket.
+         */
         private final @NotNull RateLimit rateLimit;
 
         /**
@@ -192,7 +200,9 @@ public class UrlFetchException extends ApiException {
     @Getter
     public static final class BodyCapExceeded extends UrlFetchException {
 
-        /** The configured maximum body size in bytes. */
+        /**
+         * The configured maximum body size in bytes.
+         */
         private final long maxBytes;
 
         /**

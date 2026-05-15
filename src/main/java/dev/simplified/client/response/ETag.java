@@ -28,16 +28,24 @@ import java.util.Optional;
  */
 public record ETag(@NotNull String value, boolean weak) {
 
-    /** The canonical {@code ETag} HTTP response header name. */
+    /**
+     * The canonical {@code ETag} HTTP response header name.
+     */
     public static final @NotNull String HEADER_KEY = "ETag";
 
-    /** The canonical {@code If-Match} HTTP request header name. */
+    /**
+     * The canonical {@code If-Match} HTTP request header name.
+     */
     public static final @NotNull String IF_MATCH_HEADER = "If-Match";
 
-    /** The canonical {@code If-None-Match} HTTP request header name. */
+    /**
+     * The canonical {@code If-None-Match} HTTP request header name.
+     */
     public static final @NotNull String IF_NONE_MATCH_HEADER = "If-None-Match";
 
-    /** The canonical {@code If-Modified-Since} HTTP request header name, paired with {@code Last-Modified} validators. */
+    /**
+     * The canonical {@code If-Modified-Since} HTTP request header name, paired with {@code Last-Modified} validators.
+     */
     public static final @NotNull String IF_MODIFIED_SINCE_HEADER = "If-Modified-Since";
 
     /**

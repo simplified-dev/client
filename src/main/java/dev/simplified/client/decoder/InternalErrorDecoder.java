@@ -1,5 +1,6 @@
 package dev.simplified.client.decoder;
 
+import dev.simplified.client.Client;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.ErrorContext;
@@ -9,9 +10,9 @@ import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.exception.RetryableApiException;
 import dev.simplified.client.response.HttpState;
 import dev.simplified.client.response.HttpStatus;
-import dev.simplified.client.util.RetryAfterParser;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.util.BodyBuffering;
+import dev.simplified.client.util.RetryAfterParser;
 import feign.Util;
 import feign.codec.ErrorDecoder;
 import org.jetbrains.annotations.NotNull;
@@ -43,7 +44,7 @@ import java.util.OptionalLong;
  *   <li>Reflectively sets the cumulative {@code retryAttempts} count on the resulting
  *       {@link ApiException} via the shared {@link Reflection} accessor.</li>
  *   <li>Records the exception via {@link ResponseCache#recordLastResponse(dev.simplified.client.response.Response)}
- *       so it is visible through {@link dev.simplified.client.Client#getLastResponse()}.</li>
+ *       so it is visible through {@link Client#getLastResponse()}.</li>
  *   <li>If a {@code Retry-After} header is present, wraps the exception in a
  *       {@link RetryableApiException} - the only place after this point where a feign
  *       {@link feign.Request} reference still flows, so feign's retry pipeline can act on it.</li>
@@ -51,7 +52,7 @@ import java.util.OptionalLong;
  *       further retries.</li>
  * </ol>
  * <p>
- * This class is instantiated internally by {@link dev.simplified.client.Client} during Feign
+ * This class is instantiated internally by {@link Client} during Feign
  * builder configuration and is not intended for direct use by application code.
  *
  * @see ClientErrorDecoder
@@ -84,16 +85,24 @@ public final class InternalErrorDecoder implements ErrorDecoder {
         }
     }
 
-    /** The client-supplied decoder responsible for domain-specific error parsing. */
+    /**
+     * The client-supplied decoder responsible for domain-specific error parsing.
+     */
     private final @NotNull ClientErrorDecoder customDecoder;
 
-    /** The route discovery engine used to resolve route metadata for rate limit exceptions. */
+    /**
+     * The route discovery engine used to resolve route metadata for rate limit exceptions.
+     */
     private final @NotNull RouteDiscovery routeDiscovery;
 
-    /** The shared response cache used for observability of error outcomes. */
+    /**
+     * The shared response cache used for observability of error outcomes.
+     */
     private final @NotNull ResponseCache responseCache;
 
-    /** Thread-local retry state tracker. */
+    /**
+     * Thread-local retry state tracker.
+     */
     private final @NotNull ThreadLocal<RetryContext> retryContext;
 
     /**
@@ -216,10 +225,14 @@ public final class InternalErrorDecoder implements ErrorDecoder {
      */
     private static final class RetryContext {
 
-        /** The Feign method key of the most recently decoded error, or {@code null} if none. */
+        /**
+         * The Feign method key of the most recently decoded error, or {@code null} if none.
+         */
         private String lastMethodKey = null;
 
-        /** The number of consecutive retry attempts for the current method key. */
+        /**
+         * The number of consecutive retry attempts for the current method key.
+         */
         private int retryAttempt = 0;
 
     }

@@ -1,5 +1,6 @@
 package dev.simplified.client.cache;
 
+import dev.simplified.client.fetch.UrlFetcher;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.Response;
 import lombok.experimental.UtilityClass;
@@ -14,7 +15,7 @@ import java.util.Map;
  * Transport-neutral helpers for RFC 7234 conditional revalidation.
  * <p>
  * Both {@link CachingFeignClient} (Feign transport) and
- * {@link dev.simplified.client.fetch.UrlFetcher UrlFetcher} (Apache transport) share the
+ * {@link UrlFetcher UrlFetcher} (Apache transport) share the
  * same logic for deciding whether a caller has already attached conditional headers and
  * for deriving {@code If-None-Match} / {@code If-Modified-Since} from a cached entry's
  * validators. This class is the single source of truth for that derivation; the

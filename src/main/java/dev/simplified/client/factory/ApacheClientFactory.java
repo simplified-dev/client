@@ -7,6 +7,7 @@ import lombok.experimental.UtilityClass;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.DefaultConnectionKeepAliveStrategy;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.io.HttpClientConnectionOperator;
@@ -24,12 +25,14 @@ import org.apache.hc.core5.util.Timeout;
 import org.jetbrains.annotations.NotNull;
 
 import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 /**
@@ -54,7 +57,7 @@ import java.util.function.Supplier;
  * Each caller wraps the resulting builder as it sees fit: {@code Client} runs
  * {@code new ApacheHttp5Client(builder.build())} for Feign integration, while
  * {@code UrlFetcher} calls {@code builder.build()} directly to obtain a raw
- * {@link org.apache.hc.client5.http.impl.classic.CloseableHttpClient CloseableHttpClient}.
+ * {@link CloseableHttpClient CloseableHttpClient}.
  *
  * @see Client
  * @see Timings
@@ -217,7 +220,7 @@ public final class ApacheClientFactory {
 
     /**
      * Spawns one Java 21 {@linkplain Thread#ofVirtual() virtual thread} per host that resolves
-     * {@link java.net.InetAddress#getAllByName(String)}, populating the OS resolver cache so
+     * {@link InetAddress#getAllByName(String)}, populating the OS resolver cache so
      * the first real request does not pay the DNS lookup. Failures are swallowed per host -
      * an unreachable host at construction time must not propagate into client setup; the
      * first real request will surface the failure normally.
@@ -246,7 +249,7 @@ public final class ApacheClientFactory {
      * {@code Client.create()} exception. Virtual threads are the right fit because the
      * HEAD probe is short-lived blocking I/O; on HC 5 the carrier thread is no longer
      * pinned during pool operations (HC 4's {@code synchronized} blocks have been replaced
-     * with {@link java.util.concurrent.locks.ReentrantLock}), so the JDK actually yields
+     * with {@link ReentrantLock}), so the JDK actually yields
      * the carrier as advertised.</p>
      *
      * @param hosts the unique hostnames to probe; safe to pass an empty set (no-op)

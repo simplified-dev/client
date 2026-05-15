@@ -12,6 +12,7 @@ import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.util.Lazy;
 import lombok.Getter;
+import org.apache.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -57,31 +58,49 @@ import java.util.Optional;
 @Getter
 public class ApiException extends RuntimeException implements Response<Optional<byte[]>> {
 
-    /** Constant flag indicating this response represents an error. */
+    /**
+     * Constant flag indicating this response represents an error.
+     */
     private final boolean error = true;
 
-    /** The short name identifying the type of API error (e.g. {@code "Client"}, {@code "RateLimit"}). */
+    /**
+     * The short name identifying the type of API error (e.g. {@code "Client"}, {@code "RateLimit"}).
+     */
     private final @NotNull String name;
 
-    /** The primitive HTTP context bundle carrying status, network details, request method/url, headers, and body bytes. */
+    /**
+     * The primitive HTTP context bundle carrying status, network details, request method/url, headers, and body bytes.
+     */
     private final @NotNull ErrorContext context;
 
-    /** The response body bytes, or {@link Optional#empty()} if the body was absent. */
+    /**
+     * The response body bytes, or {@link Optional#empty()} if the body was absent.
+     */
     private final @NotNull Optional<byte[]> body;
 
-    /** The originating request, eagerly wrapped around {@code context}'s method and URL. */
+    /**
+     * The originating request, eagerly wrapped around {@code context}'s method and URL.
+     */
     private final @NotNull Request request;
 
-    /** Memoized network timing and TLS metadata, lazily built from {@code context}'s header maps. */
+    /**
+     * Memoized network timing and TLS metadata, lazily built from {@code context}'s header maps.
+     */
     private final @NotNull Lazy<NetworkDetails> details;
 
-    /** Memoized response headers (internal instrumentation headers excluded) derived from {@link #context}. */
+    /**
+     * Memoized response headers (internal instrumentation headers excluded) derived from {@link #context}.
+     */
     private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
 
-    /** The structured error response parsed from the response body. */
+    /**
+     * The structured error response parsed from the response body.
+     */
     protected @NotNull ApiErrorResponse response;
 
-    /** The number of retry attempts made before this exception was surfaced. */
+    /**
+     * The number of retry attempts made before this exception was surfaced.
+     */
     private int retryAttempts = 0;
 
     /**
@@ -156,7 +175,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * {@link NetworkDetails}, bypassing the header-map lazy build.
      * <p>
      * Used when the caller obtains timing metadata from a non-feign source - typically Apache's
-     * {@link org.apache.http.protocol.HttpContext} via the standalone {@code UrlFetcher} - so
+     * {@link HttpContext} via the standalone {@code UrlFetcher} - so
      * the timing data is preserved without round-tripping through the request-headers map.
      * The supplied {@code NetworkDetails} is held inside a resolved-on-first-access {@link Lazy}
      * to share the lookup path with the header-map case; first {@link #getDetails()} call

@@ -1,5 +1,6 @@
 package dev.simplified.client.ratelimit;
 
+import dev.simplified.client.route.Route;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.annotation.Retention;
@@ -8,7 +9,7 @@ import java.time.temporal.ChronoUnit;
 
 /**
  * Annotation-based rate-limit configuration applied to route annotations
- * such as {@link dev.simplified.client.route.Route} to declare the quota and
+ * such as {@link Route} to declare the quota and
  * window for a given API endpoint.
  * <p>
  * At startup, {@link RateLimit#fromAnnotation(RateLimitConfig)} converts this
@@ -31,10 +32,14 @@ public @interface RateLimitConfig {
      */
     long limit() default Long.MAX_VALUE;
 
-    /** Numeric duration of the rate-limit window, measured in {@link #unit()}. */
+    /**
+     * Numeric duration of the rate-limit window, measured in {@link #unit()}.
+     */
     long window() default 600;
 
-    /** Temporal unit for the {@link #window()} duration, defaulting to {@link ChronoUnit#SECONDS}. */
+    /**
+     * Temporal unit for the {@link #window()} duration, defaulting to {@link ChronoUnit#SECONDS}.
+     */
     @NotNull ChronoUnit unit() default ChronoUnit.SECONDS;
 
     /**

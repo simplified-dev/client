@@ -65,10 +65,14 @@ import java.util.TreeMap;
 @RequiredArgsConstructor
 public final class CachingFeignClient implements Client {
 
-    /** The underlying Feign client to which non-short-circuited requests are dispatched. */
+    /**
+     * The underlying Feign client to which non-short-circuited requests are dispatched.
+     */
     private final @NotNull Client delegate;
 
-    /** The shared response cache used for lookups, stores via decoder, invalidation, and 304 merging. */
+    /**
+     * The shared response cache used for lookups, stores via decoder, invalidation, and 304 merging.
+     */
     private final @NotNull ResponseCache responseCache;
 
     @Override

@@ -25,7 +25,7 @@ import java.util.concurrent.Executors;
 /**
  * Self-contained HTTPS fixture for loopback JMH benchmarks. Loads a pre-generated PKCS12
  * keystore (committed as a JMH resource) on construction, brings up
- * {@link com.sun.net.httpserver.HttpsServer} on a fixed loopback port, and exposes the
+ * {@link HttpsServer} on a fixed loopback port, and exposes the
  * matching trust-all {@link SSLContext} that the client side must use to accept the
  * self-signed certificate.
  *
@@ -34,7 +34,9 @@ import java.util.concurrent.Executors;
  */
 public final class LoopbackHttpsServer {
 
-    /** Fixed loopback port - matches {@link LoopbackContract#ROUTE}. */
+    /**
+     * Fixed loopback port - matches {@link LoopbackContract#ROUTE}.
+     */
     public static final int PORT = 47652;
 
     private static final @NotNull String KEYSTORE_RESOURCE =

@@ -1,10 +1,12 @@
 package dev.simplified.client.benchmark.e2e.support;
 
+import org.openjdk.jmh.annotations.Setup;
+
 import java.nio.charset.StandardCharsets;
 
 /**
  * Pre-computed canned byte[] response payloads keyed by request path. Instantiated once per
- * benchmark trial via {@link org.openjdk.jmh.annotations.Setup} so allocation cost stays out
+ * benchmark trial via {@link Setup} so allocation cost stays out
  * of the measured region.
  */
 public final class FixtureBodies {

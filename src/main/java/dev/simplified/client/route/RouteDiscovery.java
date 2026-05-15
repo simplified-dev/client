@@ -11,6 +11,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
+import java.net.InetAddress;
 import java.util.Optional;
 
 /**
@@ -39,10 +40,14 @@ import java.util.Optional;
 @Getter
 public final class RouteDiscovery {
 
-    /** The type-level default route metadata, guaranteed to be present. */
+    /**
+     * The type-level default route metadata, guaranteed to be present.
+     */
     private final @NotNull Metadata defaultRoute;
 
-    /** Unmodifiable map of per-method route overrides discovered at construction time. */
+    /**
+     * Unmodifiable map of per-method route overrides discovered at construction time.
+     */
     private final @NotNull ConcurrentMap<Method, Metadata> methodRoutes;
 
     /**
@@ -196,7 +201,7 @@ public final class RouteDiscovery {
     /**
      * Collects the unique bare hostnames advertised by every route this discovery knows about,
      * for use as DNS preresolve targets and pool-prewarm anchors. The port and path are stripped
-     * so the result matches what {@link java.net.InetAddress#getAllByName(String)} expects.
+     * so the result matches what {@link InetAddress#getAllByName(String)} expects.
      *
      * @return the set of unique hostnames; empty if every route is hostless
      */
@@ -232,20 +237,26 @@ public final class RouteDiscovery {
      * Immutable value object that pairs a route string with its {@link RateLimit} policy.
      * <p>
      * Instances are created during {@link RouteDiscovery} construction and cached for the
-     * lifetime of the owning {@link dev.simplified.client.Client}.
+     * lifetime of the owning {@link Client}.
      *
      * @see RouteDiscovery
      */
     @Getter
     public static class Metadata {
 
-        /** The route string (host and optional base path) without a protocol prefix. */
+        /**
+         * The route string (host and optional base path) without a protocol prefix.
+         */
         private final @NotNull String route;
 
-        /** The rate limit policy governing traffic through this route. */
+        /**
+         * The rate limit policy governing traffic through this route.
+         */
         private final @NotNull RateLimit rateLimit;
 
-        /** The pre-computed full HTTPS URL for this route. */
+        /**
+         * The pre-computed full HTTPS URL for this route.
+         */
         private final @NotNull String fullUrl;
 
         /**

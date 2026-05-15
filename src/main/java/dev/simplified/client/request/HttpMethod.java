@@ -1,5 +1,6 @@
 package dev.simplified.client.request;
 
+import dev.simplified.client.Client;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
@@ -16,7 +17,7 @@ import java.util.Map;
  * {@link #PATCH} are flagged as body-bearing; all others default to no body.
  * <p>
  * This enum is used by {@link Request} to describe the HTTP method of a captured request
- * and by the broader {@link dev.simplified.client.Client} infrastructure to determine
+ * and by the broader {@link Client} infrastructure to determine
  * request semantics.
  *
  * @see Request
@@ -26,37 +27,59 @@ import java.util.Map;
 @RequiredArgsConstructor
 public enum HttpMethod {
 
-    /** HTTP GET method; retrieves a resource without a request body. */
+    /**
+     * HTTP GET method; retrieves a resource without a request body.
+     */
     GET,
 
-    /** HTTP HEAD method; identical to GET but returns only headers, no body. */
+    /**
+     * HTTP HEAD method; identical to GET but returns only headers, no body.
+     */
     HEAD,
 
-    /** HTTP POST method; submits data in a request body to create or process a resource. */
+    /**
+     * HTTP POST method; submits data in a request body to create or process a resource.
+     */
     POST(true),
 
-    /** HTTP PUT method; replaces or creates a resource using the supplied request body. */
+    /**
+     * HTTP PUT method; replaces or creates a resource using the supplied request body.
+     */
     PUT(true),
 
-    /** HTTP DELETE method; removes the specified resource without a request body. */
+    /**
+     * HTTP DELETE method; removes the specified resource without a request body.
+     */
     DELETE,
 
-    /** HTTP CONNECT method; establishes a tunnel to the server, typically for HTTPS proxying. */
+    /**
+     * HTTP CONNECT method; establishes a tunnel to the server, typically for HTTPS proxying.
+     */
     CONNECT,
 
-    /** HTTP OPTIONS method; describes the communication options for the target resource. */
+    /**
+     * HTTP OPTIONS method; describes the communication options for the target resource.
+     */
     OPTIONS,
 
-    /** HTTP TRACE method; performs a message loop-back test along the path to the target resource. */
+    /**
+     * HTTP TRACE method; performs a message loop-back test along the path to the target resource.
+     */
     TRACE,
 
-    /** HTTP PATCH method; applies partial modifications to a resource using the supplied request body. */
+    /**
+     * HTTP PATCH method; applies partial modifications to a resource using the supplied request body.
+     */
     PATCH(true);
 
-    /** Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone. */
+    /**
+     * Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone.
+     */
     private static final HttpMethod @NotNull [] CACHED_VALUES = values();
 
-    /** Index of uppercase method names to enum constants for O(1) lookup by canonical name. */
+    /**
+     * Index of uppercase method names to enum constants for O(1) lookup by canonical name.
+     */
     private static final @NotNull Map<String, HttpMethod> BY_NAME;
 
     static {
@@ -68,7 +91,9 @@ public enum HttpMethod {
         BY_NAME = Map.copyOf(byName);
     }
 
-    /** Whether this HTTP method conventionally carries a request body. */
+    /**
+     * Whether this HTTP method conventionally carries a request body.
+     */
     private final boolean withBody;
 
     /**

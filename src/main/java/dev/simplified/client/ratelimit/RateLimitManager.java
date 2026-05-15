@@ -1,5 +1,7 @@
 package dev.simplified.client.ratelimit;
 
+import dev.simplified.client.Client;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import lombok.NoArgsConstructor;
@@ -9,9 +11,9 @@ import org.jetbrains.annotations.NotNull;
  * Central registry that tracks per-route rate-limit state across multiple
  * {@link RateLimitBucket} instances.
  * <p>
- * Each {@link dev.simplified.client.Client} owns a single {@code RateLimitManager}
+ * Each {@link Client} owns a single {@code RateLimitManager}
  * whose buckets are keyed by route identifiers (typically the resolved domain or
- * domain+path string from {@link dev.simplified.client.route.RouteDiscovery}).
+ * domain+path string from {@link RouteDiscovery}).
  * The manager coordinates proactive (client-side) rate-limit enforcement by
  * providing query and mutation methods used by the request and response
  * interceptor pipeline.
@@ -27,7 +29,9 @@ import org.jetbrains.annotations.NotNull;
 @NoArgsConstructor
 public class RateLimitManager {
 
-    /** Map of route identifiers to their corresponding rate-limit buckets. */
+    /**
+     * Map of route identifiers to their corresponding rate-limit buckets.
+     */
     private final @NotNull ConcurrentMap<String, RateLimitBucket> buckets = Concurrent.newMap();
 
     /**

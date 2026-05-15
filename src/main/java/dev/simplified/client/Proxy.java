@@ -2,6 +2,8 @@ package dev.simplified.client;
 
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
+import dev.simplified.client.route.DynamicRouteProvider;
+import dev.simplified.client.route.Route;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import lombok.AccessLevel;
@@ -43,18 +45,26 @@ import java.util.stream.IntStream;
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public final class Proxy<C extends Contract> implements AsyncAccess<C> {
 
-    /** The shared base options every client in the pool derives from. */
+    /**
+     * The shared base options every client in the pool derives from.
+     */
     private final @NotNull ClientConfig<C> baseOptions;
 
-    /** Operator applied to the base options builder when constructing a new client. */
+    /**
+     * Operator applied to the base options builder when constructing a new client.
+     */
     @Getter(AccessLevel.NONE)
     private final @NotNull UnaryOperator<ClientConfig.Builder<C>> perClientMutator;
 
-    /** Predicate that determines whether a pooled client is currently available to serve a request. */
+    /**
+     * Predicate that determines whether a pooled client is currently available to serve a request.
+     */
     @Getter(AccessLevel.NONE)
     private final @NotNull Predicate<Client<C>> availability;
 
-    /** The lazily populated pool of clients. Grows when no existing client is available. */
+    /**
+     * The lazily populated pool of clients. Grows when no existing client is available.
+     */
     @Getter(AccessLevel.NONE)
     private final @NotNull ConcurrentList<Client<C>> clients = Concurrent.newList();
 
@@ -66,7 +76,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
      * operator (every client is an identical clone of the base options) and the default
      * {@linkplain Builder#withAvailability availability predicate} treats a client as available
      * when {@link Client#isRateLimited()} returns {@code false}, which checks the type-level
-     * {@link dev.simplified.client.route.Route @Route} bucket. Single-domain endpoints can rely
+     * {@link Route @Route} bucket. Single-domain endpoints can rely
      * on the default predicate; multi-domain endpoints should override it to target the relevant
      * bucket.
      *
@@ -165,10 +175,10 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * request.
          * <p>
          * Default: {@code client -> !client.isRateLimited()}, which checks the type-level
-         * {@link dev.simplified.client.route.Route @Route} bucket via the no-arg
+         * {@link Route @Route} bucket via the no-arg
          * {@link Client#isRateLimited()}. Override this for multi-domain endpoints where the
          * relevant bucket is identified by a specific
-         * {@link dev.simplified.client.route.DynamicRouteProvider}.
+         * {@link DynamicRouteProvider}.
          *
          * @param predicate the availability predicate
          * @return this builder

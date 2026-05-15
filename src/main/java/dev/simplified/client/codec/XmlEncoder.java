@@ -1,5 +1,7 @@
 package dev.simplified.client.codec;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.google.gson.JsonElement;
 import com.rometools.rome.feed.synd.SyndFeed;
 import com.rometools.rome.io.FeedException;
 import com.rometools.rome.io.SyndFeedOutput;
@@ -20,8 +22,8 @@ import java.util.function.Function;
  * <p>
  * ROME is the only piece of this pipeline that knows which {@code xmlns:*} declarations
  * belong on which root element for which feed version; Jackson-based round-trips lose
- * namespace bookkeeping because neither {@link com.fasterxml.jackson.databind.JsonNode}
- * nor Gson's {@link com.google.gson.JsonElement} carries namespace URIs. Delegating the
+ * namespace bookkeeping because neither {@link JsonNode}
+ * nor Gson's {@link JsonElement} carries namespace URIs. Delegating the
  * write path to ROME keeps the output bit-for-bit compatible with strict RSS aggregators.
  *
  * <p><b>Usage.</b> Callers supply a type token and a mapping function that converts a DTO
@@ -54,16 +56,24 @@ import java.util.function.Function;
 @Getter
 public final class XmlEncoder implements Encoder {
 
-    /** The default ROME feed type, covering the overwhelming majority of RSS 2.0 feeds. */
+    /**
+     * The default ROME feed type, covering the overwhelming majority of RSS 2.0 feeds.
+     */
     public static final @NotNull String DEFAULT_FEED_TYPE = "rss_2.0";
 
-    /** The runtime type token used to validate incoming bodies before delegating to the mapper. */
+    /**
+     * The runtime type token used to validate incoming bodies before delegating to the mapper.
+     */
     private final @NotNull Class<?> expectedType;
 
-    /** The mapping function that converts a typed DTO into a ROME {@link SyndFeed}. */
+    /**
+     * The mapping function that converts a typed DTO into a ROME {@link SyndFeed}.
+     */
     private final @NotNull Function<Object, SyndFeed> feedMapper;
 
-    /** The ROME feed type string (e.g. {@code "rss_2.0"}, {@code "atom_1.0"}) applied when the mapper does not set one. */
+    /**
+     * The ROME feed type string (e.g. {@code "rss_2.0"}, {@code "atom_1.0"}) applied when the mapper does not set one.
+     */
     private final @NotNull String feedType;
 
     /**

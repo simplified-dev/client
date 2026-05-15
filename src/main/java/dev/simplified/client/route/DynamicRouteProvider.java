@@ -21,7 +21,9 @@ import org.jetbrains.annotations.NotNull;
  */
 public interface DynamicRouteProvider {
 
-    /** The route string consisting of a host and optional base path, without a protocol prefix. */
+    /**
+     * The route string consisting of a host and optional base path, without a protocol prefix.
+     */
     @NotNull String getRoute();
 
     /**

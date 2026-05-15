@@ -1,6 +1,7 @@
 package dev.simplified.client.fetch;
 
 import com.google.gson.Gson;
+import dev.simplified.client.ClientConfig;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.UrlFetchException;
 import dev.simplified.client.ratelimit.RateLimit;
@@ -25,7 +26,7 @@ import java.util.function.Supplier;
 /**
  * Immutable configuration bundle consumed by {@link UrlFetcher} during construction.
  * <p>
- * Mirrors {@link dev.simplified.client.ClientConfig ClientConfig} in shape and idiom, omitting
+ * Mirrors {@link ClientConfig ClientConfig} in shape and idiom, omitting
  * the contract-target type and Feign-specific encoder/decoder factories that the standalone
  * fetcher does not need. New fields specific to ad-hoc URL fetching are the body cap, the
  * default {@link RateLimit} policy, the URL-to-bucket resolver, and optional shared
@@ -47,43 +48,69 @@ import java.util.function.Supplier;
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public final class UrlFetcherConfig {
 
-    /** Default body size cap, 5 MiB, matching the legacy dataflow {@code UrlFetcher} default. */
+    /**
+     * Default body size cap, 5 MiB, matching the legacy dataflow {@code UrlFetcher} default.
+     */
     public static final long DEFAULT_MAX_BODY_BYTES = 5L * 1024 * 1024;
 
-    /** Default {@code User-Agent} header value applied by the default builder. */
+    /**
+     * Default {@code User-Agent} header value applied by the default builder.
+     */
     public static final @NotNull String DEFAULT_USER_AGENT = "simplified-fetcher/0.1";
 
-    /** The {@link Gson} instance used to deserialize typed bodies in {@link UrlFetcher#get(URI, Class)}. */
+    /**
+     * The {@link Gson} instance used to deserialize typed bodies in {@link UrlFetcher#get(URI, Class)}.
+     */
     private final @NotNull Gson gson;
 
-    /** The timing configuration governing connection pool sizes, timeouts, keep-alive, and cache duration. */
+    /**
+     * The timing configuration governing connection pool sizes, timeouts, keep-alive, and cache duration.
+     */
     private final @NotNull Timings timings;
 
-    /** The maximum response body size in bytes; reads beyond this cap raise {@link UrlFetchException.BodyCapExceeded}. */
+    /**
+     * The maximum response body size in bytes; reads beyond this cap raise {@link UrlFetchException.BodyCapExceeded}.
+     */
     private final long maxBodyBytes;
 
-    /** The default {@link RateLimit} policy applied to every resolved bucket. */
+    /**
+     * The default {@link RateLimit} policy applied to every resolved bucket.
+     */
     private final @NotNull RateLimit defaultRateLimit;
 
-    /** Resolves the rate-limit bucket identifier from a request URL; default is {@link URI#getHost()}. */
+    /**
+     * Resolves the rate-limit bucket identifier from a request URL; default is {@link URI#getHost()}.
+     */
     private final @NotNull Function<URI, String> bucketResolver;
 
-    /** Optional pre-existing {@link ResponseCache} to share with another client; if empty, the fetcher owns its own cache. */
+    /**
+     * Optional pre-existing {@link ResponseCache} to share with another client; if empty, the fetcher owns its own cache.
+     */
     private final @NotNull Optional<ResponseCache> sharedCache;
 
-    /** Optional pre-existing {@link RateLimitManager} to share with another client; if empty, the fetcher owns its own manager. */
+    /**
+     * Optional pre-existing {@link RateLimitManager} to share with another client; if empty, the fetcher owns its own manager.
+     */
     private final @NotNull Optional<RateLimitManager> sharedRateLimits;
 
-    /** The optional IPv6 address used as the local address for outbound connections. */
+    /**
+     * The optional IPv6 address used as the local address for outbound connections.
+     */
     private final @NotNull Optional<Inet6Address> inet6Address;
 
-    /** The static query parameters appended to every outbound request. */
+    /**
+     * The static query parameters appended to every outbound request.
+     */
     private final @NotNull ConcurrentMap<String, String> queries;
 
-    /** The static headers appended to every outbound request, including the default {@code User-Agent}. */
+    /**
+     * The static headers appended to every outbound request, including the default {@code User-Agent}.
+     */
     private final @NotNull ConcurrentMap<String, String> headers;
 
-    /** The lazily-evaluated dynamic headers appended to every outbound request when present. */
+    /**
+     * The lazily-evaluated dynamic headers appended to every outbound request when present.
+     */
     private final @NotNull ConcurrentMap<String, Supplier<Optional<String>>> dynamicHeaders;
 
     /**

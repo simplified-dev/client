@@ -3,6 +3,9 @@ package dev.simplified.client.cache;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
+import dev.simplified.client.decoder.InternalErrorDecoder;
+import dev.simplified.client.decoder.InternalResponseDecoder;
+import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
@@ -13,7 +16,6 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
-import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -45,7 +47,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>
  * In addition to the cache itself, this facade owns the client's single-slot
  * "last response" observability reference, exposing it via {@link #getLastResponse()}.
- * Because {@link dev.simplified.client.exception.ApiException ApiException} implements
+ * Because {@link ApiException ApiException} implements
  * {@link Response}, the same {@link AtomicReference} carries both success and error
  * snapshots, replacing the conflated roles of the old {@code recentResponses} list.
  * <p>
@@ -62,12 +64,16 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public final class ResponseCache {
 
-    /** HTTP status codes that are cacheable by default per RFC 7231 §6.1. */
+    /**
+     * HTTP status codes that are cacheable by default per RFC 7231 §6.1.
+     */
     private static final @NotNull Set<Integer> DEFAULT_CACHEABLE_STATUSES = Set.of(
         200, 203, 204, 300, 301, 404, 405, 410, 414, 501
     );
 
-    /** Hop-by-hop headers that must not be stored with a cached response per RFC 7230 §6.1. */
+    /**
+     * Hop-by-hop headers that must not be stored with a cached response per RFC 7230 §6.1.
+     */
     private static final @NotNull Set<String> HOP_BY_HOP_HEADERS = Set.of(
         "connection",
         "keep-alive",
@@ -110,10 +116,14 @@ public final class ResponseCache {
      */
     public static final @NotNull String CACHE_STALE_HEADER = "X-Cache-Served-Stale";
 
-    /** The Caffeine-backed two-level cache of URL bucket -> Vary variants. */
+    /**
+     * The Caffeine-backed two-level cache of URL bucket -> Vary variants.
+     */
     private final @NotNull Cache<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> cache;
 
-    /** The single-slot observability reference returned from {@link #getLastResponse()}. */
+    /**
+     * The single-slot observability reference returned from {@link #getLastResponse()}.
+     */
     private final @NotNull AtomicReference<Response<?>> lastResponse = new AtomicReference<>();
 
     /**
@@ -145,7 +155,7 @@ public final class ResponseCache {
      * <p>
      * Updated by {@link #recordLastResponse(Response)} from the decoder and error-decoder
      * pipelines on every completed exchange, including fresh cache hits replayed through
-     * the decoder. Because {@link dev.simplified.client.exception.ApiException} implements
+     * the decoder. Because {@link ApiException} implements
      * {@link Response}, the same reference carries both outcomes.
      *
      * @return the most recent response, or {@link Optional#empty()} if the client has not
@@ -158,9 +168,9 @@ public final class ResponseCache {
     /**
      * Records a newly-observed response as the most recent one.
      * <p>
-     * Called from {@link dev.simplified.client.decoder.InternalResponseDecoder} for
+     * Called from {@link InternalResponseDecoder} for
      * successful and decode-failure outcomes and from
-     * {@link dev.simplified.client.decoder.InternalErrorDecoder} for HTTP error outcomes.
+     * {@link InternalErrorDecoder} for HTTP error outcomes.
      *
      * @param response the response to record
      */

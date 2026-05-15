@@ -3,6 +3,7 @@ package dev.simplified.client.request;
 import dev.simplified.client.Client;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.core5.util.TimeValue;
 import org.jetbrains.annotations.NotNull;
 
 import java.time.Duration;
@@ -30,12 +31,12 @@ import java.util.concurrent.TimeUnit;
  *
  * @param connectionTimeToLive maximum lifetime of a pooled HTTP connection in milliseconds, before it is permanently
  *                             closed regardless of activity. Wrapped in
- *                             {@link org.apache.hc.core5.util.TimeValue TimeValue} and passed to HC 5's
+ *                             {@link TimeValue TimeValue} and passed to HC 5's
  *                             {@code PoolingHttpClientConnectionManagerBuilder.setConnectionTimeToLive(TimeValue)}.
  *                             Default: 120,000 (2 minutes).
  * @param connectionIdleTimeout maximum duration in milliseconds a pooled connection may sit idle before it is evicted
  *                              by the background cleanup thread. Wrapped in
- *                              {@link org.apache.hc.core5.util.TimeValue TimeValue} and passed to
+ *                              {@link TimeValue TimeValue} and passed to
  *                              {@link HttpClientBuilder#evictIdleConnections(org.apache.hc.core5.util.TimeValue)
  *                              HttpClientBuilder.evictIdleConnections(TimeValue)}.
  *                              Default: 45,000 (45 seconds).

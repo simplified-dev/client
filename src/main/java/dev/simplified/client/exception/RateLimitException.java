@@ -40,13 +40,19 @@ import java.util.Collections;
 @Getter
 public final class RateLimitException extends ApiException {
 
-    /** Whether the rate limit was enforced by the remote server ({@code true}) or locally by the client ({@code false}). */
+    /**
+     * Whether the rate limit was enforced by the remote server ({@code true}) or locally by the client ({@code false}).
+     */
     private final boolean serverEnforced;
 
-    /** The identifier of the rate-limit bucket that was exceeded (typically the resolved route string). */
+    /**
+     * The identifier of the rate-limit bucket that was exceeded (typically the resolved route string).
+     */
     private final @NotNull String bucketId;
 
-    /** The {@link RateLimit} policy associated with the exceeded bucket. */
+    /**
+     * The {@link RateLimit} policy associated with the exceeded bucket.
+     */
     private final @NotNull RateLimit rateLimit;
 
     /**

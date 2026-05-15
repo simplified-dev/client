@@ -1,5 +1,6 @@
 package dev.simplified.client.springbench;
 
+import dev.simplified.client.cache.CachingFeignClient;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -40,7 +41,7 @@ public class MojangController {
 
     /**
      * Cache-hit path. Repeat calls for the same username short-circuit at
-     * {@link dev.simplified.client.cache.CachingFeignClient}.
+     * {@link CachingFeignClient}.
      *
      * @param username the player username
      * @return the deserialized payload (cached after the first call)

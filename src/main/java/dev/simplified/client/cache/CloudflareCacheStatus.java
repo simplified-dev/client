@@ -27,43 +27,69 @@ import java.util.Map;
 @RequiredArgsConstructor
 public enum CloudflareCacheStatus {
 
-    /** The Cloudflare caching status of this resource could not be determined from the response headers. */
+    /**
+     * The Cloudflare caching status of this resource could not be determined from the response headers.
+     */
     UNKNOWN("The Cloudflare caching status of this resource could not be found."),
 
-    /** Cloudflare generated a response indicating that the asset is not eligible for caching. */
+    /**
+     * Cloudflare generated a response indicating that the asset is not eligible for caching.
+     */
     NONE("Cloudflare generated a response that denotes the asset is not eligible for caching."),
 
-    /** The origin server instructed Cloudflare to bypass its cache via a {@code Cache-Control} header set to {@code no-cache}, {@code private}, or {@code max-age=0}. */
+    /**
+     * The origin server instructed Cloudflare to bypass its cache via a {@code Cache-Control} header set to {@code no-cache}, {@code private}, or {@code max-age=0}.
+     */
     BYPASS("The origin server instructed Cloudflare to bypass cache via a Cache-Control header set to no-cache,private, or max-age=0 even though Cloudflare originally preferred to cache the asset."),
 
-    /** Cloudflare does not consider the asset eligible for caching, and no Cloudflare settings override this; the asset was fetched directly from the origin. */
+    /**
+     * Cloudflare does not consider the asset eligible for caching, and no Cloudflare settings override this; the asset was fetched directly from the origin.
+     */
     DYNAMIC("Cloudflare does not consider the asset eligible to cache and your Cloudflare settings do not explicitly instruct Cloudflare to cache the asset. Instead, the asset was requested from the origin web server."),
 
-    /** The resource was found in Cloudflare's cache but had expired, so it was re-fetched from the origin. */
+    /**
+     * The resource was found in Cloudflare's cache but had expired, so it was re-fetched from the origin.
+     */
     EXPIRED("The resource was found in Cloudflare's cache but was expired and served from the origin web server."),
 
-    /** The resource was served directly from Cloudflare's cache (cache hit). */
+    /**
+     * The resource was served directly from Cloudflare's cache (cache hit).
+     */
     HIT("The resource was found in Cloudflare's cache."),
 
-    /** The resource was not found in Cloudflare's cache and was served from the origin (cache miss). */
+    /**
+     * The resource was not found in Cloudflare's cache and was served from the origin (cache miss).
+     */
     MISS("The resource was not found in Cloudflare's cache and was served from the origin web server."),
 
-    /** The cached resource was stale but was successfully revalidated with the origin using conditional headers ({@code If-Modified-Since} or {@code If-None-Match}). */
+    /**
+     * The cached resource was stale but was successfully revalidated with the origin using conditional headers ({@code If-Modified-Since} or {@code If-None-Match}).
+     */
     REVALIDATED("The resource is served from Cloudflare's cache but is stale. The resource was revalidated by either an If-Modified-Since header or an If-None-Match header."),
 
-    /** The cached resource was expired and Cloudflare could not contact the origin, so the stale version was served. */
+    /**
+     * The cached resource was expired and Cloudflare could not contact the origin, so the stale version was served.
+     */
     STALE("The resource was served from Cloudflare's cache but was expired. Cloudflare could not contact the origin to retrieve an updated resource."),
 
-    /** The cached resource was expired but is being served while the origin updates it in the background. */
+    /**
+     * The cached resource was expired but is being served while the origin updates it in the background.
+     */
     UPDATING("The resource was served from Cloudflare's cache and was expired, but the origin web server is updating the resource.");
 
-    /** The HTTP response header key used by Cloudflare to communicate cache status. */
+    /**
+     * The HTTP response header key used by Cloudflare to communicate cache status.
+     */
     public static final @NotNull String HEADER_KEY = "CF-Cache-Status";
 
-    /** Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone. */
+    /**
+     * Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone.
+     */
     private static final CloudflareCacheStatus @NotNull [] CACHED_VALUES = values();
 
-    /** Index of uppercase status names to enum constants for O(1) case-insensitive lookup. */
+    /**
+     * Index of uppercase status names to enum constants for O(1) case-insensitive lookup.
+     */
     private static final @NotNull Map<String, CloudflareCacheStatus> BY_NAME;
 
     static {
@@ -75,7 +101,9 @@ public enum CloudflareCacheStatus {
         BY_NAME = Map.copyOf(byName);
     }
 
-    /** A human-readable description of the caching behavior represented by this constant. */
+    /**
+     * A human-readable description of the caching behavior represented by this constant.
+     */
     private final @NotNull String description;
 
     /**

@@ -1,5 +1,6 @@
 package dev.simplified.client.springbench;
 
+import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.route.Route;
 import feign.Param;
@@ -18,7 +19,7 @@ import org.jetbrains.annotations.NotNull;
  *       TLS + decode pipeline.</li>
  *   <li>{@link #getPlayerCached(String)} - cache-hit path. The mock emits
  *       {@code Cache-Control: public, max-age=60} so repeat calls for the same
- *       username short-circuit at {@link dev.simplified.client.cache.CachingFeignClient}.</li>
+ *       username short-circuit at {@link CachingFeignClient}.</li>
  * </ul>
  */
 @Route("127.0.0.1:47652")
