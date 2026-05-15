@@ -153,4 +153,47 @@ public final class ApacheClientFactory {
             request.addHeader(id, String.valueOf(value));
     }
 
+    /**
+     * Spawns one Java 21 {@linkplain Thread#ofVirtual() virtual thread} per host that issues
+     * a single {@code HEAD /} via the supplied Feign client, leaving a warmed-up keep-alive
+     * connection in the underlying Apache pool for the first real request.
+     *
+     * <p>Each thread wraps its body in a {@code try/catch(Throwable)} that swallows every
+     * failure - an unreachable host at construction time must not surface as a
+     * {@code Client.create()} exception. Virtual threads are the right fit because the
+     * HEAD probe is short-lived blocking I/O; the JDK platform thread pool would be
+     * wasteful here, and a JIT-friendly fire-and-forget pattern keeps construction
+     * latency unaffected.</p>
+     *
+     * @param hosts the unique hostnames to probe; safe to pass an empty set (no-op)
+     * @param feignClient the Feign transport to dispatch the HEAD through; the same instance
+     *                    the client will use for real requests so the prewarm seeds the same
+     *                    Apache pool
+     */
+    public static void prewarm(@NotNull java.util.Set<String> hosts, @NotNull feign.Client feignClient) {
+        if (hosts.isEmpty()) return;
+
+        feign.Request.Options probeOptions = new feign.Request.Options(2, TimeUnit.SECONDS, 2, TimeUnit.SECONDS, true);
+
+        for (String host : hosts) {
+            String url = "https://" + host + "/";
+            Thread.ofVirtual().name("client-prewarm-" + host).start(() -> {
+                try {
+                    feign.Request probe = feign.Request.create(
+                        feign.Request.HttpMethod.HEAD,
+                        url,
+                        java.util.Map.of(),
+                        feign.Request.Body.empty(),
+                        null
+                    );
+                    feign.Response response = feignClient.execute(probe, probeOptions);
+                    feign.Util.ensureClosed(response.body());
+                } catch (Throwable ignored) {
+                    // Best-effort warm-up; an unreachable host at construction time must
+                    // not surface here. The first real request will report the failure.
+                }
+            });
+        }
+    }
+
 }

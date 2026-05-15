@@ -99,6 +99,15 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     private final @NotNull C contract;
 
     /**
+     * The Gson instance built once from {@link ClientConfig#getGsonSettings()} with the
+     * contract's return types injected as prewarm targets. Cached here so the encoder,
+     * decoder, and custom error-decoder factories receive a single warm Gson instead of
+     * each independently invoking {@link dev.simplified.gson.GsonSettings#create()}.
+     */
+    @Getter(AccessLevel.NONE)
+    private final @NotNull com.google.gson.Gson gson;
+
+    /**
      * The RFC 7234 response cache and merged observability facade, replacing the legacy
      * {@code recentResponses} list. Holds both the Caffeine cache used for conditional
      * revalidation and fresh-hit short-circuiting and the single-slot "last response"
@@ -125,8 +134,26 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             options.getTimings().maxCacheBytes(),
             options.getTimings().cacheSafetyFallback()
         );
+        // Derive a contract-aware GsonSettings: every response type the contract advertises
+        // is added as a prewarm target so GsonSettings.create() generates the matching
+        // TypeAdapter eagerly. First-request cost drops by 1-5 ms per type.
+        this.gson = options.getGsonSettings()
+            .mutate()
+            .withPrewarmTypes(walkContractTypes(options.getTarget()))
+            .build()
+            .create();
         this.internalClient = this.buildInternalClient();
         this.contract = this.wrapContractProxy(this.build());
+
+        // Cold-start prewarm: DNS lookup (B2) and Apache pool TLS handshake (B1) run on
+        // virtual threads, one per advertised host, so the constructor returns immediately
+        // while the first real request finds a warm pool. Failures are swallowed per host -
+        // an unreachable host at construction time must not propagate out of Client.create().
+        java.util.Set<String> hosts = collectAdvertisedHosts();
+        if (!hosts.isEmpty()) {
+            prewarmDns(hosts);
+            ApacheClientFactory.prewarm(hosts, this.internalClient);
+        }
     }
 
     /**
@@ -301,6 +328,75 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      *
      * @return a fully configured {@link ApacheHttpClient} ready for use by Feign
      */
+    /**
+     * Walks the contract interface's declared methods and extracts the deserialized payload
+     * type of every {@code Response<T>}-returning method. The resulting list seeds the
+     * {@link dev.simplified.gson.GsonSettings#getPrewarmTypes() Gson prewarm list} so adapter
+     * generation for known response shapes runs at construction time rather than on first
+     * decode.
+     *
+     * <p>Methods that return raw {@code Response} (no type parameter) or whose return type is
+     * not parameterised are skipped. Streaming bodies ({@code Response<InputStream>}) are
+     * included but Gson skips them harmlessly at adapter-resolution time.</p>
+     *
+     * @param target the contract interface class
+     * @return the list of payload types to prewarm
+     */
+    private static @NotNull java.util.List<java.lang.reflect.Type> walkContractTypes(@NotNull Class<? extends Contract> target) {
+        java.util.List<java.lang.reflect.Type> types = new java.util.ArrayList<>();
+        for (java.lang.reflect.Method method : target.getDeclaredMethods()) {
+            java.lang.reflect.Type returnType = method.getGenericReturnType();
+            if (!(returnType instanceof java.lang.reflect.ParameterizedType parameterized)) continue;
+            if (parameterized.getRawType() != Response.class) continue;
+            java.lang.reflect.Type[] args = parameterized.getActualTypeArguments();
+            if (args.length > 0) types.add(args[0]);
+        }
+        return types;
+    }
+
+    /**
+     * Collects the unique bare hostnames advertised by every route the contract knows about,
+     * for use as DNS preresolve targets and pool-prewarm anchors. Stripping the port and path
+     * gives the inputs {@link java.net.InetAddress#getAllByName(String)} expects.
+     *
+     * @return the set of unique hostnames; empty if every route is hostless (e.g. localhost-only)
+     */
+    private @NotNull java.util.Set<String> collectAdvertisedHosts() {
+        java.util.Set<String> hosts = new java.util.HashSet<>();
+        addHost(hosts, this.routeDiscovery.getDefaultRoute());
+        this.routeDiscovery.getMethodRoutes().values().forEach(metadata -> addHost(hosts, metadata));
+        return hosts;
+    }
+
+    private static void addHost(@NotNull java.util.Set<String> sink, @NotNull RouteDiscovery.Metadata metadata) {
+        String route = metadata.getRoute();
+        int slash = route.indexOf('/');
+        String authority = slash < 0 ? route : route.substring(0, slash);
+        int colon = authority.indexOf(':');
+        String host = colon < 0 ? authority : authority.substring(0, colon);
+        if (!host.isBlank()) sink.add(host);
+    }
+
+    /**
+     * Fires one virtual thread per host to call {@link java.net.InetAddress#getAllByName(String)},
+     * which populates the OS resolver cache so the first real request does not pay the DNS
+     * lookup. Failures are swallowed per host.
+     *
+     * @param hosts the hostnames to resolve in the background
+     */
+    private static void prewarmDns(@NotNull java.util.Set<String> hosts) {
+        for (String host : hosts) {
+            Thread.ofVirtual().name("client-dns-" + host).start(() -> {
+                try {
+                    java.net.InetAddress.getAllByName(host);
+                } catch (Throwable ignored) {
+                    // Unreachable host or DNS failure at construction time must not
+                    // propagate; the first real request will surface the failure normally.
+                }
+            });
+        }
+    }
+
     private @NotNull feign.Client buildInternalClient() {
         feign.Client override = this.options.getCustomFeignClient();
         if (override != null) return override;
@@ -338,9 +434,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
 
         return Feign.builder()
             .client(cachingClient)
-            .encoder(this.options.getEncoderFactory().apply(this.options.getGson()))
+            .encoder(this.options.getEncoderFactory().apply(this.gson))
             .decoder(new InternalResponseDecoder(
-                this.options.getDecoderFactory().apply(this.options.getGson()),
+                this.options.getDecoderFactory().apply(this.gson),
                 this.responseCache
             ))
             .errorDecoder(new InternalErrorDecoder(
