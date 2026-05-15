@@ -2,8 +2,8 @@ package dev.simplified.client.response;
 
 import dev.simplified.util.time.Stopwatch;
 import lombok.Getter;
-import org.apache.http.protocol.BasicHttpContext;
-import org.apache.http.protocol.HttpContext;
+import org.apache.hc.core5.http.protocol.BasicHttpContext;
+import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
 import java.time.Instant;
@@ -88,6 +88,15 @@ public final class NetworkDetails {
     private final @NotNull Optional<String> tlsCipher;
 
     /**
+     * Shared empty {@code NetworkDetails} sentinel with zero-duration stopwatches and empty
+     * TLS metadata. Used by callers that need to synthesize a response or exception that did
+     * not produce a real network exchange (e.g. cache replays, client-side rate-limit
+     * rejections) so consumers reading {@link #getRoundTrip()} or the TLS optionals see
+     * consistent "no exchange" defaults rather than {@code null}.
+     */
+    public static final @NotNull NetworkDetails EMPTY = new NetworkDetails(new BasicHttpContext());
+
+    /**
      * Constructs a {@link NetworkDetails} by extracting internal headers from a Feign response.
      * <p>
      * Timing headers are read from the request headers (where they were injected by the
@@ -149,21 +158,6 @@ public final class NetworkDetails {
 
         this.tlsProtocol = Optional.ofNullable(getAttribute(context, TLS_PROTOCOL, null));
         this.tlsCipher = Optional.ofNullable(getAttribute(context, TLS_CIPHER, null));
-    }
-
-    /**
-     * Returns an empty {@link NetworkDetails} with all timestamps at {@link Instant#EPOCH}
-     * and empty TLS metadata.
-     * <p>
-     * Useful for synthesizing exceptions or responses that did not produce a real network
-     * exchange (e.g. client-side rate-limit rejections), so callers reading
-     * {@link #getRoundTrip()} or the TLS optionals see consistent "no exchange" defaults
-     * rather than {@code null}.
-     *
-     * @return a NetworkDetails carrying zero-duration stopwatches and empty TLS info
-     */
-    public static @NotNull NetworkDetails empty() {
-        return new NetworkDetails(new BasicHttpContext());
     }
 
     /**

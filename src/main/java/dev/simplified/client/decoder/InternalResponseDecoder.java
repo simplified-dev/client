@@ -6,6 +6,7 @@ import dev.simplified.client.exception.ApiDecodeException;
 import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import dev.simplified.client.util.BodyBuffering;
 import feign.FeignException;
 import feign.Util;
 import feign.codec.Decoder;
@@ -142,7 +143,7 @@ public final class InternalResponseDecoder implements Decoder {
                 bodyData = eagerBody instanceof byte[] raw ? raw : new byte[0];
                 bodyDecoder = () -> eagerBody;
             } else {
-                bodyData = Util.toByteArray(feignResponse.body().asInputStream());
+                bodyData = BodyBuffering.toByteArray(feignResponse.body(), feignResponse.headers());
                 Type finalBodyType = bodyType;
                 byte[] capturedBody = bodyData;
                 bodyDecoder = () -> {

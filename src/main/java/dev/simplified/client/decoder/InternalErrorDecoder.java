@@ -11,13 +11,14 @@ import dev.simplified.client.response.HttpState;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.util.RetryAfterParser;
 import dev.simplified.client.route.RouteDiscovery;
-import dev.simplified.reflection.Reflection;
-import dev.simplified.reflection.accessor.FieldAccessor;
+import dev.simplified.client.util.BodyBuffering;
 import feign.Util;
 import feign.codec.ErrorDecoder;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.util.OptionalLong;
 
 /**
@@ -60,8 +61,28 @@ import java.util.OptionalLong;
  */
 public final class InternalErrorDecoder implements ErrorDecoder {
 
-    /** Pre-resolved field accessor for the {@code retryAttempts} field on {@link ApiException}. */
-    private static final @NotNull FieldAccessor<?> RETRY_ATTEMPTS_FIELD = new Reflection<>(ApiException.class).getField("retryAttempts");
+    /**
+     * Direct handle to the {@code retryAttempts} field on {@link ApiException}. Resolved
+     * via {@link MethodHandles#privateLookupIn} so this decoder can write the field across
+     * the {@code decoder} / {@code exception} package boundary without exposing a public
+     * setter or constructor parameter on {@code ApiException}. VarHandle stores are
+     * JIT-intrinsified down to plain field stores at hot temperatures, eliminating the
+     * reflection thunks the previous {@code FieldAccessor}-based access went through.
+     * <p>
+     * Note: works because the entire client module currently lives in the unnamed module.
+     * If a {@code module-info.java} is added later, the exception module must
+     * {@code opens dev.simplified.client.exception} to this decoder module for the
+     * {@code privateLookupIn} call to succeed.
+     */
+    private static final @NotNull VarHandle RETRY_ATTEMPTS_HANDLE;
+    static {
+        try {
+            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ApiException.class, MethodHandles.lookup());
+            RETRY_ATTEMPTS_HANDLE = lookup.findVarHandle(ApiException.class, "retryAttempts", int.class);
+        } catch (IllegalAccessException | NoSuchFieldException ex) {
+            throw new ExceptionInInitializerError(ex);
+        }
+    }
 
     /** The client-supplied decoder responsible for domain-specific error parsing. */
     private final @NotNull ClientErrorDecoder customDecoder;
@@ -146,7 +167,7 @@ public final class InternalErrorDecoder implements ErrorDecoder {
             exception = this.customDecoder.decode(context);
         }
 
-        RETRY_ATTEMPTS_FIELD.set(exception, retryCtx.retryAttempt);
+        RETRY_ATTEMPTS_HANDLE.set(exception, retryCtx.retryAttempt);
         this.responseCache.recordLastResponse(exception);
 
         // If retryable, wrap for Feign's retry mechanism. The feign.Request flows through here
@@ -181,7 +202,7 @@ public final class InternalErrorDecoder implements ErrorDecoder {
             return new byte[0];
 
         try {
-            return Util.toByteArray(raw.asInputStream());
+            return BodyBuffering.toByteArray(raw, response.headers());
         } catch (IOException ex) {
             return new byte[0];
         } finally {

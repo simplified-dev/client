@@ -8,8 +8,8 @@ import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.exception.ApiDecodeException;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.RetryableApiException;
-import dev.simplified.client.factory.TimedPlainConnectionSocketFactory;
-import dev.simplified.client.factory.TimedSecureConnectionSocketFactory;
+import dev.simplified.client.factory.TimedConnectionOperator;
+import dev.simplified.client.factory.TimedTlsSocketStrategy;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
 import dev.simplified.client.factory.ApacheClientFactory;
@@ -24,11 +24,9 @@ import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
-import feign.httpclient.ApacheHttpClient;
+import feign.hc5.ApacheHttp5Client;
 import lombok.AccessLevel;
 import lombok.Getter;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.apache.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.InvocationTargetException;
@@ -50,8 +48,8 @@ import java.util.concurrent.TimeUnit;
  * {@link dev.simplified.client.route.DynamicRoute @DynamicRoute} annotations on the contract
  * interface through {@link RouteDiscovery}, instantiates a {@link ResponseCache} for both
  * conditional revalidation and {@code getLastResponse()} observability, builds a pooling
- * Apache {@link ApacheHttpClient} with {@link TimedPlainConnectionSocketFactory} and
- * {@link TimedSecureConnectionSocketFactory} for DNS, TCP, and TLS timing instrumentation,
+ * Apache {@link ApacheHttp5Client} with {@link TimedConnectionOperator} and
+ * {@link TimedTlsSocketStrategy} for DNS, TCP, and TLS timing instrumentation,
  * wraps the Apache client in a {@link CachingFeignClient} that serves RFC 7234 cache hits
  * transparently, assembles a Feign proxy that wires together encoding, decoding, request
  * and response interceptors, and the configured error decoder, and finally wraps the
@@ -81,9 +79,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /** The immutable configuration bundle used to construct this client. */
     private final @NotNull ClientConfig<C> options;
 
-    /** The underlying Apache HTTP client wrapped by Feign for connection pooling and transport. */
+    /** The pooling Apache HTTP/5 transport used for request execution. */
     @Getter(AccessLevel.NONE)
-    private final @NotNull ApacheHttpClient internalClient;
+    private final @NotNull feign.Client internalClient;
 
     /** The route discovery instance that maps endpoint methods to target URLs and rate-limit configurations. */
     private final @NotNull RouteDiscovery routeDiscovery;
@@ -95,6 +93,15 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     private final @NotNull C contract;
 
     /**
+     * The Gson instance built once from {@link ClientConfig#getGsonSettings()} with the
+     * contract's return types injected as prewarm targets. Cached here so the encoder,
+     * decoder, and custom error-decoder factories receive a single warm Gson instead of
+     * each independently invoking {@link dev.simplified.gson.GsonSettings#create()}.
+     */
+    @Getter(AccessLevel.NONE)
+    private final @NotNull com.google.gson.Gson gson;
+
+    /**
      * The RFC 7234 response cache and merged observability facade, replacing the legacy
      * {@code recentResponses} list. Holds both the Caffeine cache used for conditional
      * revalidation and fresh-hit short-circuiting and the single-slot "last response"
@@ -103,37 +110,69 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     private final @NotNull ResponseCache responseCache;
 
     /**
-     * Constructs a new client from the given configuration bundle.
+     * Constructs a new client from the given configuration bundle and pre-built Feign transport.
      * <p>
      * Discovers routes for the target contract interface, initializes the rate-limit manager,
      * instantiates the response cache from {@link Timings#maxCacheBytes()} and
-     * {@link Timings#cacheSafetyFallback()}, builds the pooling Apache HTTP client, wraps it
-     * in a {@link CachingFeignClient} that serves RFC 7234 cache hits transparently, and
-     * assembles the Feign proxy through an exception-unwrapping dynamic proxy.
+     * {@link Timings#cacheSafetyFallback()}, wraps the supplied transport in a
+     * {@link CachingFeignClient}, and assembles the Feign proxy through an exception-unwrapping
+     * dynamic proxy. The constructor fires DNS and HEAD-probe prewarms on virtual threads so
+     * the first real request finds a warm pool; prewarm failures never propagate.
+     *
+     * <p>Package-private so that an in-package test fixture can substitute a non-production
+     * transport (canned client, custom TLS) without exposing an override on
+     * {@link ClientConfig}'s public surface. Production callers use
+     * {@link #create(ClientConfig)}, which always builds an {@link ApacheHttp5Client}.</p>
      *
      * @param options the immutable configuration bundle
+     * @param internalClient the Feign transport used for request execution
      */
-    private Client(@NotNull ClientConfig<C> options) {
+    Client(@NotNull ClientConfig<C> options, @NotNull feign.Client internalClient) {
         this.options = options;
+        this.internalClient = internalClient;
         this.routeDiscovery = new RouteDiscovery(options.getTarget());
         this.rateLimitManager = new RateLimitManager();
         this.responseCache = new ResponseCache(
             options.getTimings().maxCacheBytes(),
             options.getTimings().cacheSafetyFallback()
         );
-        this.internalClient = this.buildInternalClient();
+        // Derive a contract-aware GsonSettings: every response type the contract advertises
+        // is added as a prewarm target so GsonSettings.create() generates the matching
+        // TypeAdapter eagerly. First-request cost drops by 1-5 ms per type.
+        this.gson = options.getGsonSettings()
+            .mutate()
+            .withPrewarmTypes(walkContractTypes(options.getTarget()))
+            .build()
+            .create();
         this.contract = this.wrapContractProxy(this.build());
+
+        java.util.Set<String> hosts = this.routeDiscovery.collectAdvertisedHosts();
+        if (!hosts.isEmpty()) {
+            ApacheClientFactory.prewarmDns(hosts);
+            ApacheClientFactory.prewarm(hosts, this.internalClient);
+        }
     }
 
     /**
-     * Creates a new {@code Client} from the given configuration bundle.
+     * Creates a new {@code Client} from the given configuration bundle, backed by a fresh
+     * pooling {@link ApacheHttp5Client}.
      *
      * @param <C> the contract interface type
      * @param options the immutable configuration bundle
      * @return a fully initialized client ready to issue requests
      */
     public static <C extends Contract> @NotNull Client<C> create(@NotNull ClientConfig<C> options) {
-        return new Client<>(options);
+        return new Client<>(options, buildProductionTransport(options));
+    }
+
+    private static @NotNull feign.Client buildProductionTransport(@NotNull ClientConfig<?> options) {
+        return new ApacheHttp5Client(ApacheClientFactory.configure(
+            options.getTimings(),
+            options.getQueries(),
+            options.getHeaders(),
+            options.getDynamicHeaders(),
+            options.getInet6Address()
+        ).build());
     }
 
     // ===== Configuration access =====
@@ -278,33 +317,29 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     // ===== Internal build helpers =====
 
     /**
-     * Builds the pooling Apache HTTP client used as Feign's transport layer.
-     * <p>
-     * The resulting {@link ApacheHttpClient} is configured with a
-     * {@link PoolingHttpClientConnectionManager} that uses {@link TimedPlainConnectionSocketFactory}
-     * and {@link TimedSecureConnectionSocketFactory} to capture DNS, TCP, and TLS timings into the
-     * {@link HttpContext} as {@link NetworkDetails} attributes; a request interceptor that records
-     * the request start timestamp, propagates timing attributes as headers, and appends the
-     * configured queries, headers, and dynamic headers from {@link ClientConfig}; pool limits and
-     * timeouts derived from {@link Timings}; and an optional local IPv6 address binding from
-     * {@link ClientConfig#getInet6Address()}.
-     * <p>
-     * Cache semantics (freshness, revalidation, stale-if-error replay, invalidation on unsafe
-     * methods) live in {@link CachingFeignClient}, which wraps the returned Apache client before
-     * it reaches Feign. The post-response pruning interceptor that used to live here has been
-     * retired - entries in {@link ResponseCache} are evicted by per-entry TTL and weight,
-     * bounded by {@link Timings#cacheSafetyFallback()} and {@link Timings#maxCacheBytes()}.
+     * Walks the contract interface's declared methods and extracts the deserialized payload
+     * type of every {@code Response<T>}-returning method. The resulting list seeds the
+     * {@link dev.simplified.gson.GsonSettings#getPrewarmTypes() Gson prewarm list} so adapter
+     * generation for known response shapes runs at construction time rather than on first
+     * decode.
      *
-     * @return a fully configured {@link ApacheHttpClient} ready for use by Feign
+     * <p>Methods that return raw {@code Response} (no type parameter) or whose return type is
+     * not parameterised are skipped. Streaming bodies ({@code Response<InputStream>}) are
+     * included but Gson skips them harmlessly at adapter-resolution time.</p>
+     *
+     * @param target the contract interface class
+     * @return the list of payload types to prewarm
      */
-    private @NotNull ApacheHttpClient buildInternalClient() {
-        return new ApacheHttpClient(ApacheClientFactory.configure(
-            this.options.getTimings(),
-            this.options.getQueries(),
-            this.options.getHeaders(),
-            this.options.getDynamicHeaders(),
-            this.options.getInet6Address()
-        ).build());
+    private static @NotNull java.util.List<java.lang.reflect.Type> walkContractTypes(@NotNull Class<? extends Contract> target) {
+        java.util.List<java.lang.reflect.Type> types = new java.util.ArrayList<>();
+        for (java.lang.reflect.Method method : target.getDeclaredMethods()) {
+            java.lang.reflect.Type returnType = method.getGenericReturnType();
+            if (!(returnType instanceof java.lang.reflect.ParameterizedType parameterized)) continue;
+            if (parameterized.getRawType() != Response.class) continue;
+            java.lang.reflect.Type[] args = parameterized.getActualTypeArguments();
+            if (args.length > 0) types.add(args[0]);
+        }
+        return types;
     }
 
     /**
@@ -330,9 +365,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
 
         return Feign.builder()
             .client(cachingClient)
-            .encoder(this.options.getEncoderFactory().apply(this.options.getGson()))
+            .encoder(this.options.getEncoderFactory().apply(this.gson))
             .decoder(new InternalResponseDecoder(
-                this.options.getDecoderFactory().apply(this.options.getGson()),
+                this.options.getDecoderFactory().apply(this.gson),
                 this.responseCache
             ))
             .errorDecoder(new InternalErrorDecoder(

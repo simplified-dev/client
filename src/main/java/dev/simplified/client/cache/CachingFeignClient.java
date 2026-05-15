@@ -2,7 +2,6 @@ package dev.simplified.client.cache;
 
 import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.request.HttpMethod;
-import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.Client;
@@ -76,7 +75,7 @@ public final class CachingFeignClient implements Client {
     public feign.Response execute(@NotNull Request request, @NotNull Request.Options options) throws IOException {
         HttpMethod method = HttpMethod.of(request.httpMethod().name());
 
-        if (method.isCacheable() && !hasConditionalHeaders(request.headers())) {
+        if (method.isCacheable() && !CacheRevalidation.hasConditionalHeaders(request.headers())) {
             Optional<CacheEntry<?>> lookup = this.responseCache.lookup(method, request.url(), request.headers());
 
             if (lookup.isPresent()) {
@@ -242,42 +241,19 @@ public final class CachingFeignClient implements Client {
     // ===== Header helpers =====
 
     /**
-     * Returns {@code true} if the caller has already set {@code If-None-Match} or
-     * {@code If-Modified-Since}, in which case the cache should stay out of the way and
-     * let the caller drive the conditional exchange.
-     *
-     * @param headers the request headers
-     * @return {@code true} if a conditional header is already present
-     */
-    private static boolean hasConditionalHeaders(@NotNull Map<String, Collection<String>> headers) {
-        for (String name : headers.keySet()) {
-            if (ETag.IF_NONE_MATCH_HEADER.equalsIgnoreCase(name))
-                return true;
-            if ("If-Modified-Since".equalsIgnoreCase(name))
-                return true;
-        }
-
-        return false;
-    }
-
-    /**
      * Builds a copy of the given request with {@code If-None-Match} and/or
      * {@code If-Modified-Since} attached from the cached variant's validators.
+     * <p>
+     * Delegates the header derivation to {@link CacheRevalidation#buildConditionalHeaders}
+     * and rebuilds a {@link Request} around the resulting map. The Feign transport requires
+     * the wire-format wrapping; transport-neutral callers consume the bare map directly.
      *
      * @param request the original request
      * @param cached the cached variant carrying the validators
      * @return a copy of the request with conditional headers attached
      */
     private @NotNull Request withConditionalHeaders(@NotNull Request request, @NotNull Response.CachedImpl<?> cached) {
-        Map<String, Collection<String>> headers = new HashMap<>(request.headers());
-
-        cached.getETag().ifPresent(etag -> headers.put(ETag.IF_NONE_MATCH_HEADER, List.of(etag.toHeaderValue())));
-
-        cached.getHeaders()
-            .getOptional("Last-Modified")
-            .filter(list -> !list.isEmpty())
-            .map(List::getFirst)
-            .ifPresent(lastMod -> headers.put("If-Modified-Since", List.of(lastMod)));
+        Map<String, Collection<String>> headers = CacheRevalidation.buildConditionalHeaders(request.headers(), cached);
 
         return Request.create(
             request.httpMethod(),

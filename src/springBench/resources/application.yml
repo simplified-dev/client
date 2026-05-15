@@ -1,0 +1,27 @@
+server:
+  port: 8080
+  tomcat:
+    # Headline Tomcat worker concurrency. Override via -Dserver.tomcat.threads.max=...
+    # Default sized to accept up to 1000 simultaneous Spring requests; the upstream
+    # HC5 pool is the actual binding constraint we want the bench to measure.
+    threads:
+      max: 1000
+      min-spare: 50
+    # Tomcat accept queue beyond threads.max. Keep generous so k6's ramp doesn't
+    # observe connection refusals before saturating the worker pool.
+    accept-count: 1000
+
+spring:
+  application:
+    name: client-spring-bench
+  threads:
+    virtual:
+      # Spring Boot 3.2+ / 4.x: every Tomcat request handler runs on a virtual
+      # thread. Combined with the HC5 (5.x) migration, blocking on the upstream
+      # call no longer pins a carrier - this is the headline measurement.
+      enabled: true
+
+logging:
+  level:
+    root: WARN
+    dev.simplified.client.springbench: INFO

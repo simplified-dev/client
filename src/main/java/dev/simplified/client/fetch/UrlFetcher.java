@@ -2,6 +2,8 @@ package dev.simplified.client.fetch;
 
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CacheEntry;
+import dev.simplified.client.cache.CacheKey;
+import dev.simplified.client.cache.CacheRevalidation;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.UrlFetchException;
@@ -10,19 +12,21 @@ import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.request.Request;
+import dev.simplified.client.response.HttpState;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.util.time.Stopwatch;
 import lombok.Getter;
-import org.apache.http.Header;
-import org.apache.http.HttpEntity;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.protocol.HttpClientContext;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.util.EntityUtils;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.http.Header;
+import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -38,7 +42,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
-import java.util.function.Supplier;
 
 /**
  * Standalone HTTP fetcher for ad-hoc URLs that reuses the {@link Client} infrastructure
@@ -54,9 +57,13 @@ import java.util.function.Supplier;
  * Per-request flow:
  * <ol>
  *   <li>Resolve a rate-limit bucket id via {@link UrlFetcherConfig#getBucketResolver()}.</li>
- *   <li>Look up the URL in the {@link ResponseCache}; serve a synthesized
- *       {@link Response.DirectImpl} immediately on a fresh hit. Stale entries fall through
- *       to a fresh fetch (no conditional revalidation in v1).</li>
+ *   <li>Look up the URL in the {@link ResponseCache}; on a fresh hit, serve a synthesized
+ *       {@link Response.DirectImpl} immediately. On a stale hit with an {@code ETag} or
+ *       {@code Last-Modified} validator, attach {@code If-None-Match} /
+ *       {@code If-Modified-Since} and dispatch a conditional request; on
+ *       {@code 304 Not Modified}, refresh the cached headers and replay the cached body;
+ *       on a {@code 5xx} within the entry's {@code stale-if-error} window, replay the
+ *       cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}.</li>
  *   <li>Check the local rate limit; raise {@link UrlFetchException.RateLimited} if exhausted.</li>
  *   <li>Track the request and dispatch through the shared Apache transport.</li>
  *   <li>Read the response body capped at {@link UrlFetcherConfig#getMaxBodyBytes()};
@@ -123,9 +130,9 @@ public final class UrlFetcher {
      * @return the typed response envelope
      */
     public @NotNull Response<String> get(@NotNull URI url) {
-        Response<byte[]> raw = this.fetch(url);
+        Response.DirectImpl<byte[]> raw = this.fetch(url);
         Charset charset = charsetFromContentType(raw.getContentType().orElse(null), StandardCharsets.UTF_8);
-        return reTyped(raw, () -> new String(raw.getBody(), charset));
+        return raw.withBody(() -> new String(raw.getBody(), charset));
     }
 
     /**
@@ -139,9 +146,9 @@ public final class UrlFetcher {
      * @return the typed response envelope
      */
     public <T> @NotNull Response<T> get(@NotNull URI url, @NotNull Class<T> type) {
-        Response<byte[]> raw = this.fetch(url);
+        Response.DirectImpl<byte[]> raw = this.fetch(url);
         Charset charset = charsetFromContentType(raw.getContentType().orElse(null), StandardCharsets.UTF_8);
-        return reTyped(raw, () -> this.options.getGson().fromJson(new String(raw.getBody(), charset), type));
+        return raw.withBody(() -> this.options.getGson().fromJson(new String(raw.getBody(), charset), type));
     }
 
     /**
@@ -214,38 +221,59 @@ public final class UrlFetcher {
 
     // ===== Core fetch path =====
 
-    private @NotNull Response<byte[]> fetch(@NotNull URI url) {
+    private @NotNull Response.DirectImpl<byte[]> fetch(@NotNull URI url) {
         Request request = new Request.Impl(HttpMethod.GET, url.toString());
         String bucketId = this.options.getBucketResolver().apply(url);
         RateLimit policy = this.options.getDefaultRateLimit();
         long now = System.currentTimeMillis();
 
         Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, url.toString(), Collections.emptyMap());
+
         if (hit.isPresent() && hit.get().response().isFresh(Instant.now()))
-            return this.serveFromCache(url, request, hit.get());
+            return this.serveFromCache(request, hit.get(), false);
 
         if (this.rateLimitManager.isRateLimited(bucketId, policy, now))
             throw new UrlFetchException.RateLimited(url, bucketId, policy);
 
         this.rateLimitManager.trackRequest(bucketId, policy, now);
 
-        return this.executeAndStore(url, request);
+        CacheEntry<?> revalidating = hit.filter(e -> e.response().canRevalidate()).orElse(null);
+        return this.executeAndStore(url, request, revalidating);
     }
 
-    private @NotNull Response<byte[]> executeAndStore(@NotNull URI url, @NotNull Request request) {
+    private @NotNull Response.DirectImpl<byte[]> executeAndStore(
+        @NotNull URI url,
+        @NotNull Request request,
+        @Nullable CacheEntry<?> revalidating
+    ) {
         HttpGet get = new HttpGet(url);
+
+        if (revalidating != null)
+            CacheRevalidation.buildConditionalHeaders(Collections.emptyMap(), revalidating.response())
+                .forEach((name, values) -> values.forEach(value -> get.addHeader(name, value)));
+
         HttpClientContext context = HttpClientContext.create();
 
         try (CloseableHttpResponse apacheResponse = this.http.execute(get, context)) {
+            int statusCode = apacheResponse.getCode();
+
+            if (statusCode == HttpStatus.NOT_MODIFIED.getCode() && revalidating != null)
+                return this.serveOn304(request, apacheResponse, revalidating);
+
+            if (HttpState.SERVER_ERROR.containsCode(statusCode) && revalidating != null
+                && revalidating.response().canServeStaleOnError(Instant.now())) {
+                EntityUtils.consumeQuietly(apacheResponse.getEntity());
+                return this.serveFromCache(request, revalidating, true);
+            }
+
             byte[] body = readBody(apacheResponse, url, context, this.options.getMaxBodyBytes());
-            HttpStatus status = HttpStatus.of(apacheResponse.getStatusLine().getStatusCode());
+            HttpStatus status = HttpStatus.of(statusCode);
             Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
-            NetworkDetails details = new NetworkDetails(context);
 
             Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
                 status,
                 request,
-                details,
+                () -> new NetworkDetails(context),
                 headers,
                 () -> body
             );
@@ -256,7 +284,7 @@ public final class UrlFetcher {
             if (response.isError())
                 throw new UrlFetchException(
                     new ErrorContext(status, HttpMethod.GET, url.toString(), headers, Collections.emptyMap(), body),
-                    details,
+                    new NetworkDetails(context),
                     "Origin returned %d %s for URL '%s'",
                     status.getCode(),
                     status.getMessage(),
@@ -271,9 +299,27 @@ public final class UrlFetcher {
         }
     }
 
-    private @NotNull Response<byte[]> serveFromCache(@NotNull URI url, @NotNull Request request, @NotNull CacheEntry<?> entry) {
+    private @NotNull Response.DirectImpl<byte[]> serveOn304(
+        @NotNull Request request,
+        @NotNull CloseableHttpResponse apacheResponse,
+        @NotNull CacheEntry<?> revalidating
+    ) {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, request.getUrl());
+        CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(
+            revalidating.response().varyHeaderNames(),
+            Collections.emptyMap()
+        );
+        this.responseCache.updateOn304(key, fingerprint, headersFromApache(apacheResponse));
+        EntityUtils.consumeQuietly(apacheResponse.getEntity());
+        return this.serveFromCache(request, revalidating, false);
+    }
+
+    private @NotNull Response.DirectImpl<byte[]> serveFromCache(
+        @NotNull Request request,
+        @NotNull CacheEntry<?> entry,
+        boolean servedStale
+    ) {
         Response.CachedImpl<?> cached = entry.response();
-        byte[] body = entry.body();
         Instant now = Instant.now();
         long ageSeconds = Math.max(0L, cached.currentAge(now).getSeconds());
 
@@ -282,28 +328,21 @@ public final class UrlFetcher {
         headers.put("Age", List.of(Long.toString(ageSeconds)));
         headers.put(ResponseCache.CACHE_HIT_HEADER, List.of("true"));
 
+        if (servedStale)
+            headers.put(ResponseCache.CACHE_STALE_HEADER, List.of("true"));
+
         Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
             cached.getStatus(),
             request,
-            NetworkDetails.empty(),
+            () -> NetworkDetails.EMPTY,
             headers,
-            () -> body
+            entry::body
         );
         this.responseCache.recordLastResponse(response);
         return response;
     }
 
     // ===== Helpers =====
-
-    private static <I, O> @NotNull Response<O> reTyped(@NotNull Response<I> source, @NotNull Supplier<O> bodyDecoder) {
-        return new Response.DirectImpl<>(
-            source.getStatus(),
-            source.getRequest(),
-            source.getDetails(),
-            source.getHeaders(),
-            bodyDecoder
-        );
-    }
 
     private static byte @NotNull [] readBody(
         @NotNull CloseableHttpResponse apacheResponse,
@@ -340,7 +379,7 @@ public final class UrlFetcher {
 
     private static @NotNull Map<String, Collection<String>> headersFromApache(@NotNull CloseableHttpResponse apacheResponse) {
         Map<String, Collection<String>> result = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        for (Header header : apacheResponse.getAllHeaders())
+        for (Header header : apacheResponse.getHeaders())
             result.computeIfAbsent(header.getName(), k -> new ArrayList<>()).add(header.getValue());
         return result;
     }

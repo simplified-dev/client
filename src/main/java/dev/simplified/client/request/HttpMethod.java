@@ -115,13 +115,19 @@ public enum HttpMethod {
     /**
      * Resolves an {@code HttpMethod} from its name using a case-insensitive comparison.
      * <p>
-     * If no matching constant is found, {@link #GET} is returned as the default.
+     * Most internal callers pass an already-uppercase string (e.g. {@code enum.name()}); the
+     * direct lookup is attempted first to skip the {@link String#toUpperCase(Locale)
+     * String.toUpperCase} scan in that case. Mixed-case inputs fall through to the
+     * canonicalised lookup. If no matching constant is found, {@link #GET} is returned as
+     * the default.
      *
      * @param name the HTTP method name to look up (e.g. {@code "post"}, {@code "GET"})
      * @return the matching {@code HttpMethod}, or {@link #GET} if no match is found
      */
     public static @NotNull HttpMethod of(@NotNull String name) {
-        HttpMethod method = BY_NAME.get(name.toUpperCase(Locale.ROOT));
+        HttpMethod method = BY_NAME.get(name);
+        if (method != null) return method;
+        method = BY_NAME.get(name.toUpperCase(Locale.ROOT));
         return method != null ? method : GET;
     }
 

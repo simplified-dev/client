@@ -1,8 +1,8 @@
 package dev.simplified.client.request;
 
 import dev.simplified.client.Client;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.jetbrains.annotations.NotNull;
 
 import java.time.Duration;
@@ -29,13 +29,16 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  *
  * @param connectionTimeToLive maximum lifetime of a pooled HTTP connection in milliseconds, before it is permanently
- *                             closed regardless of activity. Passed to
- *                             {@link HttpClientBuilder#setConnectionTimeToLive(long, TimeUnit)
- *                             HttpClientBuilder.setConnectionTimeToLive()}. Default: 120,000 (2 minutes).
+ *                             closed regardless of activity. Wrapped in
+ *                             {@link org.apache.hc.core5.util.TimeValue TimeValue} and passed to HC 5's
+ *                             {@code PoolingHttpClientConnectionManagerBuilder.setConnectionTimeToLive(TimeValue)}.
+ *                             Default: 120,000 (2 minutes).
  * @param connectionIdleTimeout maximum duration in milliseconds a pooled connection may sit idle before it is evicted
- *                              by the background cleanup thread. Passed to
- *                              {@link HttpClientBuilder#evictIdleConnections(long, TimeUnit)
- *                              HttpClientBuilder.evictIdleConnections()}. Default: 45,000 (45 seconds).
+ *                              by the background cleanup thread. Wrapped in
+ *                              {@link org.apache.hc.core5.util.TimeValue TimeValue} and passed to
+ *                              {@link HttpClientBuilder#evictIdleConnections(org.apache.hc.core5.util.TimeValue)
+ *                              HttpClientBuilder.evictIdleConnections(TimeValue)}.
+ *                              Default: 45,000 (45 seconds).
  * @param connectionKeepAlive default keep-alive duration in milliseconds for persistent connections when the server
  *                            response does not include a {@code Keep-Alive} header. Default: 30,000 (30 seconds).
  * @param connectTimeout maximum time in milliseconds to wait for a TCP connection to be established. Passed to
@@ -48,10 +51,23 @@ import java.util.concurrent.TimeUnit;
  *                      this interval. Default: 10,000 (10 seconds).
  * @param maxConnections maximum total concurrent HTTP connections across all routes. Passed to
  *                       {@link PoolingHttpClientConnectionManager#setMaxTotal(int)
- *                       PoolingHttpClientConnectionManager.setMaxTotal()}. Default: 200.
+ *                       PoolingHttpClientConnectionManager.setMaxTotal()}. Treat this as a
+ *                       calibrated ceiling rather than a floor to raise: loopback benchmarks
+ *                       show that bumping to 2,000 or uncapped halves throughput and inflates
+ *                       p99 latency, because a thinly-utilised pool pays more connection
+ *                       churn, eviction-sweep, and TLS-handshake cost than a smaller hot pool
+ *                       can avoid through keep-alive reuse. High-RTT WAN traffic may justify
+ *                       a larger value (each connection is in use longer), but verify with a
+ *                       measurement before changing. Default: 200.
  * @param maxConnectionsPerRoute maximum concurrent HTTP connections per individual route. Passed to
  *                               {@link PoolingHttpClientConnectionManager#setDefaultMaxPerRoute(int)
- *                               PoolingHttpClientConnectionManager.setDefaultMaxPerRoute()}. Default: 50.
+ *                               PoolingHttpClientConnectionManager.setDefaultMaxPerRoute()}.
+ *                               A small, hot per-route pool with high keep-alive reuse
+ *                               outperforms a large, lukewarm pool with frequent fresh TLS
+ *                               handshakes on the same workload. Raising this value rarely
+ *                               improves throughput on short-RTT links and frequently
+ *                               regresses it; treat as a calibrated ceiling and verify with
+ *                               a measurement before changing. Default: 50.
  * @param maxCacheBytes maximum total weight of all cached response variants, in bytes. Includes raw body bytes,
  *                      approximate header byte size, and a fixed per-entry overhead. Default: 16,777,216 (16 MiB).
  * @param cacheSafetyFallback absolute upper bound on any cache entry's lifetime in milliseconds, regardless of

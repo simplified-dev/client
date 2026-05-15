@@ -143,24 +143,41 @@ public final class RouteDiscovery {
      * @return the best-matching {@link Metadata}, never {@code null}
      */
     public @NotNull Metadata findMatchingMetadata(@NotNull String requestUrl) {
-        String stripped = stripProtocol(requestUrl);
+        int protocolOffset = protocolPrefixLength(requestUrl);
         Metadata defaultRoute = this.defaultRoute;
 
         // Seed with the default route (always the fallback)
         Metadata bestMatch = defaultRoute;
-        int bestMatchLength = stripped.startsWith(defaultRoute.getRoute()) ? defaultRoute.getRoute().length() : 0;
+        int bestMatchLength = requestUrl.startsWith(defaultRoute.getRoute(), protocolOffset)
+            ? defaultRoute.getRoute().length()
+            : 0;
 
-        // Find the longest prefix match among method-level route overrides
+        // Find the longest prefix match among method-level route overrides. Using
+        // startsWith(prefix, offset) avoids the substring allocation stripProtocol would
+        // have otherwise paid on every call to this method.
         for (Metadata metadata : this.methodRoutes.values()) {
             String route = metadata.getRoute();
 
-            if (stripped.startsWith(route) && route.length() > bestMatchLength) {
+            if (requestUrl.startsWith(route, protocolOffset) && route.length() > bestMatchLength) {
                 bestMatch = metadata;
                 bestMatchLength = route.length();
             }
         }
 
         return bestMatch;
+    }
+
+    /**
+     * Returns the length of the URL scheme prefix (the {@code http://} or {@code https://}
+     * literal) at the start of {@code url}, or {@code 0} if no prefix is present.
+     *
+     * @param url the URL to inspect
+     * @return {@code 8} for {@code "https://"}, {@code 7} for {@code "http://"}, {@code 0} otherwise
+     */
+    private static int protocolPrefixLength(@NotNull String url) {
+        if (url.startsWith("https://")) return 8;
+        if (url.startsWith("http://")) return 7;
+        return 0;
     }
 
     /**
@@ -174,6 +191,29 @@ public final class RouteDiscovery {
      */
     public @NotNull Metadata getMetadata(@NotNull Method method) {
         return this.getMethodRoutes().getOrDefault(method, this.getDefaultRoute());
+    }
+
+    /**
+     * Collects the unique bare hostnames advertised by every route this discovery knows about,
+     * for use as DNS preresolve targets and pool-prewarm anchors. The port and path are stripped
+     * so the result matches what {@link java.net.InetAddress#getAllByName(String)} expects.
+     *
+     * @return the set of unique hostnames; empty if every route is hostless
+     */
+    public @NotNull java.util.Set<String> collectAdvertisedHosts() {
+        java.util.Set<String> hosts = new java.util.HashSet<>();
+        addHost(hosts, this.defaultRoute);
+        this.methodRoutes.values().forEach(metadata -> addHost(hosts, metadata));
+        return hosts;
+    }
+
+    private static void addHost(@NotNull java.util.Set<String> sink, @NotNull Metadata metadata) {
+        String route = metadata.getRoute();
+        int slash = route.indexOf('/');
+        String authority = slash < 0 ? route : route.substring(0, slash);
+        int colon = authority.indexOf(':');
+        String host = colon < 0 ? authority : authority.substring(0, colon);
+        if (!host.isBlank()) sink.add(host);
     }
 
     /**
