@@ -1,8 +1,8 @@
 package dev.simplified.client.request;
 
 import dev.simplified.client.Client;
-import org.apache.http.impl.client.HttpClientBuilder;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.jetbrains.annotations.NotNull;
 
 import java.time.Duration;
@@ -29,13 +29,16 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  *
  * @param connectionTimeToLive maximum lifetime of a pooled HTTP connection in milliseconds, before it is permanently
- *                             closed regardless of activity. Passed to
- *                             {@link HttpClientBuilder#setConnectionTimeToLive(long, TimeUnit)
- *                             HttpClientBuilder.setConnectionTimeToLive()}. Default: 120,000 (2 minutes).
+ *                             closed regardless of activity. Wrapped in
+ *                             {@link org.apache.hc.core5.util.TimeValue TimeValue} and passed to HC 5's
+ *                             {@code PoolingHttpClientConnectionManagerBuilder.setConnectionTimeToLive(TimeValue)}.
+ *                             Default: 120,000 (2 minutes).
  * @param connectionIdleTimeout maximum duration in milliseconds a pooled connection may sit idle before it is evicted
- *                              by the background cleanup thread. Passed to
- *                              {@link HttpClientBuilder#evictIdleConnections(long, TimeUnit)
- *                              HttpClientBuilder.evictIdleConnections()}. Default: 45,000 (45 seconds).
+ *                              by the background cleanup thread. Wrapped in
+ *                              {@link org.apache.hc.core5.util.TimeValue TimeValue} and passed to
+ *                              {@link HttpClientBuilder#evictIdleConnections(org.apache.hc.core5.util.TimeValue)
+ *                              HttpClientBuilder.evictIdleConnections(TimeValue)}.
+ *                              Default: 45,000 (45 seconds).
  * @param connectionKeepAlive default keep-alive duration in milliseconds for persistent connections when the server
  *                            response does not include a {@code Keep-Alive} header. Default: 30,000 (30 seconds).
  * @param connectTimeout maximum time in milliseconds to wait for a TCP connection to be established. Passed to

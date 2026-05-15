@@ -8,8 +8,8 @@ import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.exception.ApiDecodeException;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.RetryableApiException;
-import dev.simplified.client.factory.TimedPlainConnectionSocketFactory;
-import dev.simplified.client.factory.TimedSecureConnectionSocketFactory;
+import dev.simplified.client.factory.TimedConnectionOperator;
+import dev.simplified.client.factory.TimedTlsSocketStrategy;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
 import dev.simplified.client.factory.ApacheClientFactory;
@@ -24,11 +24,11 @@ import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
-import feign.httpclient.ApacheHttpClient;
+import feign.hc5.ApacheHttp5Client;
 import lombok.AccessLevel;
 import lombok.Getter;
-import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
-import org.apache.http.protocol.HttpContext;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.InvocationTargetException;
@@ -50,8 +50,8 @@ import java.util.concurrent.TimeUnit;
  * {@link dev.simplified.client.route.DynamicRoute @DynamicRoute} annotations on the contract
  * interface through {@link RouteDiscovery}, instantiates a {@link ResponseCache} for both
  * conditional revalidation and {@code getLastResponse()} observability, builds a pooling
- * Apache {@link ApacheHttpClient} with {@link TimedPlainConnectionSocketFactory} and
- * {@link TimedSecureConnectionSocketFactory} for DNS, TCP, and TLS timing instrumentation,
+ * Apache {@link ApacheHttp5Client} with {@link TimedConnectionOperator} and
+ * {@link TimedTlsSocketStrategy} for DNS, TCP, and TLS timing instrumentation,
  * wraps the Apache client in a {@link CachingFeignClient} that serves RFC 7234 cache hits
  * transparently, assembles a Feign proxy that wires together encoding, decoding, request
  * and response interceptors, and the configured error decoder, and finally wraps the
@@ -83,7 +83,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
 
     /**
      * The underlying Feign transport used for request execution. Normally a pooling
-     * {@link ApacheHttpClient}, but may be a benchmark- or test-supplied stand-in when
+     * {@link ApacheHttp5Client}, but may be a benchmark- or test-supplied stand-in when
      * {@link ClientConfig#getCustomFeignClient()} is set.
      */
     @Getter(AccessLevel.NONE)
@@ -311,9 +311,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /**
      * Builds the pooling Apache HTTP client used as Feign's transport layer.
      * <p>
-     * The resulting {@link ApacheHttpClient} is configured with a
-     * {@link PoolingHttpClientConnectionManager} that uses {@link TimedPlainConnectionSocketFactory}
-     * and {@link TimedSecureConnectionSocketFactory} to capture DNS, TCP, and TLS timings into the
+     * The resulting {@link ApacheHttp5Client} is configured with a
+     * {@link PoolingHttpClientConnectionManager} that uses {@link TimedConnectionOperator}
+     * and {@link TimedTlsSocketStrategy} to capture DNS, TCP, and TLS timings into the
      * {@link HttpContext} as {@link NetworkDetails} attributes; a request interceptor that records
      * the request start timestamp, propagates timing attributes as headers, and appends the
      * configured queries, headers, and dynamic headers from {@link ClientConfig}; pool limits and
@@ -326,7 +326,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * retired - entries in {@link ResponseCache} are evicted by per-entry TTL and weight,
      * bounded by {@link Timings#cacheSafetyFallback()} and {@link Timings#maxCacheBytes()}.
      *
-     * @return a fully configured {@link ApacheHttpClient} ready for use by Feign
+     * @return a fully configured {@link ApacheHttp5Client} ready for use by Feign
      */
     /**
      * Walks the contract interface's declared methods and extracts the deserialized payload
@@ -401,7 +401,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
         feign.Client override = this.options.getCustomFeignClient();
         if (override != null) return override;
 
-        return new ApacheHttpClient(ApacheClientFactory.configure(
+        return new ApacheHttp5Client(ApacheClientFactory.configure(
             this.options.getTimings(),
             this.options.getQueries(),
             this.options.getHeaders(),

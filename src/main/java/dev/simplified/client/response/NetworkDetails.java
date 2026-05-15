@@ -2,8 +2,8 @@ package dev.simplified.client.response;
 
 import dev.simplified.util.time.Stopwatch;
 import lombok.Getter;
-import org.apache.http.protocol.BasicHttpContext;
-import org.apache.http.protocol.HttpContext;
+import org.apache.hc.core5.http.protocol.BasicHttpContext;
+import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
 import java.time.Instant;
