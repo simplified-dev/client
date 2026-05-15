@@ -11,7 +11,6 @@ import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.io.HttpClientConnectionOperator;
 import org.apache.hc.client5.http.ssl.DefaultClientTlsStrategy;
-import org.apache.hc.client5.http.ssl.NoopHostnameVerifier;
 import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
 import org.apache.hc.core5.http.HttpRequestInterceptor;
 import org.apache.hc.core5.http.URIScheme;
@@ -23,9 +22,7 @@ import org.apache.hc.core5.pool.PoolReusePolicy;
 import org.apache.hc.core5.util.TimeValue;
 import org.apache.hc.core5.util.Timeout;
 import org.jetbrains.annotations.NotNull;
-import org.jetbrains.annotations.Nullable;
 
-import javax.net.ssl.SSLContext;
 import java.net.Inet6Address;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -67,7 +64,10 @@ import java.util.function.Supplier;
 public final class ApacheClientFactory {
 
     /**
-     * Configures a new {@link HttpClientBuilder} with shared client infrastructure.
+     * Configures a new {@link HttpClientBuilder} with shared client infrastructure, using
+     * the JDK default TLS strategy. Equivalent to
+     * {@link #configure(Timings, Map, Map, Map, Optional, TlsSocketStrategy) configure(...,
+     * DefaultClientTlsStrategy.createSystemDefault())}.
      *
      * @param timings the connection pool, timeout, and keep-alive configuration
      * @param queries static query parameters appended to every outbound request URL
@@ -75,10 +75,35 @@ public final class ApacheClientFactory {
      * @param dynamicHeaders lazily-evaluated headers appended to every outbound request when
      *                       the supplier yields a present value
      * @param inet6Address the optional local IPv6 address for outbound socket binding
-     * @param sslContextOverride optional {@link SSLContext} to substitute for the JDK default
-     *                           on the HTTPS TLS strategy; when non-null, hostname
-     *                           verification is also disabled via {@link NoopHostnameVerifier}
-     *                           - reserved for benchmarks and tests
+     * @return a configured {@link HttpClientBuilder} ready to be {@code build()}-ed or further
+     *         customized by the caller
+     */
+    public static @NotNull HttpClientBuilder configure(
+        @NotNull Timings timings,
+        @NotNull Map<String, String> queries,
+        @NotNull Map<String, String> headers,
+        @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders,
+        @NotNull Optional<Inet6Address> inet6Address
+    ) {
+        return configure(timings, queries, headers, dynamicHeaders, inet6Address,
+            DefaultClientTlsStrategy.createSystemDefault());
+    }
+
+    /**
+     * Configures a new {@link HttpClientBuilder} with shared client infrastructure and a
+     * caller-supplied {@link TlsSocketStrategy}. Pass
+     * {@link DefaultClientTlsStrategy#createSystemDefault()} for default trust-store behaviour;
+     * a custom strategy enables mTLS, alternative trust stores, or trust-all configurations
+     * used by loopback test rigs.
+     *
+     * @param timings the connection pool, timeout, and keep-alive configuration
+     * @param queries static query parameters appended to every outbound request URL
+     * @param headers static headers appended to every outbound request
+     * @param dynamicHeaders lazily-evaluated headers appended to every outbound request when
+     *                       the supplier yields a present value
+     * @param inet6Address the optional local IPv6 address for outbound socket binding
+     * @param tlsDelegate the TLS socket strategy applied to HTTPS routes; wrapped by
+     *                    {@link TimedTlsSocketStrategy} so handshake timings are still captured
      * @return a configured {@link HttpClientBuilder} ready to be {@code build()}-ed or further
      *         customized by the caller
      */
@@ -88,12 +113,8 @@ public final class ApacheClientFactory {
         @NotNull Map<String, String> headers,
         @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders,
         @NotNull Optional<Inet6Address> inet6Address,
-        @Nullable SSLContext sslContextOverride
+        @NotNull TlsSocketStrategy tlsDelegate
     ) {
-        TlsSocketStrategy tlsDelegate = sslContextOverride != null
-            ? new DefaultClientTlsStrategy(sslContextOverride, NoopHostnameVerifier.INSTANCE)
-            : DefaultClientTlsStrategy.createSystemDefault();
-
         HttpClientConnectionOperator timedOperator = new TimedConnectionOperator(
             null,
             SystemDefaultDnsResolver.INSTANCE,
@@ -191,6 +212,27 @@ public final class ApacheClientFactory {
             // If the URI cannot be parsed for any reason, silently skip - the request
             // proceeds with the original URI. Matches the historical behaviour of the
             // HC 4 code path where the static queries also never reached the URL.
+        }
+    }
+
+    /**
+     * Spawns one Java 21 {@linkplain Thread#ofVirtual() virtual thread} per host that resolves
+     * {@link java.net.InetAddress#getAllByName(String)}, populating the OS resolver cache so
+     * the first real request does not pay the DNS lookup. Failures are swallowed per host -
+     * an unreachable host at construction time must not propagate into client setup; the
+     * first real request will surface the failure normally.
+     *
+     * @param hosts the unique hostnames to resolve in the background; safe to pass an empty set
+     */
+    public static void prewarmDns(@NotNull java.util.Set<String> hosts) {
+        for (String host : hosts) {
+            Thread.ofVirtual().name("client-dns-" + host).start(() -> {
+                try {
+                    java.net.InetAddress.getAllByName(host);
+                } catch (Throwable ignored) {
+                    // See javadoc.
+                }
+            });
         }
     }
 

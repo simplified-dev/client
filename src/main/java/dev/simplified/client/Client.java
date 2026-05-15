@@ -27,8 +27,6 @@ import feign.Feign;
 import feign.hc5.ApacheHttp5Client;
 import lombok.AccessLevel;
 import lombok.Getter;
-import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
-import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.InvocationTargetException;
@@ -81,11 +79,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /** The immutable configuration bundle used to construct this client. */
     private final @NotNull ClientConfig<C> options;
 
-    /**
-     * The underlying Feign transport used for request execution. Normally a pooling
-     * {@link ApacheHttp5Client}, but may be a benchmark- or test-supplied stand-in when
-     * {@link ClientConfig#getCustomFeignClient()} is set.
-     */
+    /** The pooling Apache HTTP/5 transport used for request execution. */
     @Getter(AccessLevel.NONE)
     private final @NotNull feign.Client internalClient;
 
@@ -116,18 +110,26 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     private final @NotNull ResponseCache responseCache;
 
     /**
-     * Constructs a new client from the given configuration bundle.
+     * Constructs a new client from the given configuration bundle and pre-built Feign transport.
      * <p>
      * Discovers routes for the target contract interface, initializes the rate-limit manager,
      * instantiates the response cache from {@link Timings#maxCacheBytes()} and
-     * {@link Timings#cacheSafetyFallback()}, builds the pooling Apache HTTP client, wraps it
-     * in a {@link CachingFeignClient} that serves RFC 7234 cache hits transparently, and
-     * assembles the Feign proxy through an exception-unwrapping dynamic proxy.
+     * {@link Timings#cacheSafetyFallback()}, wraps the supplied transport in a
+     * {@link CachingFeignClient}, and assembles the Feign proxy through an exception-unwrapping
+     * dynamic proxy. The constructor fires DNS and HEAD-probe prewarms on virtual threads so
+     * the first real request finds a warm pool; prewarm failures never propagate.
+     *
+     * <p>Package-private so that an in-package test fixture can substitute a non-production
+     * transport (canned client, custom TLS) without exposing an override on
+     * {@link ClientConfig}'s public surface. Production callers use
+     * {@link #create(ClientConfig)}, which always builds an {@link ApacheHttp5Client}.</p>
      *
      * @param options the immutable configuration bundle
+     * @param internalClient the Feign transport used for request execution
      */
-    private Client(@NotNull ClientConfig<C> options) {
+    Client(@NotNull ClientConfig<C> options, @NotNull feign.Client internalClient) {
         this.options = options;
+        this.internalClient = internalClient;
         this.routeDiscovery = new RouteDiscovery(options.getTarget());
         this.rateLimitManager = new RateLimitManager();
         this.responseCache = new ResponseCache(
@@ -142,29 +144,35 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             .withPrewarmTypes(walkContractTypes(options.getTarget()))
             .build()
             .create();
-        this.internalClient = this.buildInternalClient();
         this.contract = this.wrapContractProxy(this.build());
 
-        // Cold-start prewarm: DNS lookup (B2) and Apache pool TLS handshake (B1) run on
-        // virtual threads, one per advertised host, so the constructor returns immediately
-        // while the first real request finds a warm pool. Failures are swallowed per host -
-        // an unreachable host at construction time must not propagate out of Client.create().
-        java.util.Set<String> hosts = collectAdvertisedHosts();
+        java.util.Set<String> hosts = this.routeDiscovery.collectAdvertisedHosts();
         if (!hosts.isEmpty()) {
-            prewarmDns(hosts);
+            ApacheClientFactory.prewarmDns(hosts);
             ApacheClientFactory.prewarm(hosts, this.internalClient);
         }
     }
 
     /**
-     * Creates a new {@code Client} from the given configuration bundle.
+     * Creates a new {@code Client} from the given configuration bundle, backed by a fresh
+     * pooling {@link ApacheHttp5Client}.
      *
      * @param <C> the contract interface type
      * @param options the immutable configuration bundle
      * @return a fully initialized client ready to issue requests
      */
     public static <C extends Contract> @NotNull Client<C> create(@NotNull ClientConfig<C> options) {
-        return new Client<>(options);
+        return new Client<>(options, buildProductionTransport(options));
+    }
+
+    private static @NotNull feign.Client buildProductionTransport(@NotNull ClientConfig<?> options) {
+        return new ApacheHttp5Client(ApacheClientFactory.configure(
+            options.getTimings(),
+            options.getQueries(),
+            options.getHeaders(),
+            options.getDynamicHeaders(),
+            options.getInet6Address()
+        ).build());
     }
 
     // ===== Configuration access =====
@@ -309,26 +317,6 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     // ===== Internal build helpers =====
 
     /**
-     * Builds the pooling Apache HTTP client used as Feign's transport layer.
-     * <p>
-     * The resulting {@link ApacheHttp5Client} is configured with a
-     * {@link PoolingHttpClientConnectionManager} that uses {@link TimedConnectionOperator}
-     * and {@link TimedTlsSocketStrategy} to capture DNS, TCP, and TLS timings into the
-     * {@link HttpContext} as {@link NetworkDetails} attributes; a request interceptor that records
-     * the request start timestamp, propagates timing attributes as headers, and appends the
-     * configured queries, headers, and dynamic headers from {@link ClientConfig}; pool limits and
-     * timeouts derived from {@link Timings}; and an optional local IPv6 address binding from
-     * {@link ClientConfig#getInet6Address()}.
-     * <p>
-     * Cache semantics (freshness, revalidation, stale-if-error replay, invalidation on unsafe
-     * methods) live in {@link CachingFeignClient}, which wraps the returned Apache client before
-     * it reaches Feign. The post-response pruning interceptor that used to live here has been
-     * retired - entries in {@link ResponseCache} are evicted by per-entry TTL and weight,
-     * bounded by {@link Timings#cacheSafetyFallback()} and {@link Timings#maxCacheBytes()}.
-     *
-     * @return a fully configured {@link ApacheHttp5Client} ready for use by Feign
-     */
-    /**
      * Walks the contract interface's declared methods and extracts the deserialized payload
      * type of every {@code Response<T>}-returning method. The resulting list seeds the
      * {@link dev.simplified.gson.GsonSettings#getPrewarmTypes() Gson prewarm list} so adapter
@@ -352,63 +340,6 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             if (args.length > 0) types.add(args[0]);
         }
         return types;
-    }
-
-    /**
-     * Collects the unique bare hostnames advertised by every route the contract knows about,
-     * for use as DNS preresolve targets and pool-prewarm anchors. Stripping the port and path
-     * gives the inputs {@link java.net.InetAddress#getAllByName(String)} expects.
-     *
-     * @return the set of unique hostnames; empty if every route is hostless (e.g. localhost-only)
-     */
-    private @NotNull java.util.Set<String> collectAdvertisedHosts() {
-        java.util.Set<String> hosts = new java.util.HashSet<>();
-        addHost(hosts, this.routeDiscovery.getDefaultRoute());
-        this.routeDiscovery.getMethodRoutes().values().forEach(metadata -> addHost(hosts, metadata));
-        return hosts;
-    }
-
-    private static void addHost(@NotNull java.util.Set<String> sink, @NotNull RouteDiscovery.Metadata metadata) {
-        String route = metadata.getRoute();
-        int slash = route.indexOf('/');
-        String authority = slash < 0 ? route : route.substring(0, slash);
-        int colon = authority.indexOf(':');
-        String host = colon < 0 ? authority : authority.substring(0, colon);
-        if (!host.isBlank()) sink.add(host);
-    }
-
-    /**
-     * Fires one virtual thread per host to call {@link java.net.InetAddress#getAllByName(String)},
-     * which populates the OS resolver cache so the first real request does not pay the DNS
-     * lookup. Failures are swallowed per host.
-     *
-     * @param hosts the hostnames to resolve in the background
-     */
-    private static void prewarmDns(@NotNull java.util.Set<String> hosts) {
-        for (String host : hosts) {
-            Thread.ofVirtual().name("client-dns-" + host).start(() -> {
-                try {
-                    java.net.InetAddress.getAllByName(host);
-                } catch (Throwable ignored) {
-                    // Unreachable host or DNS failure at construction time must not
-                    // propagate; the first real request will surface the failure normally.
-                }
-            });
-        }
-    }
-
-    private @NotNull feign.Client buildInternalClient() {
-        feign.Client override = this.options.getCustomFeignClient();
-        if (override != null) return override;
-
-        return new ApacheHttp5Client(ApacheClientFactory.configure(
-            this.options.getTimings(),
-            this.options.getQueries(),
-            this.options.getHeaders(),
-            this.options.getDynamicHeaders(),
-            this.options.getInet6Address(),
-            this.options.getSslContextOverride()
-        ).build());
     }
 
     /**

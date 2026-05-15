@@ -106,8 +106,7 @@ public final class UrlFetcher {
             options.getQueries(),
             options.getHeaders(),
             options.getDynamicHeaders(),
-            options.getInet6Address(),
-            null
+            options.getInet6Address()
         ).build();
     }
 

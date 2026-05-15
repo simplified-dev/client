@@ -21,9 +21,11 @@ repositories {
 
 val springBench: SourceSet by sourceSets.creating {
     // The default convention already wires src/springBench/java and src/springBench/resources;
-    // we only need to add the jmh resources directory for keystore reuse.
+    // we add the jmh resources directory for keystore reuse and the jmh output so the bench app
+    // can call into TestClient (the package-private hook into Client used by both benchmark
+    // surfaces).
     resources.srcDir("src/jmh/resources")
-    compileClasspath += sourceSets["main"].output
+    compileClasspath += sourceSets["main"].output + sourceSets["jmh"].output
     runtimeClasspath += output + compileClasspath
 }
 

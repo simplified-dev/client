@@ -2,6 +2,7 @@ package dev.simplified.client.benchmark.e2e.support;
 
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
+import dev.simplified.client.TestClient;
 import dev.simplified.gson.GsonSettings;
 import org.jetbrains.annotations.NotNull;
 
@@ -18,18 +19,16 @@ public final class ClientFactory {
     private ClientFactory() { }
 
     public static @NotNull Client<BenchmarkContract> buildWithCanned(@NotNull CannedFeignClient transport) {
-        return Client.create(
-            ClientConfig.builder(BenchmarkContract.class, GsonSettings.builder().build())
-                .withCustomFeignClient(transport)
-                .build()
+        return TestClient.withCustomTransport(
+            ClientConfig.builder(BenchmarkContract.class, GsonSettings.builder().build()).build(),
+            transport
         );
     }
 
     public static @NotNull Client<LoopbackContract> buildWithLoopback(@NotNull SSLContext clientSslContext) {
-        return Client.create(
-            ClientConfig.builder(LoopbackContract.class, GsonSettings.builder().build())
-                .withSslContext(clientSslContext)
-                .build()
+        return TestClient.withSslContext(
+            ClientConfig.builder(LoopbackContract.class, GsonSettings.builder().build()).build(),
+            clientSslContext
         );
     }
 

@@ -194,6 +194,29 @@ public final class RouteDiscovery {
     }
 
     /**
+     * Collects the unique bare hostnames advertised by every route this discovery knows about,
+     * for use as DNS preresolve targets and pool-prewarm anchors. The port and path are stripped
+     * so the result matches what {@link java.net.InetAddress#getAllByName(String)} expects.
+     *
+     * @return the set of unique hostnames; empty if every route is hostless
+     */
+    public @NotNull java.util.Set<String> collectAdvertisedHosts() {
+        java.util.Set<String> hosts = new java.util.HashSet<>();
+        addHost(hosts, this.defaultRoute);
+        this.methodRoutes.values().forEach(metadata -> addHost(hosts, metadata));
+        return hosts;
+    }
+
+    private static void addHost(@NotNull java.util.Set<String> sink, @NotNull Metadata metadata) {
+        String route = metadata.getRoute();
+        int slash = route.indexOf('/');
+        String authority = slash < 0 ? route : route.substring(0, slash);
+        int colon = authority.indexOf(':');
+        String host = colon < 0 ? authority : authority.substring(0, colon);
+        if (!host.isBlank()) sink.add(host);
+    }
+
+    /**
      * Strips the {@code http://} or {@code https://} protocol prefix from a route string.
      *
      * @param route the route or URL string to strip
