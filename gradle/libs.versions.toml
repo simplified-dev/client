@@ -16,7 +16,7 @@ annotations = { group = "org.jetbrains", name = "annotations", version.ref = "an
 log4j2-api = { group = "org.apache.logging.log4j", name = "log4j-api", version.ref = "log4j2" }
 gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 feign-gson = { group = "io.github.openfeign", name = "feign-gson", version.ref = "feign" }
-feign-httpclient = { group = "io.github.openfeign", name = "feign-httpclient", version.ref = "feign" }
+feign-hc5 = { group = "io.github.openfeign", name = "feign-hc5", version.ref = "feign" }
 jackson-dataformat-xml = { group = "com.fasterxml.jackson.dataformat", name = "jackson-dataformat-xml", version.ref = "jackson" }
 rome = { group = "com.rometools", name = "rome", version.ref = "rome" }
 caffeine = { group = "com.github.ben-manes.caffeine", name = "caffeine", version.ref = "caffeine" }

@@ -40,7 +40,7 @@ dependencies {
 
     // HTTP Client
     api(libs.feign.gson)
-    api(libs.feign.httpclient)
+    api(libs.feign.hc5)
 
     // XML Codec Support (XmlDecoder + XmlEncoder)
     api(libs.jackson.dataformat.xml)

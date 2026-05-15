@@ -18,13 +18,13 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.util.time.Stopwatch;
 import lombok.Getter;
-import org.apache.http.Header;
-import org.apache.http.HttpEntity;
-import org.apache.http.client.methods.CloseableHttpResponse;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.protocol.HttpClientContext;
-import org.apache.http.impl.client.CloseableHttpClient;
-import org.apache.http.util.EntityUtils;
+import org.apache.hc.client5.http.classic.methods.HttpGet;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.http.Header;
+import org.apache.hc.core5.http.HttpEntity;
+import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -256,7 +256,7 @@ public final class UrlFetcher {
         HttpClientContext context = HttpClientContext.create();
 
         try (CloseableHttpResponse apacheResponse = this.http.execute(get, context)) {
-            int statusCode = apacheResponse.getStatusLine().getStatusCode();
+            int statusCode = apacheResponse.getCode();
 
             if (statusCode == HttpStatus.NOT_MODIFIED.getCode() && revalidating != null)
                 return this.serveOn304(request, apacheResponse, revalidating);
@@ -380,7 +380,7 @@ public final class UrlFetcher {
 
     private static @NotNull Map<String, Collection<String>> headersFromApache(@NotNull CloseableHttpResponse apacheResponse) {
         Map<String, Collection<String>> result = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        for (Header header : apacheResponse.getAllHeaders())
+        for (Header header : apacheResponse.getHeaders())
             result.computeIfAbsent(header.getName(), k -> new ArrayList<>()).add(header.getValue());
         return result;
     }
