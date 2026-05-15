@@ -93,6 +93,16 @@ public final class ClientConfig<C extends Contract> {
     private final @Nullable feign.Client customFeignClient;
 
     /**
+     * Optional {@link javax.net.ssl.SSLContext} override applied to the HTTPS socket factory in
+     * place of the JDK default. Reserved for loopback benchmarks and tests that need to trust
+     * a self-signed certificate without polluting the JVM-wide trust store. When set, hostname
+     * verification is also disabled via {@code NoopHostnameVerifier} so cert SAN mismatches
+     * (e.g. talking to {@code 127.0.0.1}) do not abort the handshake.
+     */
+    @ApiStatus.Internal
+    private final @Nullable javax.net.ssl.SSLContext sslContextOverride;
+
+    /**
      * Returns a new {@link Builder} seeded with safe defaults for the given contract type and
      * {@link Gson} instance.
      * <p>
@@ -154,6 +164,7 @@ public final class ClientConfig<C extends Contract> {
         private @NotNull Function<Gson, Encoder> encoderFactory = GsonEncoder::new;
         private @NotNull Function<Gson, Decoder> decoderFactory = GsonDecoder::new;
         private @Nullable feign.Client customFeignClient;
+        private @Nullable javax.net.ssl.SSLContext sslContextOverride;
 
         private Builder(@NotNull Class<C> target, @NotNull Gson gson) {
             this.target = target;
@@ -172,6 +183,7 @@ public final class ClientConfig<C extends Contract> {
             this.encoderFactory = existing.encoderFactory;
             this.decoderFactory = existing.decoderFactory;
             this.customFeignClient = existing.customFeignClient;
+            this.sslContextOverride = existing.sslContextOverride;
         }
 
         /**
@@ -369,6 +381,24 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
+         * Installs an {@link javax.net.ssl.SSLContext} that replaces the JDK default for the
+         * HTTPS socket factory.
+         * <p>
+         * Reserved for loopback benchmarks and tests that need to trust a self-signed
+         * certificate without polluting the JVM-wide trust store. When set, hostname
+         * verification is also disabled (see {@link ClientConfig#sslContextOverride}). Passing
+         * {@code null} restores default trust-store behaviour.
+         *
+         * @param sslContextOverride the SSL context to use, or {@code null} for the default
+         * @return this builder
+         */
+        @ApiStatus.Internal
+        public @NotNull Builder<C> withSslContext(@Nullable javax.net.ssl.SSLContext sslContextOverride) {
+            this.sslContextOverride = sslContextOverride;
+            return this;
+        }
+
+        /**
          * Constructs an immutable {@link ClientConfig} from the current builder state.
          * <p>
          * The mutable maps held by the builder are sealed into unmodifiable copies on the
@@ -391,7 +421,8 @@ public final class ClientConfig<C extends Contract> {
                 Concurrent.newUnmodifiableMap(this.dynamicHeaders),
                 this.encoderFactory,
                 this.decoderFactory,
-                this.customFeignClient
+                this.customFeignClient,
+                this.sslContextOverride
             );
         }
 

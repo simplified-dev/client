@@ -9,7 +9,9 @@ import org.apache.http.HttpRequestInterceptor;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.socket.ConnectionSocketFactory;
+import org.apache.http.conn.socket.LayeredConnectionSocketFactory;
 import org.apache.http.conn.socket.PlainConnectionSocketFactory;
+import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.impl.client.DefaultConnectionKeepAliveStrategy;
 import org.apache.http.impl.client.HttpClientBuilder;
@@ -17,7 +19,9 @@ import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.impl.conn.SystemDefaultDnsResolver;
 import org.apache.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
+import javax.net.ssl.SSLContext;
 import java.net.Inet6Address;
 import java.time.Instant;
 import java.util.Map;
@@ -64,6 +68,10 @@ public final class ApacheClientFactory {
      * @param dynamicHeaders lazily-evaluated headers appended to every outbound request when
      *                       the supplier yields a present value
      * @param inet6Address the optional local IPv6 address for outbound socket binding
+     * @param sslContextOverride optional {@link SSLContext} to substitute for the JDK default
+     *                           on the HTTPS socket factory; when non-null, hostname
+     *                           verification is also disabled via {@link NoopHostnameVerifier}
+     *                           - reserved for benchmarks and tests
      * @return a configured {@link HttpClientBuilder} ready to be {@code build()}-ed or further
      *         customized by the caller
      */
@@ -73,8 +81,13 @@ public final class ApacheClientFactory {
         @NotNull Map<String, String> queries,
         @NotNull Map<String, String> headers,
         @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders,
-        @NotNull Optional<Inet6Address> inet6Address
+        @NotNull Optional<Inet6Address> inet6Address,
+        @Nullable SSLContext sslContextOverride
     ) {
+        LayeredConnectionSocketFactory secureDelegate = sslContextOverride != null
+            ? new SSLConnectionSocketFactory(sslContextOverride, NoopHostnameVerifier.INSTANCE)
+            : SSLConnectionSocketFactory.getSocketFactory();
+
         HttpClientBuilder builder = HttpClientBuilder.create()
             .setConnectionManager(new PoolingHttpClientConnectionManager(
                 RegistryBuilder.<ConnectionSocketFactory>create()
@@ -83,7 +96,7 @@ public final class ApacheClientFactory {
                         SystemDefaultDnsResolver.INSTANCE
                     ))
                     .register("https", new TimedSecureConnectionSocketFactory(
-                        SSLConnectionSocketFactory.getSocketFactory(),
+                        secureDelegate,
                         SystemDefaultDnsResolver.INSTANCE
                     ))
                     .build()
