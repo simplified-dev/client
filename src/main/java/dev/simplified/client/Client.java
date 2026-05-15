@@ -310,7 +310,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             this.options.getQueries(),
             this.options.getHeaders(),
             this.options.getDynamicHeaders(),
-            this.options.getInet6Address()
+            this.options.getInet6Address(),
+            this.options.getSslContextOverride()
         ).build());
     }
 

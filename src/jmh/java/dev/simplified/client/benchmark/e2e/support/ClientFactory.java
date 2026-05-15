@@ -5,6 +5,8 @@ import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import org.jetbrains.annotations.NotNull;
 
+import javax.net.ssl.SSLContext;
+
 /**
  * Builds a fully configured {@link Client} for benchmark scenarios, wired to a
  * {@link CannedFeignClient} so the socket stack and Apache layer are excluded from
@@ -19,6 +21,14 @@ public final class ClientFactory {
         return Client.create(
             ClientConfig.builder(BenchmarkContract.class, new Gson())
                 .withCustomFeignClient(transport)
+                .build()
+        );
+    }
+
+    public static @NotNull Client<LoopbackContract> buildWithLoopback(@NotNull SSLContext clientSslContext) {
+        return Client.create(
+            ClientConfig.builder(LoopbackContract.class, new Gson())
+                .withSslContext(clientSslContext)
                 .build()
         );
     }
