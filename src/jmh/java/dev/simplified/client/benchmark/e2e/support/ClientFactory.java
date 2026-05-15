@@ -1,8 +1,8 @@
 package dev.simplified.client.benchmark.e2e.support;
 
-import com.google.gson.Gson;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
+import dev.simplified.gson.GsonSettings;
 import org.jetbrains.annotations.NotNull;
 
 import javax.net.ssl.SSLContext;
@@ -19,7 +19,7 @@ public final class ClientFactory {
 
     public static @NotNull Client<BenchmarkContract> buildWithCanned(@NotNull CannedFeignClient transport) {
         return Client.create(
-            ClientConfig.builder(BenchmarkContract.class, new Gson())
+            ClientConfig.builder(BenchmarkContract.class, GsonSettings.builder().build())
                 .withCustomFeignClient(transport)
                 .build()
         );
@@ -27,7 +27,7 @@ public final class ClientFactory {
 
     public static @NotNull Client<LoopbackContract> buildWithLoopback(@NotNull SSLContext clientSslContext) {
         return Client.create(
-            ClientConfig.builder(LoopbackContract.class, new Gson())
+            ClientConfig.builder(LoopbackContract.class, GsonSettings.builder().build())
                 .withSslContext(clientSslContext)
                 .build()
         );

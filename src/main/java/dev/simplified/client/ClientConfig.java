@@ -8,6 +8,8 @@ import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
+import dev.simplified.gson.GsonSettings;
+import dev.simplified.util.Lazy;
 import feign.codec.Decoder;
 import feign.codec.Encoder;
 import feign.gson.GsonDecoder;
@@ -56,8 +58,13 @@ public final class ClientConfig<C extends Contract> {
     /** The contract interface class the resulting client will target. */
     private final @NotNull Class<C> target;
 
-    /** The {@link Gson} instance used for request encoding and response decoding. */
-    private final @NotNull Gson gson;
+    /**
+     * The Gson configuration source used for request encoding and response decoding. The
+     * client derives a contract-aware {@link GsonSettings} from this (adding the contract's
+     * response types as prewarm targets) and calls {@link GsonSettings#create()} to obtain
+     * the actual Gson instance.
+     */
+    private final @NotNull GsonSettings gsonSettings;
 
     /** The optional IPv6 address used as the local address for outbound connections. */
     private final @NotNull Optional<Inet6Address> inet6Address;
@@ -104,7 +111,7 @@ public final class ClientConfig<C extends Contract> {
 
     /**
      * Returns a new {@link Builder} seeded with safe defaults for the given contract type and
-     * {@link Gson} instance.
+     * {@link GsonSettings} instance.
      * <p>
      * Defaults: empty headers, queries, and dynamic headers; {@link Timings#createDefault()};
      * an error decoder that wraps the Feign error status into a generic {@link ApiException};
@@ -112,11 +119,11 @@ public final class ClientConfig<C extends Contract> {
      *
      * @param <C> the contract interface type
      * @param target the contract interface class
-     * @param gson the Gson instance for serialization and deserialization
+     * @param gsonSettings the Gson configuration source for serialization and deserialization
      * @return a builder pre-populated with defaults
      */
-    public static <C extends Contract> @NotNull Builder<C> builder(@NotNull Class<C> target, @NotNull Gson gson) {
-        return new Builder<>(target, gson);
+    public static <C extends Contract> @NotNull Builder<C> builder(@NotNull Class<C> target, @NotNull GsonSettings gsonSettings) {
+        return new Builder<>(target, gsonSettings);
     }
 
     /**
@@ -154,7 +161,7 @@ public final class ClientConfig<C extends Contract> {
     public static final class Builder<C extends Contract> {
 
         private final @NotNull Class<C> target;
-        private @NotNull Gson gson;
+        private @NotNull GsonSettings gsonSettings;
         private @NotNull Optional<Inet6Address> inet6Address = Optional.empty();
         private @NotNull Timings timings = Timings.createDefault();
         private @NotNull ClientErrorDecoder errorDecoder = defaultErrorDecoder();
@@ -166,14 +173,14 @@ public final class ClientConfig<C extends Contract> {
         private @Nullable feign.Client customFeignClient;
         private @Nullable javax.net.ssl.SSLContext sslContextOverride;
 
-        private Builder(@NotNull Class<C> target, @NotNull Gson gson) {
+        private Builder(@NotNull Class<C> target, @NotNull GsonSettings gsonSettings) {
             this.target = target;
-            this.gson = gson;
+            this.gsonSettings = gsonSettings;
         }
 
         private Builder(@NotNull ClientConfig<C> existing) {
             this.target = existing.target;
-            this.gson = existing.gson;
+            this.gsonSettings = existing.gsonSettings;
             this.inet6Address = existing.inet6Address;
             this.timings = existing.timings;
             this.errorDecoder = existing.errorDecoder;
@@ -187,13 +194,14 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
-         * Sets the {@link Gson} instance used for serialization and deserialization.
+         * Sets the {@link GsonSettings} configuration source used for serialization and
+         * deserialization.
          *
-         * @param gson the Gson instance
+         * @param gsonSettings the Gson configuration source
          * @return this builder
          */
-        public @NotNull Builder<C> withGson(@NotNull Gson gson) {
-            this.gson = gson;
+        public @NotNull Builder<C> withGsonSettings(@NotNull GsonSettings gsonSettings) {
+            this.gsonSettings = gsonSettings;
             return this;
         }
 
@@ -242,23 +250,27 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
-         * Sets the error decoder to a {@link GsonAwareErrorDecoder} that receives the builder's
-         * configured {@link Gson} at decode time. Pairs naturally with a
-         * {@link dev.simplified.client.exception.JsonApiException JsonApiException} subclass
-         * and a constructor reference:
+         * Sets the error decoder to a {@link GsonAwareErrorDecoder} that receives a
+         * {@link Gson} derived from the builder's current {@link GsonSettings} at decode
+         * time. Pairs naturally with a
+         * {@link dev.simplified.client.exception.JsonApiException JsonApiException}
+         * subclass and a constructor reference:
          *
          * <pre>{@code
          * .withErrorDecoder(FooApiException::new)
          * }</pre>
          *
-         * <p>The decoder is adapted to the underlying {@link ClientErrorDecoder} contract by
-         * closing over the current {@link Gson} instance.</p>
+         * <p>The Gson is materialised once via {@link GsonSettings#create()} on first
+         * error decode (memoised through {@link Lazy}) so the cost is paid only when
+         * the error path is actually taken. Subsequent error decodes reuse the cached
+         * Gson without re-running {@code create()}.</p>
          *
          * @param errorDecoder the Gson-aware error decoder
          * @return this builder
          */
         public @NotNull Builder<C> withErrorDecoder(@NotNull GsonAwareErrorDecoder errorDecoder) {
-            return this.withErrorDecoder(context -> errorDecoder.decode(this.gson, context));
+            Lazy<Gson> gsonForDecoder = Lazy.of(() -> this.gsonSettings.create());
+            return this.withErrorDecoder(context -> errorDecoder.decode(gsonForDecoder.get(), context));
         }
 
         /**
@@ -409,10 +421,10 @@ public final class ClientConfig<C extends Contract> {
          */
         public @NotNull ClientConfig<C> build() {
             Objects.requireNonNull(this.target, "target");
-            Objects.requireNonNull(this.gson, "gson");
+            Objects.requireNonNull(this.gsonSettings, "gsonSettings");
             return new ClientConfig<>(
                 this.target,
-                this.gson,
+                this.gsonSettings,
                 this.inet6Address,
                 this.timings,
                 this.errorDecoder,
