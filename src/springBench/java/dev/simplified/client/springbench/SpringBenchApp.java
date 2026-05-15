@@ -2,6 +2,7 @@ package dev.simplified.client.springbench;
 
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
+import dev.simplified.client.TestClient;
 import dev.simplified.client.request.Timings;
 import dev.simplified.gson.GsonSettings;
 import org.springframework.boot.SpringApplication;
@@ -106,11 +107,11 @@ public class SpringBenchApp {
      */
     @Bean
     public Client<BenchMojangContract> benchClient(SSLContext sslContext, Timings timings) {
-        return Client.create(
+        return TestClient.withSslContext(
             ClientConfig.builder(BenchMojangContract.class, GsonSettings.builder().build())
-                .withSslContext(sslContext)
                 .withTimings(timings)
-                .build()
+                .build(),
+            sslContext
         );
     }
 

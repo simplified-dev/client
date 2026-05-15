@@ -17,7 +17,6 @@ import feign.gson.GsonEncoder;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
-import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -91,25 +90,6 @@ public final class ClientConfig<C extends Contract> {
     private final @NotNull Function<Gson, Decoder> decoderFactory;
 
     /**
-     * Optional override that supplies a custom Feign transport in place of the default
-     * {@link feign.httpclient.ApacheHttpClient}. Reserved for in-process benchmarks and tests
-     * that want to bypass the socket stack while keeping every other layer (interceptors,
-     * decoders, rate limit, route discovery, response cache) intact.
-     */
-    @ApiStatus.Internal
-    private final @Nullable feign.Client customFeignClient;
-
-    /**
-     * Optional {@link javax.net.ssl.SSLContext} override applied to the HTTPS socket factory in
-     * place of the JDK default. Reserved for loopback benchmarks and tests that need to trust
-     * a self-signed certificate without polluting the JVM-wide trust store. When set, hostname
-     * verification is also disabled via {@code NoopHostnameVerifier} so cert SAN mismatches
-     * (e.g. talking to {@code 127.0.0.1}) do not abort the handshake.
-     */
-    @ApiStatus.Internal
-    private final @Nullable javax.net.ssl.SSLContext sslContextOverride;
-
-    /**
      * Returns a new {@link Builder} seeded with safe defaults for the given contract type and
      * {@link GsonSettings} instance.
      * <p>
@@ -170,8 +150,6 @@ public final class ClientConfig<C extends Contract> {
         private final @NotNull ConcurrentMap<String, Supplier<Optional<String>>> dynamicHeaders = Concurrent.newMap();
         private @NotNull Function<Gson, Encoder> encoderFactory = GsonEncoder::new;
         private @NotNull Function<Gson, Decoder> decoderFactory = GsonDecoder::new;
-        private @Nullable feign.Client customFeignClient;
-        private @Nullable javax.net.ssl.SSLContext sslContextOverride;
 
         private Builder(@NotNull Class<C> target, @NotNull GsonSettings gsonSettings) {
             this.target = target;
@@ -189,8 +167,6 @@ public final class ClientConfig<C extends Contract> {
             this.dynamicHeaders.putAll(existing.dynamicHeaders);
             this.encoderFactory = existing.encoderFactory;
             this.decoderFactory = existing.decoderFactory;
-            this.customFeignClient = existing.customFeignClient;
-            this.sslContextOverride = existing.sslContextOverride;
         }
 
         /**
@@ -375,42 +351,6 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
-         * Installs a custom Feign transport in place of the default
-         * {@link feign.httpclient.ApacheHttpClient}.
-         * <p>
-         * Reserved for in-process benchmarks and tests that want to exercise the full client
-         * pipeline (interceptors, decoders, rate limit, route discovery, response cache) while
-         * skipping the socket stack. Passing {@code null} clears any previously set override
-         * and restores the default Apache transport.
-         *
-         * @param customFeignClient the Feign client to use as transport, or {@code null} for the default
-         * @return this builder
-         */
-        @ApiStatus.Internal
-        public @NotNull Builder<C> withCustomFeignClient(@Nullable feign.Client customFeignClient) {
-            this.customFeignClient = customFeignClient;
-            return this;
-        }
-
-        /**
-         * Installs an {@link javax.net.ssl.SSLContext} that replaces the JDK default for the
-         * HTTPS socket factory.
-         * <p>
-         * Reserved for loopback benchmarks and tests that need to trust a self-signed
-         * certificate without polluting the JVM-wide trust store. When set, hostname
-         * verification is also disabled (see {@link ClientConfig#sslContextOverride}). Passing
-         * {@code null} restores default trust-store behaviour.
-         *
-         * @param sslContextOverride the SSL context to use, or {@code null} for the default
-         * @return this builder
-         */
-        @ApiStatus.Internal
-        public @NotNull Builder<C> withSslContext(@Nullable javax.net.ssl.SSLContext sslContextOverride) {
-            this.sslContextOverride = sslContextOverride;
-            return this;
-        }
-
-        /**
          * Constructs an immutable {@link ClientConfig} from the current builder state.
          * <p>
          * The mutable maps held by the builder are sealed into unmodifiable copies on the
@@ -432,9 +372,7 @@ public final class ClientConfig<C extends Contract> {
                 Concurrent.newUnmodifiableMap(this.headers),
                 Concurrent.newUnmodifiableMap(this.dynamicHeaders),
                 this.encoderFactory,
-                this.decoderFactory,
-                this.customFeignClient,
-                this.sslContextOverride
+                this.decoderFactory
             );
         }
 
