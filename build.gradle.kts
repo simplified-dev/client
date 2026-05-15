@@ -15,8 +15,26 @@ java {
 
 repositories {
     mavenCentral()
+    maven(url = "https://central.sonatype.com/repository/maven-snapshots")
     maven(url = "https://jitpack.io")
 }
+
+val springBench: SourceSet by sourceSets.creating {
+    // The default convention already wires src/springBench/java and src/springBench/resources;
+    // we only need to add the jmh resources directory for keystore reuse.
+    resources.srcDir("src/jmh/resources")
+    compileClasspath += sourceSets["main"].output
+    runtimeClasspath += output + compileClasspath
+}
+
+tasks.named<JavaCompile>("compileSpringBenchJava") {
+    // Spring MVC needs parameter names to resolve @PathVariable / @RequestParam
+    // without explicit value() attributes. Bench-local; doesn't touch main jar.
+    options.compilerArgs.add("-parameters")
+}
+
+configurations[springBench.implementationConfigurationName].extendsFrom(configurations.implementation.get())
+configurations[springBench.runtimeOnlyConfigurationName].extendsFrom(configurations.runtimeOnly.get())
 
 dependencies {
     // Simplified Libraries
@@ -53,6 +71,12 @@ dependencies {
     jmh("org.openjdk.jmh:jmh-core:1.37")
     jmh("org.openjdk.jmh:jmh-generator-annprocess:1.37")
     jmhAnnotationProcessor("org.openjdk.jmh:jmh-generator-annprocess:1.37")
+
+    // Spring bench - throwaway Spring Boot app for end-to-end concurrency measurement
+    // Lives in src/springBench. Run via :runSpringBench / :runMockMojang Gradle tasks.
+    "springBenchImplementation"(libs.spring.boot.web)
+    "springBenchCompileOnly"(libs.lombok)
+    "springBenchAnnotationProcessor"(libs.lombok)
 
     // Tests
     testImplementation(libs.hamcrest)
@@ -94,5 +118,55 @@ idea {
     module {
         testSources.from(sourceSets["jmh"].java.srcDirs)
         testResources.from(sourceSets["jmh"].resources.srcDirs)
+        testSources.from(springBench.java.srcDirs)
+        testResources.from(springBench.resources.srcDirs)
+    }
+}
+
+// ===== Spring bench run tasks =====
+//
+// Two long-running JVMs: the mock upstream HTTPS server and the Spring Boot app under test.
+// Each takes -PsysProp.<key>=<value> Gradle properties and forwards them as -D system
+// properties so the bench can be reconfigured (pool sizes, thread counts) without rebuilding.
+
+tasks.register<JavaExec>("runMockMojang") {
+    group = "spring-bench"
+    description = "Starts the mock Mojang HTTPS server on 127.0.0.1:47652. Leave this running while load-testing."
+    classpath = springBench.runtimeClasspath
+    mainClass.set("dev.simplified.client.springbench.MockMojangApp")
+    standardInput = System.`in`
+    // Forward -Pmock.* gradle properties as -D system properties.
+    project.properties
+        .filterKeys { it.startsWith("mock.") }
+        .forEach { (k, v) -> systemProperty(k, v.toString()) }
+}
+
+tasks.register<JavaExec>("runSpringBench") {
+    group = "spring-bench"
+    description = "Starts the Spring Boot benchmark app on port 8080. Hit GET /mojang/user/{username}."
+    classpath = springBench.runtimeClasspath
+    mainClass.set("dev.simplified.client.springbench.SpringBenchApp")
+    standardInput = System.`in`
+    // Forward -Pclient.* / -Pserver.* / -Pspring.* gradle properties as -D system properties.
+    project.properties
+        .filterKeys { it.startsWith("client.") || it.startsWith("server.") || it.startsWith("spring.") }
+        .forEach { (k, v) -> systemProperty(k, v.toString()) }
+}
+
+tasks.register<JavaExec>("runBenchDriver") {
+    group = "spring-bench"
+    description = "Runs the Java load driver against the Spring bench. Pass -Pdriver.<key>=<value> for CLI flags."
+    classpath = springBench.runtimeClasspath
+    mainClass.set("dev.simplified.client.springbench.BenchLoadDriver")
+    // Translate -Pdriver.url=foo -> --url foo, -Pdriver.vus=500 -> --vus 500, etc.
+    doFirst {
+        val cliArgs = mutableListOf<String>()
+        project.properties
+            .filterKeys { it.startsWith("driver.") }
+            .forEach { (k, v) ->
+                cliArgs.add("--" + k.removePrefix("driver."))
+                cliArgs.add(v.toString())
+            }
+        args = cliArgs
     }
 }
