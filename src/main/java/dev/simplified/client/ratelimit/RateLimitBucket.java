@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * @see RateLimitManager
  */
 @Getter
-class RateLimitBucket {
+public class RateLimitBucket {
 
     /**
      * The epoch-millisecond timestamp marking the start of the current window.
@@ -51,7 +51,7 @@ class RateLimitBucket {
      *
      * @param initialRateLimit the rate-limit policy to enforce for this bucket
      */
-    RateLimitBucket(@NotNull RateLimit initialRateLimit) {
+    public RateLimitBucket(@NotNull RateLimit initialRateLimit) {
         this.windowStart = new AtomicLong(System.currentTimeMillis());
         this.requestCount = new AtomicLong(0);
         this.rateLimit = new AtomicReference<>(initialRateLimit);
