@@ -54,12 +54,15 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
     private final @NotNull RateLimitManager rateLimitManager;
 
     /**
-     * The discovery engine that maps endpoint methods to their route metadata.
+     * The discovery engine that maps endpoint methods to their route metadata. Each
+     * {@link RouteDiscovery.Metadata} carries a precomputed
+     * {@linkplain RouteDiscovery.Metadata#getBucketKey() bucket key} that this interceptor reads
+     * directly - no per-request composition.
      */
     private final @NotNull RouteDiscovery routeDiscovery;
 
     /**
-     * Internal header key used to carry the resolved route identifier from request to response interceptor.
+     * Internal header key used to carry the resolved bucket key from request to response interceptor.
      */
     static final @NotNull String ROUTE_ID_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Route-Id";
 
@@ -70,14 +73,15 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
     public void apply(@NotNull RequestTemplate template) {
         Method method = template.methodMetadata().method();
         RouteDiscovery.Metadata routeMetadata = this.routeDiscovery.getMetadata(method);
+        String bucketKey = routeMetadata.getBucketKey();
         long now = System.currentTimeMillis();
 
-        if (this.rateLimitManager.isRateLimited(routeMetadata.getRoute(), routeMetadata.getRateLimit(), now))
+        if (this.rateLimitManager.isRateLimited(bucketKey, routeMetadata.getRateLimit(), now))
             throw new RateLimitException(template, routeMetadata);
 
-        this.rateLimitManager.trackRequest(routeMetadata.getRoute(), routeMetadata.getRateLimit(), now);
+        this.rateLimitManager.trackRequest(bucketKey, routeMetadata.getRateLimit(), now);
 
-        template.header(ROUTE_ID_HEADER, routeMetadata.getRoute());
+        template.header(ROUTE_ID_HEADER, bucketKey);
         template.target(routeMetadata.getFullUrl());
     }
 

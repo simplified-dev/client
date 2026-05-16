@@ -31,6 +31,7 @@ import java.net.URISyntaxException;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
@@ -227,11 +228,11 @@ public final class ApacheClientFactory {
      *
      * @param hosts the unique hostnames to resolve in the background; safe to pass an empty set
      */
-    public static void prewarmDns(@NotNull java.util.Set<String> hosts) {
+    public static void prewarmDns(@NotNull Set<String> hosts) {
         for (String host : hosts) {
             Thread.ofVirtual().name("client-dns-" + host).start(() -> {
                 try {
-                    java.net.InetAddress.getAllByName(host);
+                    InetAddress.getAllByName(host);
                 } catch (Throwable ignored) {
                     // See javadoc.
                 }
@@ -257,7 +258,7 @@ public final class ApacheClientFactory {
      *                    the client will use for real requests so the prewarm seeds the same
      *                    Apache pool
      */
-    public static void prewarm(@NotNull java.util.Set<String> hosts, @NotNull feign.Client feignClient) {
+    public static void prewarmHosts(@NotNull Set<String> hosts, @NotNull feign.Client feignClient) {
         if (hosts.isEmpty()) return;
 
         feign.Request.Options probeOptions = new feign.Request.Options(2, TimeUnit.SECONDS, 2, TimeUnit.SECONDS, true);
@@ -269,7 +270,7 @@ public final class ApacheClientFactory {
                     feign.Request probe = feign.Request.create(
                         feign.Request.HttpMethod.HEAD,
                         url,
-                        java.util.Map.of(),
+                        Map.of(),
                         feign.Request.Body.empty(),
                         null
                     );

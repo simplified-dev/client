@@ -6,7 +6,7 @@ import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.route.RouteDiscovery;
-import dev.simplified.client.subnet.pool.Bucket;
+import dev.simplified.client.subnet.pool.SubnetBucket;
 import feign.RequestTemplate;
 import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
@@ -108,7 +108,7 @@ public final class RateLimitException extends ApiException {
 
     /**
      * Constructs a client-enforced rate-limit exception for a saturated subnet
-     * {@link Bucket} when no contained bucket has remaining budget.
+     * {@link SubnetBucket} when no contained bucket has remaining budget.
      * <p>
      * Used at the proxy layer before any HTTP request is constructed, so the
      * synthetic context carries the bucket identifier as its url placeholder

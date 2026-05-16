@@ -3,6 +3,7 @@ package dev.simplified.client.subnet.pool;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
+import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.subnet.SubnetRotation;
 import org.jetbrains.annotations.NotNull;
@@ -12,7 +13,7 @@ import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 /**
- * Strategy interface for selecting a subnet {@link Bucket} given a configured
+ * Strategy interface for selecting a subnet {@link SubnetBucket} given a configured
  * {@link SubnetRotation}.
  * <p>
  * Three implementations cover the three relationships between the source prefix
@@ -28,7 +29,7 @@ import java.util.stream.Stream;
  *
  * @param <C> the contract interface type
  * @see SubnetRotation
- * @see Bucket
+ * @see SubnetBucket
  */
 public sealed interface SubnetBucketPool<C extends Contract>
     permits FanOutBucketPool, SingleBucketPool, PassThroughBucketPool {
@@ -49,7 +50,7 @@ public sealed interface SubnetBucketPool<C extends Contract>
      *
      * @return a stream of live buckets
      */
-    @NotNull Stream<Bucket<C>> activeBuckets();
+    @NotNull Stream<SubnetBucket<C>> activeBuckets();
 
     /**
      * Selects an available {@link Client} from a bucket with remaining budget.
@@ -61,11 +62,13 @@ public sealed interface SubnetBucketPool<C extends Contract>
     @NotNull Client<C> selectClient() throws RateLimitException;
 
     /**
-     * Constructs the appropriate pool implementation for the given rotation
-     * configuration.
+     * Constructs the appropriate pool implementation for the given rotation configuration.
      *
      * @param <C> the contract interface type
      * @param rotation the immutable rotation configuration
+     * @param sharedManager the shared rate-limit manager every spawned client will read and write
+     * @param anchorRouteId the route bucket id used as the "default" route for count-based bucket
+     *                      selection (typically the contract's type-level route)
      * @param baseOptions the shared base options derived by every spawned client
      * @param mutator the per-client mutator applied before address binding
      * @param availability the predicate used to filter existing pooled clients
@@ -73,15 +76,17 @@ public sealed interface SubnetBucketPool<C extends Contract>
      */
     static <C extends Contract> @NotNull SubnetBucketPool<C> create(
         @NotNull SubnetRotation rotation,
+        @NotNull RateLimitManager sharedManager,
+        @NotNull String anchorRouteId,
         @NotNull ClientConfig<C> baseOptions,
         @NotNull UnaryOperator<ClientConfig.Builder<C>> mutator,
         @NotNull Predicate<Client<C>> availability
     ) {
         int srcLen = rotation.sourcePrefix().length();
         int bucketLen = rotation.bucketPrefixLength();
-        if (srcLen < bucketLen) return new FanOutBucketPool<>(rotation, baseOptions, mutator, availability);
-        if (srcLen == bucketLen) return new SingleBucketPool<>(rotation, baseOptions, mutator, availability);
-        return new PassThroughBucketPool<>(rotation, baseOptions, mutator, availability);
+        if (srcLen < bucketLen) return new FanOutBucketPool<>(rotation, sharedManager, anchorRouteId, baseOptions, mutator, availability);
+        if (srcLen == bucketLen) return new SingleBucketPool<>(rotation, anchorRouteId, baseOptions, mutator, availability);
+        return new PassThroughBucketPool<>(rotation, anchorRouteId, baseOptions, mutator, availability);
     }
 
 }

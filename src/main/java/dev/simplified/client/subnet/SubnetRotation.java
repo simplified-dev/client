@@ -1,7 +1,9 @@
 package dev.simplified.client.subnet;
 
 import dev.simplified.client.Proxy;
-import dev.simplified.client.ratelimit.RateLimit;
+import dev.simplified.client.ratelimit.RateLimitConfig;
+import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.route.DynamicRouteProvider;
 import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
 import org.jetbrains.annotations.NotNull;
@@ -9,34 +11,27 @@ import org.jetbrains.annotations.NotNull;
 import java.math.BigInteger;
 
 /**
- * Immutable configuration describing how a {@link Proxy}
- * rotates IPv6 source addresses across rate-limit-relevant subnets.
+ * Immutable configuration describing how a {@link Proxy} rotates IPv6 source
+ * addresses across rate-limit-relevant subnets.
  * <p>
- * The configuration captures three orthogonal dimensions:
- * <ol>
- *   <li>The <b>source prefix</b> - the IPv6 range the host is permitted to bind
- *       outbound sockets to (e.g., a routed /40 or a Hurricane Electric /48).</li>
- *   <li>The <b>bucket prefix length</b> - the size of the smaller subnet at which
- *       upstream rate-limit enforcement is observed (e.g., {@code 56} for an
- *       upstream that enforces per-/56 quotas).</li>
- *   <li>The <b>budget</b> - the {@link RateLimit} applied to each contained
- *       bucket. Independent of any per-route rate limit configured on the
- *       client contract.</li>
- * </ol>
+ * Captures rotation specifics only - source prefix, the dimension at which
+ * upstream distinguishes my sources, selection strategy, and per-Proxy knobs.
+ * The rate-limit numbers (limit, window) live entirely with the route on
+ * {@link RateLimitConfig @RateLimitConfig} or
+ * {@link DynamicRouteProvider}, and the live
+ * counter state stays in {@link RateLimitManager}.
  * <p>
- * When the source prefix is strictly larger (numerically smaller length) than
- * the bucket prefix length, the proxy fans out across all contained subnets
- * using the configured {@linkplain SubnetSelectionStrategy strategy}. When the
- * two lengths are equal, a single bucket is used and only addresses within it
- * are rotated. When the source prefix is strictly smaller, no useful bucket
- * partition exists and the proxy passes through.
+ * The {@code bucketPrefixLength} is what makes rotation produce relief: it
+ * answers "at what /N does upstream group my source addresses into one
+ * bucket?". The proxy uses it to compose request-time bucketKeys of the form
+ * {@code routeBucketId + "@" + IPv6Prefix.of(boundIp, bucketPrefixLength)}, which
+ * the rate-limit layer then keys its counters by.
  * <p>
  * Construct via {@link #builder()}.
  */
 public record SubnetRotation(
-    @NotNull IpPrefix sourcePrefix,
+    @NotNull IPv6Prefix sourcePrefix,
     int bucketPrefixLength,
-    @NotNull RateLimit budget,
     @NotNull SubnetSelectionStrategy strategy,
     double softCapFraction,
     int maxRejectSamples
@@ -54,9 +49,9 @@ public record SubnetRotation(
      *         {@code (0, 1]}, or {@code maxRejectSamples} is less than 1
      */
     public SubnetRotation {
-        if (bucketPrefixLength < 0 || bucketPrefixLength > IpPrefix.IPV6_BITS)
+        if (bucketPrefixLength < 0 || bucketPrefixLength > IPv6Prefix.IPV6_BITS)
             throw new IllegalArgumentException(
-                "bucketPrefixLength must be in [0, " + IpPrefix.IPV6_BITS + "]: " + bucketPrefixLength
+                "bucketPrefixLength must be in [0, " + IPv6Prefix.IPV6_BITS + "]: " + bucketPrefixLength
             );
         if (!(softCapFraction > 0.0 && softCapFraction <= 1.0))
             throw new IllegalArgumentException("softCapFraction must be in (0, 1]: " + softCapFraction);
@@ -74,18 +69,6 @@ public record SubnetRotation(
     }
 
     /**
-     * Returns the soft-cap threshold in absolute requests for the configured
-     * {@link #budget}.
-     *
-     * @return {@code floor(budget.limit * softCapFraction)}, or
-     *         {@link Long#MAX_VALUE} for an unlimited budget
-     */
-    public long softCapThreshold() {
-        if (this.budget.isUnlimited()) return Long.MAX_VALUE;
-        return (long) Math.floor(this.budget.getLimit() * this.softCapFraction);
-    }
-
-    /**
      * Returns a new builder pre-seeded with sensible defaults.
      *
      * @return a fresh builder
@@ -100,21 +83,20 @@ public record SubnetRotation(
     @NoArgsConstructor(access = AccessLevel.PRIVATE)
     public static final class Builder {
 
-        private IpPrefix sourcePrefix;
+        private IPv6Prefix sourcePrefix;
         private int bucketPrefixLength;
         private boolean bucketPrefixLengthSet;
-        private @NotNull RateLimit budget = RateLimit.UNLIMITED;
         private @NotNull SubnetSelectionStrategy strategy = SubnetSelectionStrategy.RANDOM_REJECT_SAMPLE;
         private double softCapFraction = 0.9;
         private int maxRejectSamples = 16;
 
         /**
-         * Sets the source prefix from a parsed {@link IpPrefix}.
+         * Sets the source prefix from a parsed {@link IPv6Prefix}.
          *
          * @param sourcePrefix the source prefix
          * @return this builder
          */
-        public @NotNull Builder sourcePrefix(@NotNull IpPrefix sourcePrefix) {
+        public @NotNull Builder sourcePrefix(@NotNull IPv6Prefix sourcePrefix) {
             this.sourcePrefix = sourcePrefix;
             return this;
         }
@@ -126,7 +108,7 @@ public record SubnetRotation(
          * @return this builder
          */
         public @NotNull Builder sourcePrefix(@NotNull String cidr) {
-            return this.sourcePrefix(IpPrefix.parse(cidr));
+            return this.sourcePrefix(IPv6Prefix.parse(cidr));
         }
 
         /**
@@ -138,17 +120,6 @@ public record SubnetRotation(
         public @NotNull Builder bucketPrefixLength(int bucketPrefixLength) {
             this.bucketPrefixLength = bucketPrefixLength;
             this.bucketPrefixLengthSet = true;
-            return this;
-        }
-
-        /**
-         * Sets the per-bucket budget.
-         *
-         * @param budget the rate limit applied to each contained bucket
-         * @return this builder
-         */
-        public @NotNull Builder budget(@NotNull RateLimit budget) {
-            this.budget = budget;
             return this;
         }
 
@@ -204,7 +175,6 @@ public record SubnetRotation(
             return new SubnetRotation(
                 this.sourcePrefix,
                 this.bucketPrefixLength,
-                this.budget,
                 this.strategy,
                 this.softCapFraction,
                 this.maxRejectSamples

@@ -1,12 +1,12 @@
 package dev.simplified.client.subnet;
 
 import dev.simplified.client.exception.RateLimitException;
-import dev.simplified.client.subnet.pool.Bucket;
+import dev.simplified.client.subnet.pool.SubnetBucket;
 import dev.simplified.client.subnet.pool.FanOutBucketPool;
 
 /**
  * Strategy used by a {@link FanOutBucketPool} to pick a contained subnet
- * {@link Bucket} when serving a request.
+ * {@link SubnetBucket} when serving a request.
  * <p>
  * Strategies differ in how they balance request distribution across the
  * available subnet buckets and how they react to saturated buckets. All

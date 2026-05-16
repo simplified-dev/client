@@ -1,15 +1,24 @@
 package dev.simplified.client;
 
 import com.google.gson.Gson;
+import dev.simplified.client.Proxy;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.JsonApiException;
+import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
+import dev.simplified.client.response.Response;
+import dev.simplified.client.route.RouteDiscovery.Metadata;
+import dev.simplified.client.route.RouteDiscovery;
+import dev.simplified.client.subnet.IPv6Prefix;
+import dev.simplified.client.subnet.pool.SubnetBucket;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.gson.GsonSettings;
+import dev.simplified.reflection.Reflection;
+import dev.simplified.reflection.accessor.MethodAccessor;
 import dev.simplified.util.Lazy;
 import feign.codec.Decoder;
 import feign.codec.Encoder;
@@ -21,7 +30,11 @@ import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.net.Inet6Address;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -109,6 +122,32 @@ public final class ClientConfig<C extends Contract> {
     private final @NotNull Function<Gson, Decoder> decoderFactory;
 
     /**
+     * Optional shared {@link RateLimitManager} this client uses instead of creating its own. Set by
+     * {@link Proxy} so every client in the pool aggregates against one tracker, letting per-subnet
+     * bucket keys composed at request time roll up correctly. Empty by default.
+     */
+    private final @NotNull Optional<RateLimitManager> sharedRateLimitManager;
+
+    /**
+     * Optional {@link IPv6Prefix} that this client's bound source address belongs to, populated
+     * by {@link SubnetBucket} when the client is spawned through a {@link Proxy}. Read by
+     * {@link RouteDiscovery} at construction time to bake the
+     * per-subnet rate-limit bucket key into every {@link Metadata}
+     * instance, so the request and response interceptors look up the precomputed bucket key
+     * directly. Empty for clients constructed directly (no rotation).
+     */
+    private final @NotNull Optional<IPv6Prefix> subnetPrefix;
+
+    /**
+     * The {@link Gson} instance derived from {@link #gsonSettings} with the contract's
+     * {@link Response Response&lt;T&gt;} payload types injected as
+     * {@linkplain GsonSettings.Builder#withPrewarmTypes prewarm targets}, built once at
+     * {@link Builder#build()} time so every {@link Client} constructed from this config reuses
+     * the same warm Gson rather than each redoing the contract walk and adapter resolution.
+     */
+    private final @NotNull Gson gson;
+
+    /**
      * Returns a new {@link Builder} seeded with safe defaults for the given contract type and
      * {@link GsonSettings} instance.
      * <p>
@@ -169,6 +208,8 @@ public final class ClientConfig<C extends Contract> {
         private final @NotNull ConcurrentMap<String, Supplier<Optional<String>>> dynamicHeaders = Concurrent.newMap();
         private @NotNull Function<Gson, Encoder> encoderFactory = GsonEncoder::new;
         private @NotNull Function<Gson, Decoder> decoderFactory = GsonDecoder::new;
+        private @NotNull Optional<RateLimitManager> sharedRateLimitManager = Optional.empty();
+        private @NotNull Optional<IPv6Prefix> subnetPrefix = Optional.empty();
 
         private Builder(@NotNull Class<C> target, @NotNull GsonSettings gsonSettings) {
             this.target = target;
@@ -186,6 +227,8 @@ public final class ClientConfig<C extends Contract> {
             this.dynamicHeaders.putAll(existing.dynamicHeaders);
             this.encoderFactory = existing.encoderFactory;
             this.decoderFactory = existing.decoderFactory;
+            this.sharedRateLimitManager = existing.sharedRateLimitManager;
+            this.subnetPrefix = existing.subnetPrefix;
         }
 
         /**
@@ -370,6 +413,40 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
+         * Sets a shared {@link RateLimitManager} for this client to use instead of creating its own.
+         * <p>
+         * Typically called by {@link Proxy} so every client in the rotation pool
+         * aggregates rate-limit state against one tracker. Combined with
+         * {@link #withSubnetPrefix(IPv6Prefix)}, all clients bound to addresses inside the same
+         * {@code /N} resolve to one composed bucket key and share a counter.
+         *
+         * @param manager the shared rate-limit manager
+         * @return this builder
+         */
+        public @NotNull Builder<C> withRateLimitManager(@NotNull RateLimitManager manager) {
+            this.sharedRateLimitManager = Optional.of(manager);
+            return this;
+        }
+
+        /**
+         * Sets the {@link IPv6Prefix} this client's bound source address belongs to.
+         * <p>
+         * Typically called by {@link SubnetBucket} during client
+         * spawn so the spawned client shares the bucket's canonical prefix instance - no
+         * re-derivation from {@link #withInet6Address(java.net.Inet6Address)} on every rate-limit
+         * lookup. The request and response interceptors compose bucket keys of the form
+         * {@code routeBucketId + "@" + subnetPrefix}; with the prefix supplied here, that
+         * composition is a single precomputed string concat.
+         *
+         * @param subnetPrefix the rate-limit-relevant prefix the client's bound IP belongs to
+         * @return this builder
+         */
+        public @NotNull Builder<C> withSubnetPrefix(@NotNull IPv6Prefix subnetPrefix) {
+            this.subnetPrefix = Optional.of(subnetPrefix);
+            return this;
+        }
+
+        /**
          * Constructs an immutable {@link ClientConfig} from the current builder state.
          * <p>
          * The mutable maps held by the builder are sealed into unmodifiable copies on the
@@ -381,6 +458,17 @@ public final class ClientConfig<C extends Contract> {
         public @NotNull ClientConfig<C> build() {
             Objects.requireNonNull(this.target, "target");
             Objects.requireNonNull(this.gsonSettings, "gsonSettings");
+
+            // Derive a contract-aware Gson: every response type the contract advertises is
+            // added as a prewarm target so GsonSettings.create() generates the matching
+            // TypeAdapter eagerly. First-request cost drops by 1-5 ms per type. Built once
+            // here so every spawned Client reuses the same warm instance.
+            Gson warmedGson = this.gsonSettings
+                .mutate()
+                .withPrewarmTypes(walkContractTypes(this.target))
+                .build()
+                .create();
+
             return new ClientConfig<>(
                 this.target,
                 this.gsonSettings,
@@ -391,10 +479,40 @@ public final class ClientConfig<C extends Contract> {
                 Concurrent.newUnmodifiableMap(this.headers),
                 Concurrent.newUnmodifiableMap(this.dynamicHeaders),
                 this.encoderFactory,
-                this.decoderFactory
+                this.decoderFactory,
+                this.sharedRateLimitManager,
+                this.subnetPrefix,
+                warmedGson
             );
         }
 
+    }
+
+    /**
+     * Walks the contract interface's declared methods and extracts the deserialized payload type
+     * of every {@code Response<T>}-returning method. Method enumeration goes through the
+     * {@code simplified-dev:reflection} library so repeated walks of the same target class (one
+     * per spawned client from a {@link Proxy}'s pool) share a cached {@link Method}
+     * array.
+     *
+     * <p>Methods that return raw {@code Response} (no type parameter) or whose return type is not
+     * parameterised are skipped. Streaming bodies ({@code Response<InputStream>}) are included but
+     * Gson skips them harmlessly at adapter-resolution time.
+     *
+     * @param target the contract interface class
+     * @return the list of payload types to prewarm
+     */
+    private static @NotNull List<Type> walkContractTypes(@NotNull Class<? extends Contract> target) {
+        List<Type> types = new ArrayList<>();
+        Reflection<? extends Contract> reflection = new Reflection<>(target);
+        for (MethodAccessor<?> accessor : reflection.getMethods()) {
+            Type returnType = accessor.getMethod().getGenericReturnType();
+            if (!(returnType instanceof ParameterizedType parameterized)) continue;
+            if (parameterized.getRawType() != Response.class) continue;
+            Type[] args = parameterized.getActualTypeArguments();
+            if (args.length > 0) types.add(args[0]);
+        }
+        return types;
     }
 
     /**

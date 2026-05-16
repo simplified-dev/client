@@ -3,7 +3,6 @@ package dev.simplified.client.subnet.pool;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
-import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.subnet.SubnetRotation;
 import lombok.Getter;
@@ -14,15 +13,14 @@ import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 /**
- * {@link SubnetBucketPool} for the case where the source prefix is smaller
- * than (numerically longer than) the bucket prefix length.
+ * {@link SubnetBucketPool} for the case where the source prefix is smaller (numerically longer
+ * than) the bucket prefix length.
  * <p>
- * Holds one {@link Bucket} whose subnet is the source prefix and whose budget
- * is forced to {@link RateLimit#UNLIMITED}. Bucket-level budget tracking is
- * effectively bypassed because the source prefix shares a single upstream
- * bucket with everything else in the same /bucket-prefix subnet, so rotation
- * within the source prefix cannot relieve upstream pressure. Random addresses
- * are still bound for unpredictability.
+ * Holds one {@link SubnetBucket} whose subnet is the source prefix. The source prefix shares a
+ * single upstream bucket with everything else in the same /bucket-prefix subnet, so rotation
+ * within the source prefix cannot relieve upstream pressure; saturation here only fires if the
+ * availability predicate fails on every spawned client. Random addresses are still bound for
+ * unpredictability.
  *
  * @param <C> the contract interface type
  */
@@ -30,19 +28,19 @@ public final class PassThroughBucketPool<C extends Contract> implements SubnetBu
 
     @Getter
     private final @NotNull SubnetRotation rotation;
-    private final @NotNull Bucket<C> bucket;
+    private final @NotNull SubnetBucket<C> bucket;
 
     PassThroughBucketPool(
         @NotNull SubnetRotation rotation,
+        @NotNull String anchorRouteId,
         @NotNull ClientConfig<C> baseOptions,
         @NotNull UnaryOperator<ClientConfig.Builder<C>> mutator,
         @NotNull Predicate<Client<C>> availability
     ) {
         this.rotation = rotation;
-        this.bucket = new Bucket<>(
+        this.bucket = new SubnetBucket<>(
             rotation.sourcePrefix(),
-            RateLimit.UNLIMITED,
-            Long.MAX_VALUE,
+            anchorRouteId + "@" + rotation.sourcePrefix(),
             baseOptions,
             mutator,
             availability
@@ -50,7 +48,7 @@ public final class PassThroughBucketPool<C extends Contract> implements SubnetBu
     }
 
     @Override
-    public @NotNull Stream<Bucket<C>> activeBuckets() {
+    public @NotNull Stream<SubnetBucket<C>> activeBuckets() {
         return Stream.of(this.bucket);
     }
 

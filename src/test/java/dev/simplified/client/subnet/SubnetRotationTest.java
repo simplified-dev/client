@@ -1,10 +1,7 @@
 package dev.simplified.client.subnet;
 
-import dev.simplified.client.ratelimit.RateLimit;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-
-import java.time.temporal.ChronoUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -18,7 +15,6 @@ class SubnetRotationTest {
         SubnetRotation r = SubnetRotation.builder()
             .sourcePrefix("2602:fa02:0a00::/40")
             .bucketPrefixLength(56)
-            .budget(RateLimit.builder().limit(200).window(1, ChronoUnit.MINUTES).build())
             .build();
 
         assertThat(r.strategy(), is(SubnetSelectionStrategy.RANDOM_REJECT_SAMPLE));
@@ -33,7 +29,7 @@ class SubnetRotationTest {
             .sourcePrefix("2001:470:1::/48")
             .bucketPrefixLength(56)
             .build();
-        assertThat(r.sourcePrefix(), is(IpPrefix.parse("2001:470:1::/48")));
+        assertThat(r.sourcePrefix(), is(IPv6Prefix.parse("2001:470:1::/48")));
     }
 
     @Test
@@ -138,29 +134,6 @@ class SubnetRotationTest {
         assertThrows(IllegalStateException.class, () -> SubnetRotation.builder().build());
         assertThrows(IllegalStateException.class, () ->
             SubnetRotation.builder().sourcePrefix("2001:db8::/48").build());
-    }
-
-    @Test
-    @DisplayName("softCapThreshold computes floor(limit * fraction)")
-    void softCapThresholdValue() {
-        SubnetRotation r = SubnetRotation.builder()
-            .sourcePrefix("2001:db8::/48")
-            .bucketPrefixLength(56)
-            .budget(RateLimit.builder().limit(200).window(1, ChronoUnit.MINUTES).build())
-            .softCapFraction(0.9)
-            .build();
-        assertThat(r.softCapThreshold(), is(180L));
-    }
-
-    @Test
-    @DisplayName("softCapThreshold returns MAX_VALUE for unlimited budget")
-    void softCapThresholdUnlimited() {
-        SubnetRotation r = SubnetRotation.builder()
-            .sourcePrefix("2001:db8::/48")
-            .bucketPrefixLength(56)
-            .budget(RateLimit.UNLIMITED)
-            .build();
-        assertThat(r.softCapThreshold(), is(Long.MAX_VALUE));
     }
 
 }

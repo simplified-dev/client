@@ -56,7 +56,9 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
     private final @NotNull RateLimitManager rateLimitManager;
 
     /**
-     * The discovery engine used to match response URLs back to their route metadata.
+     * The discovery engine used to match response URLs back to their route metadata. Used only on
+     * the URL-match fallback path; the normal path reads the already-composed key directly from
+     * {@link InternalRequestInterceptor#ROUTE_ID_HEADER}.
      */
     private final @NotNull RouteDiscovery routeDiscovery;
 
@@ -66,30 +68,30 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
     @Override
     public Object intercept(@NotNull InvocationContext invocationContext, @NotNull Chain chain) throws Exception {
         feign.Response response = invocationContext.response();
-        String routeId = this.extractRouteId(response);
+        String bucketKey = this.extractBucketKey(response);
 
         RateLimit.fromHeaders(response.headers()).ifPresent(serverLimit ->
-            this.rateLimitManager.updateRateLimit(routeId, serverLimit)
+            this.rateLimitManager.updateRateLimit(bucketKey, serverLimit)
         );
 
         return chain.next(invocationContext);
     }
 
     /**
-     * Extracts the route identifier from the internal request header stashed by
-     * {@link InternalRequestInterceptor}. Falls back to longest-prefix URL matching
-     * if the header is absent.
+     * Extracts the rate-limit bucket key from the internal request header stashed by
+     * {@link InternalRequestInterceptor}. Falls back to longest-prefix URL matching when the header
+     * is absent, reading the precomputed bucket key off the resolved metadata.
      *
      * @param response the Feign response whose originating request carries the route header
-     * @return the route identifier string
+     * @return the bucket key string
      */
-    private @NotNull String extractRouteId(@NotNull feign.Response response) {
+    private @NotNull String extractBucketKey(@NotNull feign.Response response) {
         Collection<String> values = response.request().headers().get(InternalRequestInterceptor.ROUTE_ID_HEADER);
 
         if (values != null && !values.isEmpty())
             return values.iterator().next();
 
-        return this.routeDiscovery.findMatchingMetadata(response.request().url()).getRoute();
+        return this.routeDiscovery.findMatchingMetadata(response.request().url()).getBucketKey();
     }
 
 }

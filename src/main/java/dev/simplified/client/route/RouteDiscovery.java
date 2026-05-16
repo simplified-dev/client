@@ -1,9 +1,11 @@
 package dev.simplified.client.route;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.ClientConfig;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
 import dev.simplified.client.ratelimit.RateLimit;
+import dev.simplified.client.subnet.IPv6Prefix;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import lombok.Getter;
@@ -12,7 +14,9 @@ import org.jetbrains.annotations.NotNull;
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Route resolution engine that discovers and caches the {@link Route @Route} and
@@ -20,8 +24,11 @@ import java.util.Optional;
  * <p>
  * On construction, the target class is scanned for a mandatory type-level route (the
  * default) and optional per-method route overrides. The resulting {@link Metadata} objects
- * pair each route string with its {@link RateLimit} policy and are stored in an
- * unmodifiable map for fast, lock-free lookups at request time.
+ * pair each route string with its {@link RateLimit} policy and a precomputed
+ * {@linkplain Metadata#getBucketKey() bucket key} composed against the optional
+ * {@linkplain ClientConfig#getSubnetPrefix() subnet prefix} carried on the supplied
+ * {@link ClientConfig}, and are stored in an unmodifiable map for fast, lock-free lookups
+ * at request time.
  * <p>
  * Two lookup strategies are provided:
  * <ul>
@@ -51,26 +58,31 @@ public final class RouteDiscovery {
     private final @NotNull ConcurrentMap<Method, Metadata> methodRoutes;
 
     /**
-     * Scans the given Feign endpoint interface for route annotations and caches the results.
+     * Scans the target Feign endpoint interface declared on the given options for route
+     * annotations and caches the results.
      * <p>
-     * The target class must declare either a {@link Route @Route} or a
-     * {@link DynamicRoute @DynamicRoute}-annotated custom annotation at the type level;
-     * otherwise an {@link IllegalArgumentException} is thrown. Each declared method is
-     * additionally inspected for method-level route overrides.
+     * The {@linkplain ClientConfig#getTarget() target class} must declare either a
+     * {@link Route @Route} or a {@link DynamicRoute @DynamicRoute}-annotated custom annotation
+     * at the type level; otherwise an {@link IllegalArgumentException} is thrown. Each declared
+     * method is additionally inspected for method-level route overrides. The optional
+     * {@linkplain ClientConfig#getSubnetPrefix() subnet prefix} carried on the options is
+     * baked into each {@link Metadata}'s precomputed bucket key, so subnet-rotated clients
+     * resolve to a per-subnet rate-limit identifier without runtime composition.
      *
-     * @param target the Feign endpoint interface class to scan
-     * @throws IllegalArgumentException if no type-level route annotation is found on {@code target}
+     * @param options the client configuration carrying the target class and optional subnet prefix
+     * @throws IllegalArgumentException if no type-level route annotation is found on the target
      */
-    public RouteDiscovery(@NotNull Class<?> target) {
-        Optional<Metadata> defaultRoute = extractRouteFromTarget(target);
+    public RouteDiscovery(@NotNull ClientConfig<?> options) {
+        Class<?> target = options.getTarget();
+        Optional<IPv6Prefix> subnetPrefix = options.getSubnetPrefix();
 
+        Optional<Metadata> defaultRoute = extractRouteFromTarget(target, subnetPrefix);
         if (defaultRoute.isEmpty())
             throw new IllegalArgumentException("No @Route or @DynamicRoute found on type of " + target.getName());
 
         ConcurrentMap<Method, Metadata> methodRoutes = Concurrent.newMap();
-
         for (Method method : target.getDeclaredMethods())
-            extractRouteFromTarget(method).ifPresent(info -> methodRoutes.put(method, info));
+            extractRouteFromTarget(method, subnetPrefix).ifPresent(info -> methodRoutes.put(method, info));
 
         this.defaultRoute = defaultRoute.get();
         this.methodRoutes = methodRoutes.toUnmodifiable();
@@ -90,10 +102,14 @@ public final class RouteDiscovery {
      * </ol>
      *
      * @param target a {@link Class} or {@link Method} to inspect for route annotations
+     * @param subnetPrefix the optional subnet prefix to bake into the resulting metadata's bucket key
      * @return an {@link Optional} containing the resolved {@link Metadata}, or empty if
      *         no route annotation is found
      */
-    private static @NotNull Optional<Metadata> extractRouteFromTarget(@NotNull Object target) {
+    private static @NotNull Optional<Metadata> extractRouteFromTarget(
+        @NotNull Object target,
+        @NotNull Optional<IPv6Prefix> subnetPrefix
+    ) {
         Class<?> targetClass;
         if (target instanceof Class<?> clazz)
             targetClass = clazz;
@@ -106,7 +122,7 @@ public final class RouteDiscovery {
         if (routeAnno != null) {
             String route = stripProtocol(routeAnno.value());
             RateLimit rateLimit = RateLimit.fromAnnotation(routeAnno.rateLimit());
-            return Optional.of(new Metadata(route, rateLimit));
+            return Optional.of(new Metadata(route, rateLimit, subnetPrefix));
         }
 
         Annotation[] annotations = (target instanceof Method method)
@@ -128,7 +144,8 @@ public final class RouteDiscovery {
                 if (value instanceof DynamicRouteProvider provider) {
                     return Optional.of(new Metadata(
                         stripProtocol(provider.getRoute()),
-                        provider.getRateLimit()
+                        provider.getRateLimit(),
+                        subnetPrefix
                     ));
                 }
             } catch (Exception ignore) { }
@@ -173,6 +190,65 @@ public final class RouteDiscovery {
     }
 
     /**
+     * Returns the {@link Metadata} associated with the given endpoint method.
+     * <p>
+     * If the method does not have an explicit route override, the type-level default
+     * route is returned.
+     *
+     * @param method the Feign endpoint method to look up
+     * @return the route metadata for the method, or the default if no override exists
+     */
+    public @NotNull Metadata getMetadata(@NotNull Method method) {
+        return this.methodRoutes.getOrDefault(method, this.defaultRoute);
+    }
+
+    /**
+     * Locates the {@link Metadata} whose route string equals the given identifier, scanning the
+     * default route plus every method-level override.
+     * <p>
+     * Used by {@link Client}'s {@link DynamicRouteProvider} rate-limit query overloads to look up
+     * the precomputed bucket key. Linear in the number of routes declared on the contract -
+     * typically a handful, so the cost is negligible compared to building a separate index.
+     *
+     * @param routeString the route string to match (without protocol prefix)
+     * @return an {@link Optional} containing the matching metadata, or empty if no route matches
+     */
+    public @NotNull Optional<Metadata> findByRoute(@NotNull String routeString) {
+        if (this.defaultRoute.getRoute().equals(routeString))
+            return Optional.of(this.defaultRoute);
+
+        for (Metadata metadata : this.methodRoutes.values()) {
+            if (metadata.getRoute().equals(routeString))
+                return Optional.of(metadata);
+        }
+
+        return Optional.empty();
+    }
+
+    /**
+     * Collects the unique bare hostnames advertised by every route this discovery knows about,
+     * for use as DNS preresolve targets and pool-prewarm anchors. The port and path are stripped
+     * so the result matches what {@link InetAddress#getAllByName(String)} expects.
+     *
+     * @return the set of unique hostnames; empty if every route is hostless
+     */
+    public @NotNull Set<String> collectAdvertisedHosts() {
+        Set<String> hosts = new HashSet<>();
+        addHost(hosts, this.defaultRoute);
+        this.methodRoutes.values().forEach(metadata -> addHost(hosts, metadata));
+        return hosts;
+    }
+
+    private static void addHost(@NotNull Set<String> sink, @NotNull Metadata metadata) {
+        String route = metadata.getRoute();
+        int slash = route.indexOf('/');
+        String authority = slash < 0 ? route : route.substring(0, slash);
+        int colon = authority.indexOf(':');
+        String host = colon < 0 ? authority : authority.substring(0, colon);
+        if (!host.isBlank()) sink.add(host);
+    }
+
+    /**
      * Returns the length of the URL scheme prefix (the {@code http://} or {@code https://}
      * literal) at the start of {@code url}, or {@code 0} if no prefix is present.
      *
@@ -183,42 +259,6 @@ public final class RouteDiscovery {
         if (url.startsWith("https://")) return 8;
         if (url.startsWith("http://")) return 7;
         return 0;
-    }
-
-    /**
-     * Returns the {@link Metadata} associated with the given endpoint method.
-     * <p>
-     * If the method does not have an explicit route override, the type-level default
-     * route is returned.
-     *
-     * @param method the Feign endpoint method to look up
-     * @return the route metadata for the method, or the default if no override exists
-     */
-    public @NotNull Metadata getMetadata(@NotNull Method method) {
-        return this.getMethodRoutes().getOrDefault(method, this.getDefaultRoute());
-    }
-
-    /**
-     * Collects the unique bare hostnames advertised by every route this discovery knows about,
-     * for use as DNS preresolve targets and pool-prewarm anchors. The port and path are stripped
-     * so the result matches what {@link InetAddress#getAllByName(String)} expects.
-     *
-     * @return the set of unique hostnames; empty if every route is hostless
-     */
-    public @NotNull java.util.Set<String> collectAdvertisedHosts() {
-        java.util.Set<String> hosts = new java.util.HashSet<>();
-        addHost(hosts, this.defaultRoute);
-        this.methodRoutes.values().forEach(metadata -> addHost(hosts, metadata));
-        return hosts;
-    }
-
-    private static void addHost(@NotNull java.util.Set<String> sink, @NotNull Metadata metadata) {
-        String route = metadata.getRoute();
-        int slash = route.indexOf('/');
-        String authority = slash < 0 ? route : route.substring(0, slash);
-        int colon = authority.indexOf(':');
-        String host = colon < 0 ? authority : authority.substring(0, colon);
-        if (!host.isBlank()) sink.add(host);
     }
 
     /**
@@ -234,10 +274,12 @@ public final class RouteDiscovery {
     }
 
     /**
-     * Immutable value object that pairs a route string with its {@link RateLimit} policy.
+     * Immutable value object that pairs a route string with its {@link RateLimit} policy and a
+     * precomputed bucket key for rate-limit lookups.
      * <p>
-     * Instances are created during {@link RouteDiscovery} construction and cached for the
-     * lifetime of the owning {@link Client}.
+     * Instances are created during {@link RouteDiscovery} construction and cached for the lifetime
+     * of the owning {@link Client}. The {@code fullUrl} and {@code bucketKey} fields are both
+     * precomputed at construction so request-time lookups never re-build either string.
      *
      * @see RouteDiscovery
      */
@@ -260,15 +302,30 @@ public final class RouteDiscovery {
         private final @NotNull String fullUrl;
 
         /**
-         * Constructs a new metadata entry for the given route and rate-limit policy.
+         * The pre-computed rate-limit bucket key, equal to {@link #route} when no subnet prefix is
+         * configured or {@code route + "@" + subnetPrefix} when the owning client is bound inside a
+         * rotation subnet. Used directly by the request and response interceptors and by
+         * {@link Client}'s rate-limit query API.
+         */
+        private final @NotNull String bucketKey;
+
+        /**
+         * Constructs a new metadata entry for the given route, rate-limit policy, and optional
+         * subnet prefix.
          *
          * @param route the route string without a protocol prefix
          * @param rateLimit the rate-limit policy governing traffic through this route
+         * @param subnetPrefix the optional subnet prefix the owning client is bound inside
          */
-        public Metadata(@NotNull String route, @NotNull RateLimit rateLimit) {
+        public Metadata(
+            @NotNull String route,
+            @NotNull RateLimit rateLimit,
+            @NotNull Optional<IPv6Prefix> subnetPrefix
+        ) {
             this.route = route;
             this.rateLimit = rateLimit;
             this.fullUrl = "https://" + route;
+            this.bucketKey = subnetPrefix.map(p -> route + "@" + p).orElse(route);
         }
 
     }

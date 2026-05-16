@@ -35,6 +35,7 @@ import org.jetbrains.annotations.NotNull;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -113,7 +114,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * each independently invoking {@link GsonSettings#create()}.
      */
     @Getter(AccessLevel.NONE)
-    private final @NotNull com.google.gson.Gson gson;
+    private final @NotNull Gson gson;
 
     /**
      * The RFC 7234 response cache and merged observability facade, replacing the legacy
@@ -144,27 +145,30 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     Client(@NotNull ClientConfig<C> options, @NotNull feign.Client internalClient) {
         this.options = options;
         this.internalClient = internalClient;
-        this.routeDiscovery = new RouteDiscovery(options.getTarget());
-        this.rateLimitManager = new RateLimitManager();
+        this.routeDiscovery = new RouteDiscovery(options);
+        this.rateLimitManager = options.getSharedRateLimitManager().orElseGet(RateLimitManager::new);
         this.responseCache = new ResponseCache(
             options.getTimings().maxCacheBytes(),
             options.getTimings().cacheSafetyFallback()
         );
-        // Derive a contract-aware GsonSettings: every response type the contract advertises
-        // is added as a prewarm target so GsonSettings.create() generates the matching
-        // TypeAdapter eagerly. First-request cost drops by 1-5 ms per type.
-        this.gson = options.getGsonSettings()
-            .mutate()
-            .withPrewarmTypes(walkContractTypes(options.getTarget()))
-            .build()
-            .create();
+        this.gson = options.getGson();
         this.contract = this.wrapContractProxy(this.build());
+        this.prewarmAdvertisedHosts();
+    }
 
-        java.util.Set<String> hosts = this.routeDiscovery.collectAdvertisedHosts();
-        if (!hosts.isEmpty()) {
-            ApacheClientFactory.prewarmDns(hosts);
-            ApacheClientFactory.prewarm(hosts, this.internalClient);
-        }
+    /**
+     * Fires DNS and HEAD-probe prewarms on virtual threads against every host the contract
+     * advertises, so the first real request finds a warm Apache connection pool. No-op when the
+     * contract advertises no hosts (e.g., loopback-targeted test fixtures with port-only routes).
+     * <p>
+     * Prewarm failures are swallowed inside the spawned virtual threads - the constructor never
+     * blocks on them, and an unreachable advertised host never aborts client construction.
+     */
+    private void prewarmAdvertisedHosts() {
+        Set<String> hosts = this.routeDiscovery.collectAdvertisedHosts();
+        if (hosts.isEmpty()) return;
+        ApacheClientFactory.prewarmDns(hosts);
+        ApacheClientFactory.prewarmHosts(hosts, this.internalClient);
     }
 
     /**
@@ -248,47 +252,34 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /**
      * Checks whether the type-level default rate-limit bucket is currently exhausted.
      * <p>
-     * Resolves the bucket key from the {@link Route @Route} declared on the endpoint interface
-     * via {@link RouteDiscovery#getDefaultRoute()}. Convenient for single-domain endpoints where
-     * every request shares one bucket.
+     * Resolves the bucket key from the {@link Route @Route} declared on the endpoint interface via
+     * {@link RouteDiscovery#getDefaultRoute()}. Convenient for single-domain endpoints where every
+     * request shares one bucket; multi-domain contracts should prefer the
+     * {@link DynamicRouteProvider} overload to target a specific route's bucket.
      *
      * @return {@code true} if the default bucket exists and its request quota is exhausted;
      *         {@code false} otherwise
      */
     public boolean isRateLimited() {
-        return this.isRateLimited(this.routeDiscovery.getDefaultRoute().getRoute());
+        return this.rateLimitManager.isRateLimited(this.routeDiscovery.getDefaultRoute().getBucketKey());
     }
 
     /**
-     * Checks whether the rate-limit bucket identified by the given key is currently exhausted.
+     * Checks whether the rate-limit bucket for the route advertised by the given provider is
+     * currently exhausted.
      * <p>
-     * If no bucket exists for the given identifier (i.e. no requests have been made to that
-     * route yet), returns {@code false}.
+     * Looks up the contract's matching {@link RouteDiscovery.Metadata} by route, reading its
+     * precomputed bucket key. Returns {@code false} when no route on this contract matches the
+     * provider's route - the bucket has no entries because no request has been made.
      *
-     * @param bucketId the route identifier used as the rate-limit bucket key, typically the
-     *                 route string from a {@link Route @Route} annotation
-     * @return {@code true} if the bucket exists and its request quota is exhausted;
-     *         {@code false} otherwise
-     * @see RateLimitManager#isRateLimited(String)
-     */
-    public boolean isRateLimited(@NotNull String bucketId) {
-        return this.rateLimitManager.isRateLimited(bucketId);
-    }
-
-    /**
-     * Checks whether the rate-limit bucket identified by the given route provider is currently
-     * exhausted.
-     * <p>
-     * Equivalent to {@link #isRateLimited(String) isRateLimited(provider.getBucketId())}.
-     * Convenient when querying a multi-domain endpoint where the bucket is identified by an
-     * enum implementing {@link DynamicRouteProvider}.
-     *
-     * @param provider the dynamic route provider supplying the bucket identifier
+     * @param provider the dynamic route provider supplying the route identifier
      * @return {@code true} if the bucket exists and its request quota is exhausted;
      *         {@code false} otherwise
      */
     public boolean isRateLimited(@NotNull DynamicRouteProvider provider) {
-        return this.isRateLimited(provider.getBucketId());
+        return this.routeDiscovery.findByRoute(provider.getRoute())
+            .map(metadata -> this.rateLimitManager.isRateLimited(metadata.getBucketKey()))
+            .orElse(false);
     }
 
     /**
@@ -297,64 +288,26 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      *
      * @return the number of remaining allowed requests, or the unlimited sentinel value if no
      *         bucket exists for the type-level default route
-     * @see RateLimitManager#getRemaining(String)
      */
     public long getRemainingRequests() {
-        return this.getRemainingRequests(this.routeDiscovery.getDefaultRoute().getRoute());
-    }
-
-    /**
-     * Returns the number of remaining requests allowed for the bucket identified by the given
-     * key before the current window expires.
-     *
-     * @param bucketId the route identifier used as the rate-limit bucket key
-     * @return the number of remaining allowed requests, or the unlimited sentinel value if the
-     *         bucket does not exist
-     * @see RateLimitManager#getRemaining(String)
-     */
-    public long getRemainingRequests(@NotNull String bucketId) {
-        return this.rateLimitManager.getRemaining(bucketId);
+        return this.rateLimitManager.getRemaining(this.routeDiscovery.getDefaultRoute().getBucketKey());
     }
 
     /**
      * Returns the number of remaining requests allowed for the bucket identified by the given
      * route provider before the current window expires.
      *
-     * @param provider the dynamic route provider supplying the bucket identifier
-     * @return the number of remaining allowed requests, or the unlimited sentinel value if the
-     *         bucket does not exist
+     * @param provider the dynamic route provider supplying the route identifier
+     * @return the number of remaining allowed requests, or the unlimited sentinel value if no
+     *         matching route exists on this contract
      */
     public long getRemainingRequests(@NotNull DynamicRouteProvider provider) {
-        return this.getRemainingRequests(provider.getBucketId());
+        return this.routeDiscovery.findByRoute(provider.getRoute())
+            .map(metadata -> this.rateLimitManager.getRemaining(metadata.getBucketKey()))
+            .orElse(Long.MAX_VALUE);
     }
 
     // ===== Internal build helpers =====
-
-    /**
-     * Walks the contract interface's declared methods and extracts the deserialized payload
-     * type of every {@code Response<T>}-returning method. The resulting list seeds the
-     * {@link GsonSettings#getPrewarmTypes() Gson prewarm list} so adapter
-     * generation for known response shapes runs at construction time rather than on first
-     * decode.
-     *
-     * <p>Methods that return raw {@code Response} (no type parameter) or whose return type is
-     * not parameterised are skipped. Streaming bodies ({@code Response<InputStream>}) are
-     * included but Gson skips them harmlessly at adapter-resolution time.</p>
-     *
-     * @param target the contract interface class
-     * @return the list of payload types to prewarm
-     */
-    private static @NotNull java.util.List<java.lang.reflect.Type> walkContractTypes(@NotNull Class<? extends Contract> target) {
-        java.util.List<java.lang.reflect.Type> types = new java.util.ArrayList<>();
-        for (java.lang.reflect.Method method : target.getDeclaredMethods()) {
-            java.lang.reflect.Type returnType = method.getGenericReturnType();
-            if (!(returnType instanceof java.lang.reflect.ParameterizedType parameterized)) continue;
-            if (parameterized.getRawType() != Response.class) continue;
-            java.lang.reflect.Type[] args = parameterized.getActualTypeArguments();
-            if (args.length > 0) types.add(args[0]);
-        }
-        return types;
-    }
 
     /**
      * Builds a Feign proxy implementing the contract interface {@code C}.

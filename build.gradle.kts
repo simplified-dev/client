@@ -43,7 +43,7 @@ dependencies {
     api("com.github.simplified-dev:collections") { version { strictly("2f2aa58") } }
     api("com.github.simplified-dev:utils") { version { strictly("a2f3ccd") } }
     api("com.github.simplified-dev:reflection") { version { strictly("c02511a") } }
-    api("com.github.simplified-dev:gson-extras") { version { strictly("c494327") } }
+    api("com.github.simplified-dev:gson-extras") { version { strictly("26278a3") } }
 
     // JetBrains Annotations
     api(libs.annotations)

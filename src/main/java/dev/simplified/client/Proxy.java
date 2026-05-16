@@ -1,10 +1,12 @@
 package dev.simplified.client;
 
 import dev.simplified.client.exception.RateLimitException;
+import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.route.DynamicRouteProvider;
 import dev.simplified.client.route.Route;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.SubnetRotation;
 import dev.simplified.client.subnet.pool.SubnetBucketPool;
 import lombok.AccessLevel;
@@ -278,10 +280,26 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
         public @NotNull Proxy<C> build() {
             if (this.rotation == null)
                 throw new IllegalStateException("withSubnetRotation must be set");
+
+            RateLimitManager sharedManager = new RateLimitManager();
+            String anchorRouteId = new RouteDiscovery(this.baseOptions)
+                .getDefaultRoute()
+                .getRoute();
+
+            // Inject the shared manager into every spawned client's config so all clients
+            // aggregate against one tracker. The per-bucket subnet IPv6Prefix is injected by
+            // SubnetBucket.createClient when it actually spawns a client - it has the canonical
+            // prefix instance and passes it via withSubnetPrefix.
+            UnaryOperator<ClientConfig.Builder<C>> wrappedMutator = builder -> this.perClientMutator
+                .apply(builder)
+                .withRateLimitManager(sharedManager);
+
             SubnetBucketPool<C> pool = SubnetBucketPool.create(
                 this.rotation,
+                sharedManager,
+                anchorRouteId,
                 this.baseOptions,
-                this.perClientMutator,
+                wrappedMutator,
                 this.availability
             );
             return new Proxy<>(this.baseOptions, this.rotation, pool);

@@ -26,7 +26,7 @@ import java.util.concurrent.ThreadLocalRandom;
  *
  * @see SubnetRotation
  */
-public final class IpPrefix {
+public final class IPv6Prefix {
 
     /**
      * Total number of bits in an IPv6 address.
@@ -40,14 +40,23 @@ public final class IpPrefix {
 
     private final byte @NotNull [] networkBytes;
     private final int length;
+    private final @NotNull String stringForm;
 
-    private IpPrefix(byte @NotNull [] networkBytes, int length) {
+    private IPv6Prefix(byte @NotNull [] networkBytes, int length) {
         this.networkBytes = networkBytes;
         this.length = length;
+        // Eagerly cache the canonical textual form. Constructed via a single
+        // Inet6Address allocation up front; toString() / consumers building
+        // bucket keys then read this field with zero allocation per call.
+        try {
+            this.stringForm = Inet6Address.getByAddress(networkBytes).getHostAddress() + "/" + length;
+        } catch (UnknownHostException uhex) {
+            throw new IllegalStateException("Unreachable: 16-byte array always produces a valid address", uhex);
+        }
     }
 
     /**
-     * Parses a CIDR notation string into an {@link IpPrefix}.
+     * Parses a CIDR notation string into an {@link IPv6Prefix}.
      * <p>
      * Host bits beyond the prefix length are masked to zero, so the returned
      * instance always represents the canonical network address.
@@ -57,7 +66,7 @@ public final class IpPrefix {
      * @throws IllegalArgumentException if the prefix length is missing, out of
      *         range, or the address portion is not a valid IPv6 literal
      */
-    public static @NotNull IpPrefix parse(@NotNull String cidr) {
+    public static @NotNull IPv6Prefix parse(@NotNull String cidr) {
         int slashIdx = cidr.indexOf('/');
         if (slashIdx < 0)
             throw new IllegalArgumentException("Missing prefix length in CIDR: '" + cidr + "'");
@@ -69,6 +78,7 @@ public final class IpPrefix {
         } catch (NumberFormatException nfex) {
             throw new IllegalArgumentException("Invalid prefix length in CIDR: '" + cidr + "'", nfex);
         }
+        
         if (length < 0 || length > IPV6_BITS)
             throw new IllegalArgumentException("Prefix length out of range [0, " + IPV6_BITS + "]: " + length);
 
@@ -78,12 +88,13 @@ public final class IpPrefix {
         } catch (UnknownHostException uhex) {
             throw new IllegalArgumentException("Invalid IPv6 address in CIDR: '" + address + "'", uhex);
         }
+
         if (!(addr instanceof Inet6Address))
             throw new IllegalArgumentException("CIDR must be IPv6: '" + cidr + "'");
 
         byte[] bytes = addr.getAddress();
         applyMask(bytes, length);
-        return new IpPrefix(bytes, length);
+        return new IPv6Prefix(bytes, length);
     }
 
     /**
@@ -96,15 +107,16 @@ public final class IpPrefix {
      * @param length the prefix length in {@code [0, 128]}
      * @return the normalized prefix
      */
-    public static @NotNull IpPrefix of(byte @NotNull [] networkBytes, int length) {
+    public static @NotNull IPv6Prefix of(byte @NotNull [] networkBytes, int length) {
         if (networkBytes.length != IPV6_BYTES)
             throw new IllegalArgumentException("networkBytes must be " + IPV6_BYTES + " bytes, got " + networkBytes.length);
+
         if (length < 0 || length > IPV6_BITS)
             throw new IllegalArgumentException("Prefix length out of range [0, " + IPV6_BITS + "]: " + length);
 
         byte[] copy = networkBytes.clone();
         applyMask(copy, length);
-        return new IpPrefix(copy, length);
+        return new IPv6Prefix(copy, length);
     }
 
     /**
@@ -145,8 +157,10 @@ public final class IpPrefix {
      * @return {@code true} if {@code sub} has length at least this length and its
      *         leading bits match this prefix
      */
-    public boolean contains(@NotNull IpPrefix sub) {
-        if (sub.length < this.length) return false;
+    public boolean contains(@NotNull IPv6Prefix sub) {
+        if (sub.length < this.length)
+            return false;
+
         return matchesPrefix(this.networkBytes, sub.networkBytes, this.length);
     }
 
@@ -158,7 +172,9 @@ public final class IpPrefix {
      *         match this prefix
      */
     public boolean contains(@NotNull InetAddress addr) {
-        if (!(addr instanceof Inet6Address)) return false;
+        if (!(addr instanceof Inet6Address))
+            return false;
+
         return matchesPrefix(this.networkBytes, addr.getAddress(), this.length);
     }
 
@@ -173,7 +189,9 @@ public final class IpPrefix {
      * @return {@code 2^(subLength - this.length)}, or {@code 0} if {@code subLength < this.length}
      */
     public @NotNull BigInteger containedSubnetCount(int subLength) {
-        if (subLength < this.length || subLength > IPV6_BITS) return BigInteger.ZERO;
+        if (subLength < this.length || subLength > IPV6_BITS)
+            return BigInteger.ZERO;
+
         return BigInteger.ONE.shiftLeft(subLength - this.length);
     }
 
@@ -192,7 +210,7 @@ public final class IpPrefix {
      * @throws IllegalArgumentException if {@code subLength} is outside the valid range
      * @throws IndexOutOfBoundsException if {@code index} is outside the valid range
      */
-    public @NotNull IpPrefix subnetAt(int subLength, @NotNull BigInteger index) {
+    public @NotNull IPv6Prefix subnetAt(int subLength, @NotNull BigInteger index) {
         if (subLength < this.length || subLength > IPV6_BITS)
             throw new IllegalArgumentException("subLength out of range [" + this.length + ", " + IPV6_BITS + "]: " + subLength);
 
@@ -204,7 +222,7 @@ public final class IpPrefix {
         int shift = IPV6_BITS - subLength;
         BigInteger combined = networkBig.or(index.shiftLeft(shift));
         byte[] subBytes = toFixedBytes(combined, IPV6_BYTES);
-        return new IpPrefix(subBytes, subLength);
+        return new IPv6Prefix(subBytes, subLength);
     }
 
     /**
@@ -214,7 +232,7 @@ public final class IpPrefix {
      * @return a random contained subnet
      * @throws IllegalArgumentException if no subnets exist at {@code subLength}
      */
-    public @NotNull IpPrefix randomContainedSubnet(int subLength) {
+    public @NotNull IPv6Prefix randomContainedSubnet(int subLength) {
         return this.randomContainedSubnet(subLength, ThreadLocalRandom.current());
     }
 
@@ -227,11 +245,15 @@ public final class IpPrefix {
      * @return a random contained subnet
      * @throws IllegalArgumentException if no subnets exist at {@code subLength}
      */
-    public @NotNull IpPrefix randomContainedSubnet(int subLength, @NotNull Random rng) {
+    public @NotNull IPv6Prefix randomContainedSubnet(int subLength, @NotNull Random rng) {
         BigInteger count = containedSubnetCount(subLength);
+
         if (count.signum() <= 0)
             throw new IllegalArgumentException("No contained subnets at length " + subLength + " for prefix " + this);
-        if (count.equals(BigInteger.ONE)) return this.subnetAt(subLength, BigInteger.ZERO);
+
+        if (count.equals(BigInteger.ONE))
+            return this.subnetAt(subLength, BigInteger.ZERO);
+
         return this.subnetAt(subLength, randomBigInteger(count, rng));
     }
 
@@ -252,10 +274,12 @@ public final class IpPrefix {
      * @return a random address with the network bits fixed and host bits random
      */
     public @NotNull Inet6Address randomAddress(@NotNull Random rng) {
-        if (this.length == IPV6_BITS) return this.networkAddress();
+        if (this.length == IPV6_BITS)
+            return this.networkAddress();
 
         byte[] bytes = this.networkBytes.clone();
         randomizeBits(bytes, this.length, IPV6_BITS, rng);
+
         try {
             return (Inet6Address) Inet6Address.getByAddress(bytes);
         } catch (UnknownHostException uhex) {
@@ -266,7 +290,7 @@ public final class IpPrefix {
     @Override
     public boolean equals(Object obj) {
         if (this == obj) return true;
-        if (!(obj instanceof IpPrefix other)) return false;
+        if (!(obj instanceof IPv6Prefix other)) return false;
         return this.length == other.length && Arrays.equals(this.networkBytes, other.networkBytes);
     }
 
@@ -277,7 +301,7 @@ public final class IpPrefix {
 
     @Override
     public @NotNull String toString() {
-        return this.networkAddress().getHostAddress() + "/" + this.length;
+        return this.stringForm;
     }
 
     /**
@@ -287,11 +311,13 @@ public final class IpPrefix {
     private static void applyMask(byte @NotNull [] bytes, int length) {
         int fullBytes = length / 8;
         int partialBits = length % 8;
+
         if (partialBits != 0 && fullBytes < bytes.length) {
             int mask = 0xFF << (8 - partialBits);
             bytes[fullBytes] = (byte) (bytes[fullBytes] & mask);
             fullBytes++;
         }
+
         for (int i = fullBytes; i < bytes.length; i++) bytes[i] = 0;
     }
 
@@ -302,13 +328,17 @@ public final class IpPrefix {
     private static boolean matchesPrefix(byte @NotNull [] a, byte @NotNull [] b, int length) {
         int fullBytes = length / 8;
         int partialBits = length % 8;
+
         for (int i = 0; i < fullBytes; i++) {
-            if (a[i] != b[i]) return false;
+            if (a[i] != b[i])
+                return false;
         }
+
         if (partialBits != 0) {
             int mask = 0xFF << (8 - partialBits);
-            if ((a[fullBytes] & mask) != (b[fullBytes] & mask)) return false;
+            return (a[fullBytes] & mask) == (b[fullBytes] & mask);
         }
+
         return true;
     }
 
@@ -342,9 +372,11 @@ public final class IpPrefix {
     private static @NotNull BigInteger randomBigInteger(@NotNull BigInteger bound, @NotNull Random rng) {
         int bitLength = bound.bitLength();
         BigInteger result;
+
         do {
             result = new BigInteger(bitLength, rng);
         } while (result.compareTo(bound) >= 0);
+
         return result;
     }
 
@@ -355,11 +387,12 @@ public final class IpPrefix {
     private static byte @NotNull [] toFixedBytes(@NotNull BigInteger value, int size) {
         byte[] raw = value.toByteArray();
         byte[] result = new byte[size];
-        if (raw.length > size) {
+
+        if (raw.length > size)
             System.arraycopy(raw, raw.length - size, result, 0, size);
-        } else {
+        else
             System.arraycopy(raw, 0, result, size - raw.length, raw.length);
-        }
+
         return result;
     }
 

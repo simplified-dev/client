@@ -2,6 +2,7 @@ package dev.simplified.client.subnet.pool;
 
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
+import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.subnet.SubnetRotation;
 import dev.simplified.gson.GsonSettings;
 import org.junit.jupiter.api.DisplayName;
@@ -26,6 +27,8 @@ class SubnetBucketPoolTest {
             .build();
         return SubnetBucketPool.create(
             rotation,
+            new RateLimitManager(),
+            "127.0.0.1:0",
             baseConfig(),
             UnaryOperator.identity(),
             (Predicate<Client<TestContract>>) client -> true
