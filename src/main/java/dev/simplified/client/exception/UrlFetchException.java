@@ -7,7 +7,7 @@ import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import lombok.Getter;
-import org.apache.http.protocol.HttpContext;
+import org.apache.hc.core5.http.protocol.HttpContext;
 import org.intellij.lang.annotations.PrintFormat;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
