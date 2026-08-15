@@ -71,7 +71,7 @@ All development is based on the `master` branch.
 ### Code Style
 
 - Follow standard Java conventions and the existing code patterns in the project.
-- Use [Lombok](https://projectlombok.org/) annotations where the project already does (e.g., `@Getter`, `@Builder`, `@RequiredArgsConstructor`).
+- Use [Simplified Annotations](https://github.com/simplified-dev/annotations) where the project already does (e.g., `@Getter`, `@RequiredArgsConstructor`, `@EnumLookup`).
 - Use [JetBrains Annotations](https://github.com/JetBrains/java-annotations) (`@NotNull`, `@Nullable`) for nullability contracts on public APIs.
 - Write Javadoc for all public classes and methods.
 - Omit braces on single-line control flow bodies; use braces when the body wraps to multiple lines.
