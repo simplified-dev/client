@@ -1,5 +1,7 @@
 package dev.simplified.client.response;
 
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.cache.CacheControl;
 import dev.simplified.client.cache.CloudflareCacheStatus;
 import dev.simplified.client.cache.ResponseCache;
@@ -9,9 +11,7 @@ import dev.simplified.client.util.HttpDates;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.util.Lazy;
-import lombok.AccessLevel;
-import lombok.Getter;
+import dev.simplified.lazy.Lazy;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;
@@ -304,11 +304,6 @@ public interface Response<T> {
             return this.headers.get();
         }
 
-        @Override
-        public @NotNull Request getRequest() {
-            return this.request;
-        }
-
         /**
          * Builds a new {@code Impl} that swaps the underlying anchor for {@code newAnchor}
          * while preserving the original body decoder.
@@ -403,11 +398,6 @@ public interface Response<T> {
         @Override
         public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
             return this.headers.get();
-        }
-
-        @Override
-        public @NotNull Request getRequest() {
-            return this.request;
         }
 
     }

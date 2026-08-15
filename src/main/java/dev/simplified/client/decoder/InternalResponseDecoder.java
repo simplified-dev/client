@@ -1,5 +1,6 @@
 package dev.simplified.client.decoder;
 
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
@@ -84,6 +85,7 @@ import java.util.function.Supplier;
  * @see NetworkDetails
  * @see Response
  */
+@RequiredArgsConstructor
 public final class InternalResponseDecoder implements Decoder {
 
     /**
@@ -100,17 +102,6 @@ public final class InternalResponseDecoder implements Decoder {
      * The shared response cache used for observability and RFC 7234 storage.
      */
     private final @NotNull ResponseCache responseCache;
-
-    /**
-     * Constructs a new internal response decoder.
-     *
-     * @param delegate the inner decoder to which JSON-to-object conversion is delegated
-     * @param responseCache the shared response cache for observability and storage
-     */
-    public InternalResponseDecoder(@NotNull Decoder delegate, @NotNull ResponseCache responseCache) {
-        this.delegate = delegate;
-        this.responseCache = responseCache;
-    }
 
     /**
      * {@inheritDoc}

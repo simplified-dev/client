@@ -1,8 +1,8 @@
 package dev.simplified.client.util;
 
+import dev.simplified.annotations.UtilityClass;
 import dev.simplified.client.cache.CacheControl;
 import dev.simplified.util.StringUtil;
-import lombok.experimental.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 

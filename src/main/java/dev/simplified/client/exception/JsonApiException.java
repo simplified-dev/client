@@ -1,10 +1,10 @@
 package dev.simplified.client.exception;
 
 import com.google.gson.Gson;
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
-import dev.simplified.util.Lazy;
-import lombok.AccessLevel;
-import lombok.Getter;
+import dev.simplified.lazy.Lazy;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.Constructor;

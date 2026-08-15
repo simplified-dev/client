@@ -2,6 +2,7 @@ package dev.simplified.client.exception;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.request.Request;
@@ -10,8 +11,7 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.util.Lazy;
-import lombok.Getter;
+import dev.simplified.lazy.Lazy;
 import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -239,18 +239,8 @@ public class ApiException extends RuntimeException implements Response<Optional<
     }
 
     @Override
-    public @NotNull Optional<byte[]> getBody() {
-        return this.body;
-    }
-
-    @Override
     public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
         return this.headers.get();
-    }
-
-    @Override
-    public @NotNull Request getRequest() {
-        return this.request;
     }
 
     /**

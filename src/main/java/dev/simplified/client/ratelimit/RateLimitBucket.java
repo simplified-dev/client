@@ -1,6 +1,6 @@
 package dev.simplified.client.ratelimit;
 
-import lombok.Getter;
+import dev.simplified.annotations.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.concurrent.atomic.AtomicLong;

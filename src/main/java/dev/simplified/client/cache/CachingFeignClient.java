@@ -1,12 +1,12 @@
 package dev.simplified.client.cache;
 
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.Client;
 import feign.Request;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 

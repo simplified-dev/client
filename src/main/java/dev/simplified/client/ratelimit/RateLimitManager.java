@@ -1,10 +1,10 @@
 package dev.simplified.client.ratelimit;
 
+import dev.simplified.annotations.NoArgsConstructor;
 import dev.simplified.client.Client;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
-import lombok.NoArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
 /**

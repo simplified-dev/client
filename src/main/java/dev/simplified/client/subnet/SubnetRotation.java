@@ -1,11 +1,11 @@
 package dev.simplified.client.subnet;
 
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.NoArgsConstructor;
 import dev.simplified.client.Proxy;
 import dev.simplified.client.ratelimit.RateLimitConfig;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.route.DynamicRouteProvider;
-import lombok.AccessLevel;
-import lombok.NoArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
 import java.math.BigInteger;

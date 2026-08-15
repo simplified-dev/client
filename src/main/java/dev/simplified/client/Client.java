@@ -1,6 +1,8 @@
 package dev.simplified.client;
 
 import com.google.gson.Gson;
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.decoder.ClientErrorDecoder;
@@ -28,8 +30,6 @@ import dev.simplified.gson.GsonSettings;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
 import feign.hc5.ApacheHttp5Client;
-import lombok.AccessLevel;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;

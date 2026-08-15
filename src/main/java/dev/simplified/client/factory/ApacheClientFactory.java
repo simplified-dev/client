@@ -1,9 +1,9 @@
 package dev.simplified.client.factory;
 
+import dev.simplified.annotations.UtilityClass;
 import dev.simplified.client.Client;
 import dev.simplified.client.request.Timings;
 import dev.simplified.client.response.NetworkDetails;
-import lombok.experimental.UtilityClass;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.apache.hc.client5.http.config.RequestConfig;
 import org.apache.hc.client5.http.impl.DefaultConnectionKeepAliveStrategy;

@@ -1,7 +1,8 @@
 package dev.simplified.client.response;
 
+import dev.simplified.annotations.EnumLookup;
+import dev.simplified.annotations.Getter;
 import dev.simplified.util.StringUtil;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -33,6 +34,7 @@ import java.util.Map;
  * @see HttpState
  * @see Response
  */
+@EnumLookup
 @Getter
 public enum HttpStatus {
 
@@ -498,11 +500,6 @@ public enum HttpStatus {
      * {@code 999 Unknown Error} - an unclassifiable Java-level error occurred.
      */
     UNKNOWN_ERROR(999, HttpState.JAVA_ERROR);
-
-    /**
-     * Cached snapshot of {@link #values()} reused by lookups and iteration to avoid the per-call defensive array clone.
-     */
-    private static final HttpStatus @NotNull [] CACHED_VALUES = values();
 
     /**
      * Index of status codes to enum constants for O(1) lookup by numeric code.

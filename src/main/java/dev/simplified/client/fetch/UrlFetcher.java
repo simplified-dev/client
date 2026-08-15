@@ -1,6 +1,7 @@
 package dev.simplified.client.fetch;
 
 import com.google.gson.Gson;
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CacheEntry;
 import dev.simplified.client.cache.CacheKey;
@@ -18,7 +19,6 @@ import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.util.time.Stopwatch;
-import lombok.Getter;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;

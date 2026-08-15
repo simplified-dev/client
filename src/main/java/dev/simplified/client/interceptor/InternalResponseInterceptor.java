@@ -1,5 +1,6 @@
 package dev.simplified.client.interceptor;
 
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.ratelimit.RateLimit;
@@ -7,7 +8,6 @@ import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.route.RouteDiscovery;
 import feign.InvocationContext;
 import feign.ResponseInterceptor;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collection;

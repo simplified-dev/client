@@ -1,7 +1,7 @@
 package dev.simplified.client.util;
 
+import dev.simplified.annotations.UtilityClass;
 import dev.simplified.util.StringUtil;
-import lombok.experimental.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
