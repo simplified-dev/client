@@ -246,8 +246,7 @@ client/
 ├── settings.gradle.kts
 ├── gradle/
 │   └── libs.versions.toml
-├── LICENSE.md
-└── lombok.config
+└── LICENSE.md
 ```
 
 ## Dependencies
@@ -259,7 +258,7 @@ client/
 | [Gson](https://github.com/google/gson) | 2.11.0 | API |
 | [Log4j2](https://logging.apache.org/log4j/) | 2.25.3 | API |
 | [JetBrains Annotations](https://github.com/JetBrains/java-annotations) | 26.0.2 | API |
-| [Lombok](https://projectlombok.org/) | 1.18.36 | Compile-only |
+| [Simplified Annotations](https://github.com/simplified-dev/annotations) | 2.5.1 | Implementation |
 | [collections](https://github.com/Simplified-Dev/collections) | master-SNAPSHOT | API (Simplified-Dev) |
 | [utils](https://github.com/Simplified-Dev/utils) | master-SNAPSHOT | API (Simplified-Dev) |
 | [reflection](https://github.com/Simplified-Dev/reflection) | master-SNAPSHOT | API (Simplified-Dev) |
