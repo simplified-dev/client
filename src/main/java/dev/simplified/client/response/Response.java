@@ -2,6 +2,7 @@ package dev.simplified.client.response;
 
 import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.Lazy;
 import dev.simplified.client.cache.CacheControl;
 import dev.simplified.client.cache.CloudflareCacheStatus;
 import dev.simplified.client.cache.ResponseCache;
@@ -11,7 +12,6 @@ import dev.simplified.client.util.HttpDates;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.lazy.Lazy;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;
@@ -220,7 +220,7 @@ public interface Response<T> {
      * decoded body is materialized on demand by a caller-supplied {@link Supplier}.
      * <p>
      * The decoded body, network details, headers, and originating request are all derived
-     * on demand via memoizing {@link Lazy} holders. Callers that only read
+     * on demand and memoized on first read. Callers that only read
      * {@link #getStatus()} pay zero decode cost; callers that read {@link #getBody()} drive
      * the supplied {@link Supplier} exactly once to materialize the typed body. The body
      * supplier closes over any bytes it needs, so the anchor's body need not be readable
@@ -248,20 +248,22 @@ public interface Response<T> {
         private final @NotNull Supplier<T> bodyDecoder;
 
         /**
-         * Memoized decoded body, materialized on the first call to {@link #getBody()}.
+         * The decoded body, materialized on the first call to {@link #getBody()}.
          */
-        @Getter(AccessLevel.NONE)
-        private final @NotNull Lazy<T> body;
+        @Lazy
+        private final @NotNull T body;
 
         /**
-         * Memoized network timing and TLS metadata derived from {@link #anchor}.
+         * Network timing and TLS metadata derived from {@link #anchor} on first read.
          */
-        private final @NotNull Lazy<NetworkDetails> details;
+        @Lazy
+        private final @NotNull NetworkDetails details;
 
         /**
-         * Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}.
+         * Response headers, internal instrumentation entries excluded, derived from {@link #anchor} on first read.
          */
-        private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
+        @Lazy
+        private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
 
         /**
          * Eagerly-built originating request wrapper around {@link #anchor}'s method and URL.
@@ -280,28 +282,13 @@ public interface Response<T> {
             this.anchor = anchor;
             this.bodyDecoder = bodyDecoder;
             this.status = HttpStatus.of(anchor.status());
-            this.body = Lazy.of(this.bodyDecoder);
-            this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
-            this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
+            this.body = this.bodyDecoder.get();
+            this.details = new NetworkDetails(this.anchor);
+            this.headers = Response.getHeaders(this.anchor.headers());
             this.request = new Request.Impl(
                 HttpMethod.of(anchor.request().httpMethod().name()),
                 anchor.request().url()
             );
-        }
-
-        @Override
-        public @NotNull T getBody() {
-            return this.body.get();
-        }
-
-        @Override
-        public @NotNull NetworkDetails getDetails() {
-            return this.details.get();
-        }
-
-        @Override
-        public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
-            return this.headers.get();
         }
 
         /**
@@ -358,14 +345,16 @@ public interface Response<T> {
         private final @NotNull T body;
 
         /**
-         * Memoized network timing and TLS metadata derived from {@link #anchor}.
+         * Network timing and TLS metadata derived from {@link #anchor} on first read.
          */
-        private final @NotNull Lazy<NetworkDetails> details;
+        @Lazy
+        private final @NotNull NetworkDetails details;
 
         /**
-         * Memoized response headers (internal instrumentation headers excluded) derived from {@link #anchor}.
+         * Response headers, internal instrumentation entries excluded, derived from {@link #anchor} on first read.
          */
-        private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
+        @Lazy
+        private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
 
         /**
          * Eagerly-built originating request wrapper around {@link #anchor}'s method and URL.
@@ -382,22 +371,12 @@ public interface Response<T> {
             this.anchor = anchor;
             this.body = body;
             this.status = HttpStatus.of(anchor.status());
-            this.details = Lazy.of(() -> new NetworkDetails(this.anchor));
-            this.headers = Lazy.of(() -> Response.getHeaders(this.anchor.headers()));
+            this.details = new NetworkDetails(this.anchor);
+            this.headers = Response.getHeaders(this.anchor.headers());
             this.request = new Request.Impl(
                 HttpMethod.of(anchor.request().httpMethod().name()),
                 anchor.request().url()
             );
-        }
-
-        @Override
-        public @NotNull NetworkDetails getDetails() {
-            return this.details.get();
-        }
-
-        @Override
-        public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
-            return this.headers.get();
         }
 
     }
@@ -431,22 +410,22 @@ public interface Response<T> {
         private final @NotNull Request request;
 
         /**
-         * Memoized network timing and TLS metadata; materialized on the first call to {@link #getDetails()}.
+         * Network timing and TLS metadata, materialized on the first call to {@link #getDetails()}.
          */
-        @Getter(AccessLevel.NONE)
-        private final @NotNull Lazy<NetworkDetails> details;
+        @Lazy
+        private final @NotNull NetworkDetails details;
 
         /**
-         * Memoized response headers (internal {@code X-Internal-} prefixed entries filtered out); materialized on the first call to {@link #getHeaders()}.
+         * Response headers, internal {@code X-Internal-} prefixed entries filtered out, materialized on the first call to {@link #getHeaders()}.
          */
-        @Getter(AccessLevel.NONE)
-        private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
+        @Lazy
+        private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
 
         /**
-         * Memoized decoded body, materialized on the first call to {@link #getBody()}.
+         * The decoded body, materialized on the first call to {@link #getBody()}.
          */
-        @Getter(AccessLevel.NONE)
-        private final @NotNull Lazy<T> body;
+        @Lazy
+        private final @NotNull T body;
 
         /**
          * Constructs a directly-built buffered response with deferred details, headers, and body.
@@ -470,59 +449,43 @@ public interface Response<T> {
             this(
                 status,
                 request,
-                Lazy.of(detailsSupplier),
-                Lazy.of(() -> Response.getHeaders(headers)),
-                Lazy.of(bodyDecoder)
+                detailsSupplier,
+                () -> Response.getHeaders(headers),
+                bodyDecoder
             );
         }
 
         /**
          * State-sharing constructor used by {@link #withBody(Supplier)} to retype the body
-         * decoder without rebuilding the details / headers lazies.
+         * decoder without resolving the details or the headers.
          *
          * @param status the HTTP status code, shared with the source envelope
          * @param request the originating request, shared with the source envelope
-         * @param details the memoized network details, shared with the source envelope
-         * @param headers the memoized cleaned headers, shared with the source envelope
-         * @param body the new body lazy for the retyped envelope
+         * @param details supplies the network details on their first read
+         * @param headers supplies the cleaned headers on their first read
+         * @param body supplies the body of the retyped envelope on its first read
          */
         private DirectImpl(
             @NotNull HttpStatus status,
             @NotNull Request request,
-            @NotNull Lazy<NetworkDetails> details,
-            @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers,
-            @NotNull Lazy<T> body
+            @NotNull Supplier<NetworkDetails> details,
+            @NotNull Supplier<ConcurrentMap<String, ConcurrentList<String>>> headers,
+            @NotNull Supplier<T> body
         ) {
             this.status = status;
             this.request = request;
-            this.details = details;
-            this.headers = headers;
-            this.body = body;
-        }
-
-        @Override
-        public @NotNull NetworkDetails getDetails() {
-            return this.details.get();
-        }
-
-        @Override
-        public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
-            return this.headers.get();
-        }
-
-        @Override
-        public @NotNull T getBody() {
-            return this.body.get();
+            this.details = details.get();
+            this.headers = headers.get();
+            this.body = body.get();
         }
 
         /**
          * Returns a new {@code DirectImpl} sharing this envelope's status, request, network
          * details, and headers but exposing a different body type via {@code bodyDecoder}.
          * <p>
-         * Lazy state is carried forward by reference: if the source's
-         * {@link #getDetails()} / {@link #getHeaders()} have already been resolved, the
-         * retype sees the cached values; if not, the original suppliers are still in play
-         * and the first access on either envelope resolves both. Used to retype a buffered
+         * Neither is resolved by the retype: the returned envelope reads the source's own
+         * accessors on first access, so a source that has already resolved hands over the
+         * memoized value and one that has not stays deferred on both. Used to retype a buffered
          * byte body into a typed body (e.g. {@code String}, a Gson-deserialized object)
          * without re-cleaning headers or re-parsing timing metadata.
          *
@@ -531,7 +494,7 @@ public interface Response<T> {
          * @return a new {@code DirectImpl<U>} sharing this envelope's metadata
          */
         public <U> @NotNull DirectImpl<U> withBody(@NotNull Supplier<U> bodyDecoder) {
-            return new DirectImpl<>(this.status, this.request, this.details, this.headers, Lazy.of(bodyDecoder));
+            return new DirectImpl<>(this.status, this.request, this::getDetails, this::getHeaders, bodyDecoder);
         }
 
     }
@@ -578,13 +541,13 @@ public interface Response<T> {
         private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
 
         /**
-         * Lazily-parsed {@code Cache-Control} directives derived from {@link #headers}.
-         * Populated on first access via {@link Lazy#get()} and reused for the lifetime of
-         * this {@code CachedImpl} - {@code freshnessLifetime}, {@code mustRevalidate},
-         * {@code staleIfError}, and {@code canServeStaleOnError} all consult the same
-         * memoised view.
+         * The {@code Cache-Control} directives parsed from {@link #headers}, read once and
+         * reused for the lifetime of this {@code CachedImpl} - {@code freshnessLifetime},
+         * {@code mustRevalidate}, {@code staleIfError} and {@code canServeStaleOnError} all
+         * consult the same memoised view.
          */
-        private final @NotNull Lazy<CacheControl> cacheControl;
+        @Lazy(access = AccessLevel.PRIVATE)
+        private final @NotNull CacheControl cacheControl;
 
         /**
          * Constructs a cached view wrapping the given source with the given headers.
@@ -595,7 +558,7 @@ public interface Response<T> {
         private CachedImpl(@NotNull Response<T> source, @NotNull ConcurrentMap<String, ConcurrentList<String>> headers) {
             this.source = source;
             this.headers = headers;
-            this.cacheControl = Lazy.of(() -> CacheControl.parseFromHeaders(headers));
+            this.cacheControl = CacheControl.parseFromHeaders(headers);
         }
 
         /**
@@ -667,7 +630,7 @@ public interface Response<T> {
          *         absent
          */
         public @NotNull CacheControl cacheControl() {
-            return this.cacheControl.get();
+            return this.getCacheControl();
         }
 
         /**

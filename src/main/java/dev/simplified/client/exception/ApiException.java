@@ -3,6 +3,7 @@ package dev.simplified.client.exception;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.Lazy;
 import dev.simplified.client.Client;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.request.Request;
@@ -11,7 +12,6 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.lazy.Lazy;
 import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -22,6 +22,7 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Thrown when an HTTP request to a remote API fails.
@@ -39,9 +40,9 @@ import java.util.Optional;
  * <p>
  * The exception stores a single immutable {@link ErrorContext} record carrying only
  * non-feign primitives. {@link #getStatus()}, {@link #getBody()}, and {@link #getRequest()}
- * resolve via eagerly-populated fields (the underlying allocations are cheaper than the
- * {@link Lazy} holder overhead would be). {@link #getDetails()} and {@link #getHeaders()}
- * are memoized via {@link Lazy} because their suppliers do non-trivial work
+ * resolve via eagerly-populated fields, the underlying allocations being cheaper than
+ * deferring them would be. {@link #getDetails()} and {@link #getHeaders()} are computed on
+ * first read and memoized, because both do non-trivial work
  * ({@code Instant} parsing for {@link NetworkDetails}, {@code TreeMap} construction +
  * filter + {@code Concurrent} wrappers for the cleaned headers) that the dominant
  * status-only access pattern can skip entirely.
@@ -84,14 +85,16 @@ public class ApiException extends RuntimeException implements Response<Optional<
     private final @NotNull Request request;
 
     /**
-     * Memoized network timing and TLS metadata, lazily built from {@code context}'s header maps.
+     * Network timing and TLS metadata, built from {@code context}'s header maps on first read.
      */
-    private final @NotNull Lazy<NetworkDetails> details;
+    @Lazy
+    private final @NotNull NetworkDetails details;
 
     /**
-     * Memoized response headers (internal instrumentation headers excluded) derived from {@link #context}.
+     * Response headers, internal instrumentation entries excluded, derived from {@link #context} on first read.
      */
-    private final @NotNull Lazy<ConcurrentMap<String, ConcurrentList<String>>> headers;
+    @Lazy
+    private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
 
     /**
      * The structured error response parsed from the response body.
@@ -110,7 +113,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * that returns the synthesized exception message; subclass error decoders typically
      * replace it with a properly deserialized instance. The status, body, and originating
      * request are populated eagerly from {@code context}; the headers and network details
-     * are deferred via {@link Lazy} until first access.
+     * are deferred until first access.
      *
      * @param cause the underlying cause of the failure, or {@code null} if none
      * @param name a short name classifying this error type
@@ -164,7 +167,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
             cause,
             name,
             context,
-            Lazy.of(() -> new NetworkDetails(context.responseHeaders(), context.requestHeaders())),
+            () -> new NetworkDetails(context.responseHeaders(), context.requestHeaders()),
             message,
             writableStackTrace
         );
@@ -177,9 +180,8 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * Used when the caller obtains timing metadata from a non-feign source - typically Apache's
      * {@link HttpContext} via the standalone {@code UrlFetcher} - so
      * the timing data is preserved without round-tripping through the request-headers map.
-     * The supplied {@code NetworkDetails} is held inside a resolved-on-first-access {@link Lazy}
-     * to share the lookup path with the header-map case; first {@link #getDetails()} call
-     * returns the supplied instance directly with no parsing.
+     * The supplied {@code NetworkDetails} shares the deferred lookup path with the header-map
+     * case, so the first {@link #getDetails()} call returns it directly with no parsing.
      *
      * @param cause the underlying cause of the failure, or {@code null} if none
      * @param name a short name classifying this error type
@@ -196,7 +198,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
         @NotNull String message,
         boolean writableStackTrace
     ) {
-        this(cause, name, context, Lazy.of(() -> prebuiltDetails), message, writableStackTrace);
+        this(cause, name, context, () -> prebuiltDetails, message, writableStackTrace);
     }
 
     /**
@@ -205,7 +207,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
      * @param cause the underlying cause of the failure, or {@code null} if none
      * @param name a short name classifying this error type
      * @param context the primitive HTTP context bundle
-     * @param details the lazy holder driving {@link #getDetails()}
+     * @param details supplies the value behind {@link #getDetails()} on its first read
      * @param message the pre-formatted detail message
      * @param writableStackTrace whether this exception should capture a stack trace
      */
@@ -213,7 +215,7 @@ public class ApiException extends RuntimeException implements Response<Optional<
         @Nullable Throwable cause,
         @NotNull String name,
         @NotNull ErrorContext context,
-        @NotNull Lazy<NetworkDetails> details,
+        @NotNull Supplier<NetworkDetails> details,
         @NotNull String message,
         boolean writableStackTrace
     ) {
@@ -223,24 +225,14 @@ public class ApiException extends RuntimeException implements Response<Optional<
         byte[] bytes = context.bodyBytes();
         this.body = bytes.length == 0 ? Optional.empty() : Optional.of(bytes);
         this.request = new Request.Impl(context.requestMethod(), context.requestUrl());
-        this.details = details;
-        this.headers = Lazy.of(() -> Response.getHeaders(context.responseHeaders()));
+        this.details = details.get();
+        this.headers = Response.getHeaders(context.responseHeaders());
         this.response = super::getMessage;
     }
 
     @Override
     public @NotNull HttpStatus getStatus() {
         return this.context.status();
-    }
-
-    @Override
-    public @NotNull NetworkDetails getDetails() {
-        return this.details.get();
-    }
-
-    @Override
-    public @NotNull ConcurrentMap<String, ConcurrentList<String>> getHeaders() {
-        return this.headers.get();
     }
 
     /**

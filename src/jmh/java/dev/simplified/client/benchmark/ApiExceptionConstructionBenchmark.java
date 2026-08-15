@@ -9,7 +9,6 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
-import dev.simplified.lazy.Lazy;
 import org.jetbrains.annotations.NotNull;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -50,8 +49,8 @@ import java.util.concurrent.TimeUnit;
  *       lazy-eligible fields. Establishes the upper bound of what laziness must
  *       eventually defer.</li>
  *   <li>{@code lazyConstruct_allFields} - New lazy pattern, caller reads all four
- *       lazy-eligible fields. Quantifies the {@link Lazy}
- *       wrapper overhead when every field is materialized anyway.</li>
+ *       lazy-eligible fields. Quantifies the deferral wrapper's overhead when every
+ *       field is materialized anyway.</li>
  * </ul>
  *
  * <p>Each iteration constructs from a fixed, realistic 200 B JSON body plus 15 headers
