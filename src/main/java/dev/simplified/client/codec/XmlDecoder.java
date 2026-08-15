@@ -12,13 +12,14 @@ import com.google.gson.JsonPrimitive;
 import com.google.gson.TypeAdapter;
 import com.google.gson.TypeAdapterFactory;
 import com.google.gson.annotations.SerializedName;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.exception.ApiDecodeException;
 import feign.Response;
 import feign.codec.DecodeException;
 import feign.codec.Decoder;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 import org.jspecify.annotations.Nullable;
 
@@ -72,6 +73,7 @@ import java.util.function.UnaryOperator;
  * @see InternalResponseDecoder
  */
 @Getter
+@RequiredArgsConstructor
 public final class XmlDecoder implements Decoder {
 
     /**
@@ -118,23 +120,6 @@ public final class XmlDecoder implements Decoder {
      */
     public XmlDecoder(@NotNull Gson gson, @NotNull XmlMapper xmlMapper) {
         this(gson, xmlMapper, UnaryOperator.identity());
-    }
-
-    /**
-     * Constructs a new {@code XmlDecoder} with a caller-provided {@link XmlMapper} and a
-     * tree rewriter applied before Gson binding.
-     *
-     * @param gson the Gson instance used for the final {@link JsonElement} to DTO binding
-     * @param xmlMapper the Jackson {@link XmlMapper} used to parse raw XML into a
-     *                  {@link JsonNode} tree
-     * @param treeTransformer a rewriter applied to the converted Gson {@link JsonElement}
-     *                        tree before it is passed to Gson, used as an escape hatch for
-     *                        feed-specific quirks such as namespace-prefix collisions
-     */
-    public XmlDecoder(@NotNull Gson gson, @NotNull XmlMapper xmlMapper, @NotNull UnaryOperator<JsonElement> treeTransformer) {
-        this.gson = gson;
-        this.xmlMapper = xmlMapper;
-        this.treeTransformer = treeTransformer;
     }
 
     /**

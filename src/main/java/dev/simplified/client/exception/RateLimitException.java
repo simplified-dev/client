@@ -1,5 +1,6 @@
 package dev.simplified.client.exception;
 
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.HttpMethod;
@@ -8,7 +9,6 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.pool.SubnetBucket;
 import feign.RequestTemplate;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collections;

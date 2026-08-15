@@ -1,5 +1,6 @@
 package dev.simplified.client.exception;
 
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import feign.RetryableException;
 import org.jetbrains.annotations.NotNull;
@@ -32,8 +33,11 @@ import org.jetbrains.annotations.NotNull;
 public final class RetryableApiException extends RetryableException {
 
     /**
-     * The original {@link ApiException} that triggered the retry.
+     * The original {@link ApiException} that triggered the retry, carrying the fully-typed,
+     * domain-specific exception (e.g. {@link RateLimitException}) once Feign's retry cycle
+     * completes or is exhausted.
      */
+    @Getter
     private final @NotNull ApiException wrappedException;
 
     /**
@@ -66,19 +70,6 @@ public final class RetryableApiException extends RetryableException {
         );
 
         this.wrappedException = apiException;
-    }
-
-    /**
-     * Returns the original {@link ApiException} that was wrapped for retry.
-     * <p>
-     * Callers should use this method to obtain the fully-typed, domain-specific
-     * exception (e.g. {@link RateLimitException}) once Feign's retry cycle
-     * completes or is exhausted.
-     *
-     * @return the underlying API exception, never {@code null}
-     */
-    public @NotNull ApiException getWrappedException() {
-        return this.wrappedException;
     }
 
     /**

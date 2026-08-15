@@ -1,6 +1,9 @@
 package dev.simplified.client;
 
 import com.google.gson.Gson;
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Proxy;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
@@ -17,16 +20,13 @@ import dev.simplified.client.subnet.pool.SubnetBucket;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.gson.GsonSettings;
+import dev.simplified.lazy.Lazy;
 import dev.simplified.reflection.Reflection;
 import dev.simplified.reflection.accessor.MethodAccessor;
-import dev.simplified.util.Lazy;
 import feign.codec.Decoder;
 import feign.codec.Encoder;
 import feign.gson.GsonDecoder;
 import feign.gson.GsonEncoder;
-import lombok.AccessLevel;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 

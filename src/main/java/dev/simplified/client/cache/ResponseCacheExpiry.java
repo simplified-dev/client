@@ -1,8 +1,8 @@
 package dev.simplified.client.cache;
 
 import com.github.benmanes.caffeine.cache.Expiry;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.response.Response;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
 import java.time.Duration;

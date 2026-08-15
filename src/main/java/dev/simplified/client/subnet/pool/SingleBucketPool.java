@@ -1,12 +1,12 @@
 package dev.simplified.client.subnet.pool;
 
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.subnet.SubnetRotation;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.function.Predicate;

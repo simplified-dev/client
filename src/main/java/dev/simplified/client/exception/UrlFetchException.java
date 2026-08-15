@@ -1,12 +1,12 @@
 package dev.simplified.client.exception;
 
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.fetch.UrlFetcher;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
-import lombok.Getter;
 import org.apache.hc.core5.http.protocol.HttpContext;
 import org.intellij.lang.annotations.PrintFormat;
 import org.jetbrains.annotations.NotNull;

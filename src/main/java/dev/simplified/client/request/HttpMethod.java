@@ -1,13 +1,10 @@
 package dev.simplified.client.request;
 
+import dev.simplified.annotations.EnumLookup;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Client;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
-
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
 
 /**
  * Enumeration of standard HTTP request methods as defined by RFC 7231 and RFC 5789.
@@ -23,6 +20,7 @@ import java.util.Map;
  * @see Request
  * @see dev.simplified.client.Client
  */
+@EnumLookup
 @Getter
 @RequiredArgsConstructor
 public enum HttpMethod {
@@ -73,25 +71,6 @@ public enum HttpMethod {
     PATCH(true);
 
     /**
-     * Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone.
-     */
-    private static final HttpMethod @NotNull [] CACHED_VALUES = values();
-
-    /**
-     * Index of uppercase method names to enum constants for O(1) lookup by canonical name.
-     */
-    private static final @NotNull Map<String, HttpMethod> BY_NAME;
-
-    static {
-        Map<String, HttpMethod> byName = new HashMap<>(CACHED_VALUES.length * 2);
-
-        for (HttpMethod value : CACHED_VALUES)
-            byName.put(value.name(), value);
-
-        BY_NAME = Map.copyOf(byName);
-    }
-
-    /**
      * Whether this HTTP method conventionally carries a request body.
      */
     private final boolean withBody;
@@ -140,19 +119,13 @@ public enum HttpMethod {
     /**
      * Resolves an {@code HttpMethod} from its name using a case-insensitive comparison.
      * <p>
-     * Most internal callers pass an already-uppercase string (e.g. {@code enum.name()}); the
-     * direct lookup is attempted first to skip the {@link String#toUpperCase(Locale)
-     * String.toUpperCase} scan in that case. Mixed-case inputs fall through to the
-     * canonicalised lookup. If no matching constant is found, {@link #GET} is returned as
-     * the default.
+     * If no matching constant is found, {@link #GET} is returned as the default.
      *
      * @param name the HTTP method name to look up (e.g. {@code "post"}, {@code "GET"})
      * @return the matching {@code HttpMethod}, or {@link #GET} if no match is found
      */
     public static @NotNull HttpMethod of(@NotNull String name) {
-        HttpMethod method = BY_NAME.get(name);
-        if (method != null) return method;
-        method = BY_NAME.get(name.toUpperCase(Locale.ROOT));
+        HttpMethod method = ofName(name);
         return method != null ? method : GET;
     }
 

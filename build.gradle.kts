@@ -40,10 +40,10 @@ configurations[springBench.runtimeOnlyConfigurationName].extendsFrom(configurati
 
 dependencies {
     // Simplified Libraries
-    api("com.github.simplified-dev:collections") { version { strictly("7699a31") } }
-    api("com.github.simplified-dev:utils") { version { strictly("036cc09") } }
-    api("com.github.simplified-dev:reflection") { version { strictly("33b2f05") } }
-    api("com.github.simplified-dev:gson-extras") { version { strictly("6421324") } }
+    api("com.github.simplified-dev:collections") { version { strictly("23f01b6") } }
+    api("com.github.simplified-dev:utils") { version { strictly("381e317") } }
+    api("com.github.simplified-dev:reflection") { version { strictly("d02f3ea") } }
+    api("com.github.simplified-dev:gson-extras") { version { strictly("c4bde8d") } }
 
     // JetBrains Annotations
     api(libs.annotations)
@@ -51,9 +51,11 @@ dependencies {
     // Logging
     api(libs.log4j2.api)
 
-    // Lombok Annotations
-    compileOnly(libs.lombok)
-    annotationProcessor(libs.lombok)
+    // Simplified Annotations
+    implementation(libs.simplified.annotations)
+    annotationProcessor(libs.simplified.annotations)
+    testCompileOnly(libs.simplified.annotations)
+    testAnnotationProcessor(libs.simplified.annotations)
 
     // Serialization
     api(libs.gson)
@@ -77,8 +79,7 @@ dependencies {
     // Spring bench - throwaway Spring Boot app for end-to-end concurrency measurement
     // Lives in src/springBench. Run via :runSpringBench / :runMockMojang Gradle tasks.
     "springBenchImplementation"(libs.spring.boot.web)
-    "springBenchCompileOnly"(libs.lombok)
-    "springBenchAnnotationProcessor"(libs.lombok)
+    "springBenchAnnotationProcessor"(libs.simplified.annotations)
 
     // Tests
     testImplementation(libs.hamcrest)

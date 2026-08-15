@@ -1,5 +1,6 @@
 package dev.simplified.client.factory;
 
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Client;
 import dev.simplified.client.response.NetworkDetails;
 import org.apache.hc.client5.http.ssl.DefaultClientTlsStrategy;
@@ -7,11 +8,11 @@ import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
 import org.apache.hc.core5.http.protocol.HttpContext;
 import org.jetbrains.annotations.NotNull;
 
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocket;
 import java.io.IOException;
 import java.net.Socket;
 import java.time.Instant;
-import javax.net.ssl.SSLSession;
-import javax.net.ssl.SSLSocket;
 
 /**
  * Decorating {@link TlsSocketStrategy} that measures the TLS handshake duration and records
@@ -46,21 +47,13 @@ import javax.net.ssl.SSLSocket;
  * @see NetworkDetails
  * @see dev.simplified.client.Client
  */
+@RequiredArgsConstructor
 public final class TimedTlsSocketStrategy implements TlsSocketStrategy {
 
     /**
      * The inner strategy that performs the actual TLS upgrade.
      */
     private final @NotNull TlsSocketStrategy delegate;
-
-    /**
-     * Constructs a new timed TLS socket strategy.
-     *
-     * @param delegate the inner {@link TlsSocketStrategy} to delegate TLS upgrades to
-     */
-    public TimedTlsSocketStrategy(@NotNull TlsSocketStrategy delegate) {
-        this.delegate = delegate;
-    }
 
     /**
      * {@inheritDoc}

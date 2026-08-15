@@ -1,13 +1,10 @@
 package dev.simplified.client.cache;
 
+import dev.simplified.annotations.EnumLookup;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.response.Response;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
-
-import java.util.HashMap;
-import java.util.Locale;
-import java.util.Map;
 
 /**
  * Enumeration of Cloudflare CDN cache statuses, representing the caching disposition
@@ -23,6 +20,7 @@ import java.util.Map;
  * @see <a href="https://developers.cloudflare.com/cache/concepts/cache-responses/">Cloudflare Cache Responses</a>
  * @see Response#getCloudflareCacheStatus()
  */
+@EnumLookup
 @Getter
 @RequiredArgsConstructor
 public enum CloudflareCacheStatus {
@@ -83,25 +81,6 @@ public enum CloudflareCacheStatus {
     public static final @NotNull String HEADER_KEY = "CF-Cache-Status";
 
     /**
-     * Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone.
-     */
-    private static final CloudflareCacheStatus @NotNull [] CACHED_VALUES = values();
-
-    /**
-     * Index of uppercase status names to enum constants for O(1) case-insensitive lookup.
-     */
-    private static final @NotNull Map<String, CloudflareCacheStatus> BY_NAME;
-
-    static {
-        Map<String, CloudflareCacheStatus> byName = new HashMap<>(CACHED_VALUES.length * 2);
-
-        for (CloudflareCacheStatus value : CACHED_VALUES)
-            byName.put(value.name(), value);
-
-        BY_NAME = Map.copyOf(byName);
-    }
-
-    /**
      * A human-readable description of the caching behavior represented by this constant.
      */
     private final @NotNull String description;
@@ -119,7 +98,7 @@ public enum CloudflareCacheStatus {
      *         no constant matches the provided name
      */
     public static @NotNull CloudflareCacheStatus of(@NotNull String name) {
-        CloudflareCacheStatus status = BY_NAME.get(name.toUpperCase(Locale.ROOT));
+        CloudflareCacheStatus status = ofName(name);
         return status != null ? status : UNKNOWN;
     }
 

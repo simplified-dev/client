@@ -1,6 +1,9 @@
 package dev.simplified.client.fetch;
 
 import com.google.gson.Gson;
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.UrlFetchException;
@@ -9,9 +12,6 @@ import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.Timings;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
-import lombok.AccessLevel;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 

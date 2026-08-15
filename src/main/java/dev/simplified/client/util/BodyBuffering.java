@@ -1,6 +1,6 @@
 package dev.simplified.client.util;
 
-import lombok.experimental.UtilityClass;
+import dev.simplified.annotations.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.ByteArrayOutputStream;

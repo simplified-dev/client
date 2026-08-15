@@ -1,5 +1,5 @@
 [versions]
-lombok = "1.18.36"
+simplified-annotations = "2.5.1"
 annotations = "26.0.2"
 log4j2 = "2.25.3"
 gson = "2.11.0"
@@ -12,7 +12,7 @@ junit-jupiter = "5.11.4"
 hamcrest = "2.2"
 
 [libraries]
-lombok = { group = "org.projectlombok", name = "lombok", version.ref = "lombok" }
+simplified-annotations = { group = "io.github.simplified-dev", name = "annotations", version.ref = "simplified-annotations" }
 annotations = { group = "org.jetbrains", name = "annotations", version.ref = "annotations" }
 log4j2-api = { group = "org.apache.logging.log4j", name = "log4j-api", version.ref = "log4j2" }
 gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }

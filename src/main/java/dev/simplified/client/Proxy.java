@@ -1,5 +1,8 @@
 package dev.simplified.client;
 
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.AsyncAccess;
@@ -9,9 +12,6 @@ import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.SubnetRotation;
 import dev.simplified.client.subnet.pool.SubnetBucketPool;
-import lombok.AccessLevel;
-import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.function.Predicate;

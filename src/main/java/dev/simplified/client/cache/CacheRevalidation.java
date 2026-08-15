@@ -1,9 +1,9 @@
 package dev.simplified.client.cache;
 
+import dev.simplified.annotations.UtilityClass;
 import dev.simplified.client.fetch.UrlFetcher;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.Response;
-import lombok.experimental.UtilityClass;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collection;

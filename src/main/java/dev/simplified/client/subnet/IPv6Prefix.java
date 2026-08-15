@@ -1,12 +1,14 @@
 package dev.simplified.client.subnet;
 
+import dev.simplified.annotations.EqualsAndHashCode;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.NamingStyle;
 import org.jetbrains.annotations.NotNull;
 
 import java.math.BigInteger;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
-import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -26,6 +28,7 @@ import java.util.concurrent.ThreadLocalRandom;
  *
  * @see SubnetRotation
  */
+@EqualsAndHashCode(identity = EqualsAndHashCode.Identity.INSTANCE_OF, exclude = "stringForm")
 public final class IPv6Prefix {
 
     /**
@@ -39,7 +42,13 @@ public final class IPv6Prefix {
     public static final int IPV6_BYTES = 16;
 
     private final byte @NotNull [] networkBytes;
+
+    /**
+     * The prefix length in bits, in {@code [0, 128]}.
+     */
+    @Getter(style = NamingStyle.FLUENT)
     private final int length;
+
     private final @NotNull String stringForm;
 
     private IPv6Prefix(byte @NotNull [] networkBytes, int length) {
@@ -117,15 +126,6 @@ public final class IPv6Prefix {
         byte[] copy = networkBytes.clone();
         applyMask(copy, length);
         return new IPv6Prefix(copy, length);
-    }
-
-    /**
-     * Returns the prefix length in bits.
-     *
-     * @return the length in {@code [0, 128]}
-     */
-    public int length() {
-        return this.length;
     }
 
     /**
@@ -285,18 +285,6 @@ public final class IPv6Prefix {
         } catch (UnknownHostException uhex) {
             throw new IllegalStateException("Unreachable: 16-byte array always produces a valid address", uhex);
         }
-    }
-
-    @Override
-    public boolean equals(Object obj) {
-        if (this == obj) return true;
-        if (!(obj instanceof IPv6Prefix other)) return false;
-        return this.length == other.length && Arrays.equals(this.networkBytes, other.networkBytes);
-    }
-
-    @Override
-    public int hashCode() {
-        return 31 * Arrays.hashCode(this.networkBytes) + this.length;
     }
 
     @Override

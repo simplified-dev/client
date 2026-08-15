@@ -1,7 +1,8 @@
 package dev.simplified.client.response;
 
+import dev.simplified.annotations.EnumLookup;
+import dev.simplified.annotations.Getter;
 import dev.simplified.util.StringUtil;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
 /**
@@ -28,6 +29,7 @@ import org.jetbrains.annotations.NotNull;
  *
  * @see HttpStatus
  */
+@EnumLookup
 @Getter
 public enum HttpState {
 
@@ -75,11 +77,6 @@ public enum HttpState {
      * Application-level Java error responses ({@code 990-999}).
      */
     JAVA_ERROR(990, 999, true);
-
-    /**
-     * Cached snapshot of {@link #values()} reused by lookups to avoid the per-call defensive array clone.
-     */
-    private static final HttpState @NotNull [] CACHED_VALUES = values();
 
     /**
      * The human-readable title derived from the constant name, formatted with {@link StringUtil#capitalizeFully(String)}.

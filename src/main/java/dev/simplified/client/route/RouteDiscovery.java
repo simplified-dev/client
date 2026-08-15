@@ -1,5 +1,6 @@
 package dev.simplified.client.route;
 
+import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
@@ -8,7 +9,6 @@ import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.subnet.IPv6Prefix;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.annotation.Annotation;

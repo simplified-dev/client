@@ -5,11 +5,13 @@ import com.google.gson.JsonElement;
 import com.rometools.rome.feed.synd.SyndFeed;
 import com.rometools.rome.io.FeedException;
 import com.rometools.rome.io.SyndFeedOutput;
+import dev.simplified.annotations.AccessLevel;
+import dev.simplified.annotations.Getter;
+import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.ClientConfig;
 import feign.RequestTemplate;
 import feign.codec.EncodeException;
 import feign.codec.Encoder;
-import lombok.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.StringWriter;
@@ -54,6 +56,7 @@ import java.util.function.Function;
  * @see SyndFeedOutput
  */
 @Getter
+@RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public final class XmlEncoder implements Encoder {
 
     /**
@@ -75,22 +78,6 @@ public final class XmlEncoder implements Encoder {
      * The ROME feed type string (e.g. {@code "rss_2.0"}, {@code "atom_1.0"}) applied when the mapper does not set one.
      */
     private final @NotNull String feedType;
-
-    /**
-     * Constructs a new {@code XmlEncoder}. Not public - call
-     * {@link #of(Class, Function)} or {@link #of(Class, Function, String)} for type-safe
-     * construction.
-     *
-     * @param expectedType the runtime type token validated against every body
-     * @param feedMapper the mapping function converting a typed DTO into a {@link SyndFeed}
-     * @param feedType the ROME feed type string to apply when the mapper returns a feed
-     *                 with no explicit type set
-     */
-    private XmlEncoder(@NotNull Class<?> expectedType, @NotNull Function<Object, SyndFeed> feedMapper, @NotNull String feedType) {
-        this.expectedType = expectedType;
-        this.feedMapper = feedMapper;
-        this.feedType = feedType;
-    }
 
     /**
      * Creates a new {@code XmlEncoder} for the given DTO type with the
