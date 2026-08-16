@@ -40,10 +40,10 @@ configurations[springBench.runtimeOnlyConfigurationName].extendsFrom(configurati
 
 dependencies {
     // Simplified Libraries
-    api("com.github.simplified-dev:collections") { version { strictly("23f01b6") } }
-    api("com.github.simplified-dev:utils") { version { strictly("381e317") } }
-    api("com.github.simplified-dev:reflection") { version { strictly("d02f3ea") } }
-    api("com.github.simplified-dev:gson-extras") { version { strictly("c4bde8d") } }
+    api("com.github.simplified-dev:collections") { version { strictly("8ca6cb8") } }
+    api("com.github.simplified-dev:utils") { version { strictly("821499b") } }
+    api("com.github.simplified-dev:reflection") { version { strictly("6c3b7c5") } }
+    api("com.github.simplified-dev:gson-extras") { version { strictly("f143dc1") } }
 
     // JetBrains Annotations
     api(libs.annotations)
