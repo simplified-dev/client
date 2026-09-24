@@ -4,6 +4,16 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.OptionalLong;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -122,6 +132,53 @@ class RateLimitBucketTest {
         bucket.syncRemaining(-5);
         assertThat(bucket.getCount(NOW), is(60L));
         assertThat(bucket.isRateLimited(NOW), is(true));
+    }
+
+    @Test
+    @DisplayName("A server update for an earlier request than the last one applied is ignored whole")
+    void earlierServerUpdateIsIgnored() {
+        long resetSecond = NOW_SECOND + 3600L;
+        RateLimitBucket bucket = new RateLimitBucket(RateLimit.UNLIMITED, NOW);
+
+        assertThat(bucket.updateFromServer(RateLimit.fromHeaders(60, resetSecond, NOW), OptionalLong.of(57), NOW, 3), is(true));
+        assertThat(bucket.updateFromServer(RateLimit.fromHeaders(60, resetSecond - 3600L, NOW), OptionalLong.of(58), NOW, 2), is(false));
+
+        assertThat(bucket.getCount(NOW), is(3L));
+        assertThat(bucket.getWindowEnd().get(), is(resetSecond * 1000L));
+    }
+
+    @Test
+    @DisplayName("Server updates racing to apply leave the latest request's count, whatever order they land in")
+    void racingServerUpdatesKeepTheLatest() throws Exception {
+        int responses = 32;
+        RateLimit policy = RateLimit.fromHeaders(1000, NOW_SECOND + 3600L, NOW);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+
+        try {
+            for (int round = 0; round < 100; round++) {
+                RateLimitBucket bucket = new RateLimitBucket(RateLimit.UNLIMITED, NOW);
+                List<Integer> order = IntStream.rangeClosed(1, responses).boxed().collect(Collectors.toList());
+                Collections.shuffle(order);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<?>> landed = new ArrayList<>();
+
+                for (int sequence : order) {
+                    landed.add(pool.submit(() -> {
+                        start.await();
+                        return bucket.updateFromServer(policy, OptionalLong.of(1000L - sequence), NOW, sequence);
+                    }));
+                }
+
+                start.countDown();
+
+                for (Future<?> future : landed)
+                    future.get();
+
+                assertThat("round " + round, bucket.getCount(NOW), is((long) responses));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test

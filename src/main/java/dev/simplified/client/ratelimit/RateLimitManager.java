@@ -10,6 +10,7 @@ import org.jetbrains.annotations.NotNull;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Central registry that tracks per-route rate-limit state across multiple
@@ -37,6 +38,11 @@ public class RateLimitManager {
      * Map of route identifiers to their corresponding rate-limit buckets.
      */
     private final @NotNull ConcurrentMap<String, RateLimitBucket> buckets = Concurrent.newMap();
+
+    /**
+     * The number {@link #nextSequence()} last gave a request.
+     */
+    private final @NotNull AtomicLong sequence = new AtomicLong();
 
     /**
      * Retrieves an existing bucket for the given identifier, or creates a new
@@ -191,7 +197,8 @@ public class RateLimitManager {
      * {@link RateLimit#remainingFromHeaders(Map)} then
      * {@linkplain RateLimitBucket#syncRemaining(long) syncs} the bucket's request count to the
      * server's. Headers without both a limit and a reset leave every bucket untouched and create
-     * none.
+     * none. The headers are applied in whatever order responses arrive;
+     * {@link #updateFromHeaders(String, Map, long, long)} orders them by the request they answered.
      *
      * @param bucketId the route identifier the response belongs to
      * @param headers the response headers to read
@@ -206,6 +213,44 @@ public class RateLimitManager {
         RateLimitBucket bucket = this.getOrCreateBucket(bucketId, serverLimit.get(), now);
         bucket.updateRateLimit(serverLimit.get(), now);
         RateLimit.remainingFromHeaders(headers).ifPresent(bucket::syncRemaining);
+    }
+
+    /**
+     * Applies the rate-limit headers of the response to a numbered request, received at a
+     * pre-sampled timestamp, to the bucket identified by {@code bucketId}, unless the response
+     * to a later request has already been applied to it.
+     * <p>
+     * The newest response a bucket has seen is applied as
+     * {@link #updateFromHeaders(String, Map, long)} applies one; an older one is ignored whole,
+     * for the reasons {@link RateLimitBucket#updateFromServer} gives. Headers without both a
+     * limit and a reset leave every bucket untouched and create none.
+     *
+     * @param bucketId the route identifier the response belongs to
+     * @param headers the response headers to read
+     * @param now the pre-sampled epoch-millisecond timestamp the response was received at
+     * @param sequence the number {@link #nextSequence()} gave the request the response answered
+     */
+    public void updateFromHeaders(@NotNull String bucketId, @NotNull Map<String, Collection<String>> headers, long now, long sequence) {
+        Optional<RateLimit> serverLimit = RateLimit.fromHeaders(headers, now);
+
+        if (serverLimit.isEmpty())
+            return;
+
+        this.getOrCreateBucket(bucketId, serverLimit.get(), now)
+            .updateFromServer(serverLimit.get(), RateLimit.remainingFromHeaders(headers), now, sequence);
+    }
+
+    /**
+     * Numbers a request as it is sent, so the response that answers it can be ordered against
+     * the responses to other requests through this manager.
+     * <p>
+     * The number travels with the request and back with its response to
+     * {@link #updateFromHeaders(String, Map, long, long)}.
+     *
+     * @return a number greater than every one this manager has returned before
+     */
+    public long nextSequence() {
+        return this.sequence.incrementAndGet();
     }
 
     /**

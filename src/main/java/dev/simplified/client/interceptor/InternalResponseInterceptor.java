@@ -14,6 +14,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.TreeMap;
 
 /**
@@ -27,9 +28,12 @@ import java.util.TreeMap;
  *       URL match via {@link RouteDiscovery#findMatchingMetadata(String)}.</li>
  *   <li>Applies the standard and common rate limit headers (e.g. {@code RateLimit-Limit},
  *       {@code X-RateLimit-Reset}, {@code X-RateLimit-Remaining}) to the corresponding bucket
- *       through {@link RateLimitManager#updateFromHeaders(String, Map, long)}, so the bucket's
- *       window ends when the server's quota resets and its count follows the server's
- *       remaining figure.</li>
+ *       through {@link RateLimitManager#updateFromHeaders(String, Map, long, long)}, so the
+ *       bucket's window ends when the server's quota resets and its count follows the server's
+ *       remaining figure. The sequence number {@link InternalRequestInterceptor} stashed on the
+ *       request orders the response, so one that lands after the response to a later request
+ *       is ignored; a request without one is applied through
+ *       {@link RateLimitManager#updateFromHeaders(String, Map, long)}.</li>
  *   <li>Delegates to the next interceptor in the chain.</li>
  * </ol>
  * <p>
@@ -86,8 +90,36 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
     void recordServerLimit(@NotNull feign.Response response, long now) {
         Map<String, Collection<String>> headers = serverHeaders(response.headers());
 
-        if (headers != null)
-            this.rateLimitManager.updateFromHeaders(this.extractBucketKey(response), headers, now);
+        if (headers == null)
+            return;
+
+        String bucketKey = this.extractBucketKey(response);
+        OptionalLong sequence = extractSequence(response);
+
+        if (sequence.isPresent())
+            this.rateLimitManager.updateFromHeaders(bucketKey, headers, now, sequence.getAsLong());
+        else
+            this.rateLimitManager.updateFromHeaders(bucketKey, headers, now);
+    }
+
+    /**
+     * Reads the sequence number {@link InternalRequestInterceptor} gave the request a response
+     * answered.
+     *
+     * @param response the Feign response whose originating request carries the sequence header
+     * @return the sequence number, or empty for a request the interceptor did not number
+     */
+    private static @NotNull OptionalLong extractSequence(@NotNull feign.Response response) {
+        Collection<String> values = response.request().headers().get(InternalRequestInterceptor.SEQUENCE_HEADER);
+
+        if (values == null || values.isEmpty())
+            return OptionalLong.empty();
+
+        try {
+            return OptionalLong.of(Long.parseLong(values.iterator().next()));
+        } catch (NumberFormatException ex) {
+            return OptionalLong.empty();
+        }
     }
 
     /**

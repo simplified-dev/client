@@ -71,16 +71,28 @@ class InternalResponseInterceptorTest {
         return headers;
     }
 
-    private Request request() {
-        Map<String, Collection<String>> requestHeaders = Map.of(InternalRequestInterceptor.ROUTE_ID_HEADER, List.of(this.key));
+    private Request request(String... headerPairs) {
+        Map<String, Collection<String>> requestHeaders = headers(headerPairs);
+        requestHeaders.put(InternalRequestInterceptor.ROUTE_ID_HEADER, List.of(this.key));
         return Request.create(Request.HttpMethod.GET, "https://127.0.0.1:0/resource", requestHeaders, null, StandardCharsets.UTF_8, null);
     }
 
+    /**
+     * A request numbered as {@link InternalRequestInterceptor} numbers the requests it sends.
+     */
+    private Request numbered(long sequence) {
+        return this.request(InternalRequestInterceptor.SEQUENCE_HEADER, Long.toString(sequence));
+    }
+
     private Response response(String... headerPairs) {
+        return this.response(this.request(), headerPairs);
+    }
+
+    private Response response(Request request, String... headerPairs) {
         return Response.builder()
             .status(200)
             .reason("OK")
-            .request(this.request())
+            .request(request)
             .headers(headers(headerPairs))
             .build();
     }
@@ -105,7 +117,12 @@ class InternalResponseInterceptorTest {
     }
 
     private Response gitHubResponse(long limit, long remaining, long resetSecond) {
+        return this.gitHubResponse(this.request(), limit, remaining, resetSecond);
+    }
+
+    private Response gitHubResponse(Request request, long limit, long remaining, long resetSecond) {
         return this.response(
+            request,
             "x-ratelimit-limit", Long.toString(limit),
             "x-ratelimit-remaining", Long.toString(remaining),
             "x-ratelimit-used", Long.toString(limit - remaining),
@@ -161,6 +178,38 @@ class InternalResponseInterceptorTest {
         this.interceptor.recordServerLimit(this.gitHubResponse(60, 57, resetSecond), this.now);
 
         assertThat(this.manager.getRequestCount(this.key), is(3L));
+    }
+
+    @Test
+    @DisplayName("A response that lands after the response to a later request cannot roll the count back")
+    void lateResponseCannotOverwriteLaterOne() {
+        long resetSecond = this.nowSecond + 3600L;
+
+        this.send(this.now);
+        Request first = this.numbered(this.manager.nextSequence());
+        this.send(this.now);
+        Request second = this.numbered(this.manager.nextSequence());
+
+        this.interceptor.recordServerLimit(this.gitHubResponse(second, 60, 58, resetSecond), this.now);
+        this.interceptor.recordServerLimit(this.gitHubResponse(first, 60, 59, resetSecond), this.now);
+
+        assertThat(this.manager.getRequestCount(this.key), is(2L));
+    }
+
+    @Test
+    @DisplayName("A response to a later request applies after an earlier one")
+    void laterResponseApplies() {
+        long resetSecond = this.nowSecond + 3600L;
+
+        this.send(this.now);
+        Request first = this.numbered(this.manager.nextSequence());
+        this.send(this.now);
+        Request second = this.numbered(this.manager.nextSequence());
+
+        this.interceptor.recordServerLimit(this.gitHubResponse(first, 60, 55, resetSecond), this.now);
+        this.interceptor.recordServerLimit(this.gitHubResponse(second, 60, 50, resetSecond), this.now);
+
+        assertThat(this.manager.getRequestCount(this.key), is(10L));
     }
 
     @Test

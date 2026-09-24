@@ -26,6 +26,9 @@ import java.lang.reflect.Method;
  *       request before it leaves the client.</li>
  *   <li>Records the request in the rate limit tracker so future calls can be evaluated
  *       against the configured quota.</li>
+ *   <li>Numbers the request with {@link RateLimitManager#nextSequence()}, replacing any number
+ *       an earlier attempt of the same template carried, so {@link InternalResponseInterceptor}
+ *       can tell a late response from the response to a later request.</li>
  *   <li>Replaces the placeholder target URL on the template with the real HTTPS URL
  *       obtained from the route metadata.</li>
  * </ol>
@@ -67,6 +70,12 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
     static final @NotNull String ROUTE_ID_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Route-Id";
 
     /**
+     * Internal header key used to carry the request's {@linkplain RateLimitManager#nextSequence()
+     * sequence number} from request to response interceptor.
+     */
+    static final @NotNull String SEQUENCE_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Request-Sequence";
+
+    /**
      * {@inheritDoc}
      */
     @Override
@@ -82,6 +91,8 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
         this.rateLimitManager.trackRequest(bucketKey, routeMetadata.getRateLimit(), now);
 
         template.header(ROUTE_ID_HEADER, bucketKey);
+        template.removeHeader(SEQUENCE_HEADER);
+        template.header(SEQUENCE_HEADER, Long.toString(this.rateLimitManager.nextSequence()));
         template.target(routeMetadata.getFullUrl());
     }
 

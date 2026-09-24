@@ -1,10 +1,13 @@
 package dev.simplified.client.ratelimit;
 
+import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Thread-safe fixed-window counter that tracks the number of requests made
@@ -26,6 +29,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * This approach avoids the need for a background timer while remaining accurate under
  * contention. A window opened this way lasts the policy's window duration until the next
  * server-advertised policy anchors it to the server's reset instant.
+ * <p>
+ * Server responses are applied through {@link #updateFromServer}, which orders them by the
+ * request they answered and serializes them on a lock of the bucket's own; counting and
+ * window rotation stay lock-free.
  * <p>
  * Instances are managed by {@link RateLimitManager} and are not intended for
  * direct external use.
@@ -55,6 +62,19 @@ public class RateLimitBucket {
      * The rate-limit policy governing this bucket, updatable from server headers.
      */
     private final @NotNull AtomicReference<RateLimit> rateLimit;
+
+    /**
+     * Serializes {@link #updateFromServer}, guarding {@link #serverSequence}.
+     */
+    @Getter(AccessLevel.NONE)
+    private final @NotNull ReentrantLock serverLock = new ReentrantLock();
+
+    /**
+     * The number of the request whose response last updated this bucket through
+     * {@link #updateFromServer}, or {@code 0} before any has.
+     */
+    @Getter(AccessLevel.NONE)
+    private long serverSequence;
 
     /**
      * Constructs a new bucket initialized to the current system time with a
@@ -177,6 +197,46 @@ public class RateLimitBucket {
     }
 
     /**
+     * Applies the policy and remaining count a server response reported, unless the response to
+     * a later request has already been applied.
+     * <p>
+     * Requests are numbered in the order they are sent, by
+     * {@link RateLimitManager#nextSequence()}. A response that lands after the response to a
+     * later request reports the server's quota as it stood before that request: its remaining
+     * count would roll the count back below what the server has since reported spent, and its
+     * reset could move the window's end back to one already superseded. It is ignored whole.
+     * Otherwise the policy replaces this bucket's as {@link #updateRateLimit(RateLimit, long)}
+     * does and {@code remaining}, when present, {@linkplain #syncRemaining(long) syncs} the count.
+     * <p>
+     * The check and the update run under one lock, so responses racing to apply cannot
+     * interleave: whatever order they run in, the bucket ends holding the figures of the latest
+     * request among them.
+     *
+     * @param newLimit the policy the response advertised
+     * @param remaining the remaining count the response reported, or empty if it reported none
+     * @param now the epoch-millisecond timestamp the response was received at
+     * @param sequence the number {@link RateLimitManager#nextSequence()} gave the request the
+     *                 response answered
+     * @return {@code true} if the response was applied, {@code false} if the response to a later
+     *         request already had been
+     */
+    public boolean updateFromServer(@NotNull RateLimit newLimit, @NotNull OptionalLong remaining, long now, long sequence) {
+        this.serverLock.lock();
+
+        try {
+            if (sequence <= this.serverSequence)
+                return false;
+
+            this.serverSequence = sequence;
+            this.updateRateLimit(newLimit, now);
+            remaining.ifPresent(this::syncRemaining);
+            return true;
+        } finally {
+            this.serverLock.unlock();
+        }
+    }
+
+    /**
      * Sets the request count to the number of requests the server reports as spent in its
      * current window.
      * <p>
@@ -185,8 +245,9 @@ public class RateLimitBucket {
      * local response cache among them - stop counting against the bucket, and requests spent
      * against the same quota from elsewhere start to. A request still in flight when the server
      * reported the figure is not in it, so under concurrent load the count can trail the true
-     * usage until that request's own response is synced. Buckets backed by an
-     * {@linkplain RateLimit#isUnlimited() unlimited} policy ignore it.
+     * usage until that request's own response is synced. {@link #updateFromServer} keeps a
+     * response that lands after a later request's from syncing its older figure. Buckets backed
+     * by an {@linkplain RateLimit#isUnlimited() unlimited} policy ignore it.
      *
      * @param remaining the number of requests the server reports remaining in its current window
      */
