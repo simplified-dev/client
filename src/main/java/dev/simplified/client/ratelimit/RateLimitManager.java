@@ -7,6 +7,10 @@ import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.Collection;
+import java.util.Map;
+import java.util.Optional;
+
 /**
  * Central registry that tracks per-route rate-limit state across multiple
  * {@link RateLimitBucket} instances.
@@ -43,7 +47,20 @@ public class RateLimitManager {
      * @return the existing or newly created bucket, never {@code null}
      */
     private @NotNull RateLimitBucket getOrCreateBucket(@NotNull String bucketId, @NotNull RateLimit rateLimit) {
-        return this.buckets.computeIfAbsent(bucketId, __ -> new RateLimitBucket(rateLimit));
+        return this.getOrCreateBucket(bucketId, rateLimit, System.currentTimeMillis());
+    }
+
+    /**
+     * Retrieves an existing bucket for the given identifier, or creates a new one whose first
+     * window opens at {@code now} under the specified {@link RateLimit} policy if none exists.
+     *
+     * @param bucketId the route identifier for the bucket
+     * @param rateLimit the rate-limit policy to use if a new bucket must be created
+     * @param now the epoch-millisecond timestamp a new bucket's first window opens at
+     * @return the existing or newly created bucket, never {@code null}
+     */
+    private @NotNull RateLimitBucket getOrCreateBucket(@NotNull String bucketId, @NotNull RateLimit rateLimit, long now) {
+        return this.buckets.computeIfAbsent(bucketId, __ -> new RateLimitBucket(rateLimit, now));
     }
 
     /**
@@ -91,7 +108,7 @@ public class RateLimitManager {
      * @return {@code true} if the bucket is currently rate-limited; {@code false} otherwise
      */
     public boolean isRateLimited(@NotNull String bucketId, @NotNull RateLimit rateLimit, long now) {
-        return this.getOrCreateBucket(bucketId, rateLimit).isRateLimited(now);
+        return this.getOrCreateBucket(bucketId, rateLimit, now).isRateLimited(now);
     }
 
     /**
@@ -117,7 +134,7 @@ public class RateLimitManager {
      * @param now the pre-sampled epoch-millisecond timestamp to record this request against
      */
     public void trackRequest(@NotNull String bucketId, @NotNull RateLimit rateLimit, long now) {
-        this.getOrCreateBucket(bucketId, rateLimit).trackRequest(now);
+        this.getOrCreateBucket(bucketId, rateLimit, now).trackRequest(now);
     }
 
     /**
@@ -133,14 +150,62 @@ public class RateLimitManager {
      * @param newLimit the updated rate-limit policy
      */
     public void updateRateLimit(@NotNull String bucketId, @NotNull RateLimit newLimit) {
-        RateLimitBucket bucket = this.buckets.get(bucketId);
+        this.updateRateLimit(bucketId, newLimit, System.currentTimeMillis());
+    }
 
-        if (bucket != null)
-            bucket.updateRateLimit(newLimit);
-        else {
-            // If server tells us about a new/unknown route, create it
-            this.buckets.put(bucketId, new RateLimitBucket(newLimit));
-        }
+    /**
+     * Variant of {@link #updateRateLimit(String, RateLimit)} that accepts a pre-sampled
+     * epoch-millisecond timestamp.
+     * <p>
+     * The bucket's window follows the new policy as
+     * {@link RateLimitBucket#updateRateLimit(RateLimit, long)} describes: a server-advertised
+     * policy ends it at the server's reset instant.
+     *
+     * @param bucketId the route identifier whose policy should be updated
+     * @param newLimit the updated rate-limit policy
+     * @param now the pre-sampled epoch-millisecond timestamp the policy was received at
+     */
+    public void updateRateLimit(@NotNull String bucketId, @NotNull RateLimit newLimit, long now) {
+        this.getOrCreateBucket(bucketId, newLimit, now).updateRateLimit(newLimit, now);
+    }
+
+    /**
+     * Applies the rate-limit headers of a server response to the bucket identified by
+     * {@code bucketId}.
+     *
+     * @param bucketId the route identifier the response belongs to
+     * @param headers the response headers to read
+     * @see #updateFromHeaders(String, Map, long)
+     */
+    public void updateFromHeaders(@NotNull String bucketId, @NotNull Map<String, Collection<String>> headers) {
+        this.updateFromHeaders(bucketId, headers, System.currentTimeMillis());
+    }
+
+    /**
+     * Applies the rate-limit headers of a server response, received at a pre-sampled timestamp,
+     * to the bucket identified by {@code bucketId}.
+     * <p>
+     * The policy parsed by {@link RateLimit#fromHeaders(Map, long)} replaces the bucket's as
+     * {@link #updateRateLimit(String, RateLimit, long)} does, so the bucket's window ends when
+     * the server's quota resets. A remaining count parsed by
+     * {@link RateLimit#remainingFromHeaders(Map)} then
+     * {@linkplain RateLimitBucket#syncRemaining(long) syncs} the bucket's request count to the
+     * server's. Headers without both a limit and a reset leave every bucket untouched and create
+     * none.
+     *
+     * @param bucketId the route identifier the response belongs to
+     * @param headers the response headers to read
+     * @param now the pre-sampled epoch-millisecond timestamp the response was received at
+     */
+    public void updateFromHeaders(@NotNull String bucketId, @NotNull Map<String, Collection<String>> headers, long now) {
+        Optional<RateLimit> serverLimit = RateLimit.fromHeaders(headers, now);
+
+        if (serverLimit.isEmpty())
+            return;
+
+        RateLimitBucket bucket = this.getOrCreateBucket(bucketId, serverLimit.get(), now);
+        bucket.updateRateLimit(serverLimit.get(), now);
+        RateLimit.remainingFromHeaders(headers).ifPresent(bucket::syncRemaining);
     }
 
     /**
