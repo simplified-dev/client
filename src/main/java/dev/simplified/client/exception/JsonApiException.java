@@ -4,10 +4,10 @@ import com.google.gson.Gson;
 import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
-import dev.simplified.lazy.Lazy;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.reflect.Constructor;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -48,14 +48,21 @@ import java.util.function.Supplier;
 public abstract class JsonApiException extends ApiException {
 
     /**
-     * Memoized typed error response. Initialized to read through to the parent's
+     * Supplier of the typed error response. Initialized to read through to the parent's
      * {@link ApiException#response} field so that {@link #getResponse()} returns the
      * parent's fallback message-bearing stub when {@link #resolve(Gson, Class)} is
-     * never invoked. Subclasses replace this Lazy in their constructor body via
+     * never invoked. Subclasses replace it in their constructor body via
      * {@link #resolve(Gson, Class)} to install the deferred Gson parse.
      */
     @Getter(AccessLevel.NONE)
-    private @NotNull Lazy<? extends ApiErrorResponse> typedResponse = Lazy.of(() -> this.response);
+    private @NotNull Supplier<? extends ApiErrorResponse> typedResponse = () -> this.response;
+
+    /**
+     * The typed error response once {@link #getResponse()} has read it, and the monitor that read
+     * locks on, so {@link #typedResponse} runs at most once and runs again only if it throws.
+     */
+    @Getter(AccessLevel.NONE)
+    private final @NotNull AtomicReference<ApiErrorResponse> resolvedResponse = new AtomicReference<>();
 
     /**
      * Constructs a new {@code JsonApiException} from a primitive HTTP context. Subclasses
@@ -81,12 +88,26 @@ public abstract class JsonApiException extends ApiException {
      * @param <E> the concrete error-response type
      */
     protected final <E extends ApiErrorResponse> void resolve(@NotNull Gson gson, @NotNull Class<E> type) {
-        this.typedResponse = Lazy.of(() -> this.fromJson(gson, type).orElseGet(() -> newDefaultInstance(type)));
+        this.typedResponse = () -> this.fromJson(gson, type).orElseGet(() -> newDefaultInstance(type));
+        this.resolvedResponse.set(null);
     }
 
     @Override
     public @NotNull ApiErrorResponse getResponse() {
-        return this.typedResponse.get();
+        ApiErrorResponse response = this.resolvedResponse.get();
+
+        if (response == null) {
+            synchronized (this.resolvedResponse) {
+                response = this.resolvedResponse.get();
+
+                if (response == null) {
+                    response = this.typedResponse.get();
+                    this.resolvedResponse.set(response);
+                }
+            }
+        }
+
+        return response;
     }
 
     /**
