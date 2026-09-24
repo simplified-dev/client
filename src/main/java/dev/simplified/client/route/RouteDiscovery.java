@@ -13,6 +13,7 @@ import dev.simplified.collection.ConcurrentMap;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.util.HashSet;
@@ -91,47 +92,36 @@ public final class RouteDiscovery {
     }
 
     /**
-     * Extracts route metadata from a target, which may be either a {@link Class} or a
-     * {@link Method}.
+     * Extracts route metadata from a target, which may be either the endpoint interface or one
+     * of its methods.
      * <p>
-     * The extraction attempts two strategies in order:
+     * The extraction attempts two strategies in order, each against the target's own
+     * annotations:
      * <ol>
-     *   <li>A direct {@link Route @Route} annotation on the class (for a class target)
-     *       or on the declaring class (for a method target).</li>
-     *   <li>A {@link DynamicRoute @DynamicRoute}-annotated custom annotation on the target,
-     *       whose designated method is invoked reflectively to obtain a
-     *       {@link DynamicRouteProvider}.</li>
+     *   <li>A direct {@link Route @Route} annotation.</li>
+     *   <li>A {@link DynamicRoute @DynamicRoute}-annotated custom annotation, whose designated
+     *       method is invoked reflectively to obtain a {@link DynamicRouteProvider}.</li>
      * </ol>
+     * A method without either yields nothing, so {@link #getMetadata(Method)} gives it the
+     * type-level route; the type-level route never stands in for a method's own.
      *
-     * @param target a {@link Class} or {@link Method} to inspect for route annotations
+     * @param target the endpoint interface or one of its methods
      * @param subnetPrefix the optional subnet prefix to bake into the resulting metadata's bucket key
      * @return an {@link Optional} containing the resolved {@link Metadata}, or empty if
      *         no route annotation is found
      */
     private static @NotNull Optional<Metadata> extractRouteFromTarget(
-        @NotNull Object target,
+        @NotNull AnnotatedElement target,
         @NotNull Optional<IPv6Prefix> subnetPrefix
     ) {
-        Class<?> targetClass;
-        if (target instanceof Class<?> clazz)
-            targetClass = clazz;
-        else if (target instanceof Method method)
-            targetClass = method.getDeclaringClass();
-        else
-            return Optional.empty();
-
-        Route routeAnno = targetClass.getAnnotation(Route.class);
+        Route routeAnno = target.getAnnotation(Route.class);
         if (routeAnno != null) {
             String route = stripProtocol(routeAnno.value());
             RateLimit rateLimit = RateLimit.fromAnnotation(routeAnno.rateLimit());
             return Optional.of(new Metadata(route, rateLimit, subnetPrefix));
         }
 
-        Annotation[] annotations = (target instanceof Method method)
-            ? method.getAnnotations()
-            : targetClass.getAnnotations();
-
-        for (Annotation annotation : annotations) {
+        for (Annotation annotation : target.getAnnotations()) {
             DynamicRoute dynamicRoute = annotation.annotationType().getAnnotation(DynamicRoute.class);
 
             if (dynamicRoute == null)
