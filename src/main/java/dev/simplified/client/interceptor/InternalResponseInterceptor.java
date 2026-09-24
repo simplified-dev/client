@@ -8,13 +8,13 @@ import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.route.RouteDiscovery;
 import feign.InvocationContext;
+import feign.MethodMetadata;
 import feign.ResponseInterceptor;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.Collection;
 import java.util.Map;
-import java.util.OptionalLong;
 import java.util.TreeMap;
 
 /**
@@ -23,17 +23,17 @@ import java.util.TreeMap;
  * <p>
  * When a response is received, this interceptor:
  * <ol>
- *   <li>Resolves the originating route by reading the route identifier header stashed on
- *       the request by {@link InternalRequestInterceptor}, falling back to a longest-prefix
- *       URL match via {@link RouteDiscovery#findMatchingMetadata(String)}.</li>
+ *   <li>Resolves the originating endpoint and route from the Feign template the request was
+ *       built from, falling back to a longest-prefix URL match via
+ *       {@link RouteDiscovery#findMatchingMetadata(String)} for a request without one.</li>
  *   <li>Applies the standard and common rate limit headers (e.g. {@code RateLimit-Limit},
- *       {@code X-RateLimit-Reset}, {@code X-RateLimit-Remaining}) to the corresponding bucket
- *       through {@link RateLimitManager#updateFromHeaders(String, Map, long, long)}, so the
- *       bucket's window ends when the server's quota resets and its count follows the server's
- *       remaining figure. The sequence number {@link InternalRequestInterceptor} stashed on the
- *       request orders the response, so one that lands after the response to a later request
- *       is ignored; a request without one is applied through
- *       {@link RateLimitManager#updateFromHeaders(String, Map, long)}.</li>
+ *       {@code X-RateLimit-Reset}, {@code X-RateLimit-Remaining}) through
+ *       {@link RateLimitManager#updateFromHeaders(RouteDiscovery.Metadata, String, Map, long, long)},
+ *       so the bucket's window ends when the server's quota resets and its count follows the
+ *       server's remaining figure. The bucket is the quota the response names in
+ *       {@code X-RateLimit-Resource}, or the route's own. The sequence number
+ *       {@link InternalRequestInterceptor} stashed on the request orders the response, so one
+ *       that lands after the response to a later request is ignored.</li>
  *   <li>Delegates to the next interceptor in the chain.</li>
  * </ol>
  * <p>
@@ -65,9 +65,8 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
     private final @NotNull RateLimitManager rateLimitManager;
 
     /**
-     * The discovery engine used to match response URLs back to their route metadata. Used only on
-     * the URL-match fallback path; the normal path reads the already-composed key directly from
-     * {@link InternalRequestInterceptor#ROUTE_ID_HEADER}.
+     * The discovery engine that maps a response's endpoint method, or failing that its URL, back
+     * to the route metadata of the request it answered.
      */
     private final @NotNull RouteDiscovery routeDiscovery;
 
@@ -81,7 +80,7 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
     }
 
     /**
-     * Applies a response's rate-limit headers to the bucket of the route it answered.
+     * Applies a response's rate-limit headers to the bucket of the quota it counted against.
      *
      * @param response the response to read
      * @param now the epoch-millisecond timestamp the response was received at
@@ -93,33 +92,35 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
         if (headers == null)
             return;
 
-        String bucketKey = this.extractBucketKey(response);
-        OptionalLong sequence = extractSequence(response);
+        feign.Request request = response.request();
+        MethodMetadata endpoint = request.requestTemplate() != null ? request.requestTemplate().methodMetadata() : null;
+        boolean known = endpoint != null && endpoint.method() != null;
+        RouteDiscovery.Metadata route = known
+            ? this.routeDiscovery.getMetadata(endpoint.method())
+            : this.routeDiscovery.findMatchingMetadata(request.url());
 
-        if (sequence.isPresent())
-            this.rateLimitManager.updateFromHeaders(bucketKey, headers, now, sequence.getAsLong());
-        else
-            this.rateLimitManager.updateFromHeaders(bucketKey, headers, now);
+        this.rateLimitManager.updateFromHeaders(route, known ? endpoint.configKey() : null, headers, now, this.extractSequence(request));
     }
 
     /**
-     * Reads the sequence number {@link InternalRequestInterceptor} gave the request a response
-     * answered.
+     * Reads the sequence number {@link InternalRequestInterceptor} gave a request.
+     * <p>
+     * A request the interceptor did not number is given the next number now, which orders its
+     * response as the newest the manager has seen.
      *
-     * @param response the Feign response whose originating request carries the sequence header
-     * @return the sequence number, or empty for a request the interceptor did not number
+     * @param request the request whose sequence header to read
+     * @return the request's sequence number
      */
-    private static @NotNull OptionalLong extractSequence(@NotNull feign.Response response) {
-        Collection<String> values = response.request().headers().get(InternalRequestInterceptor.SEQUENCE_HEADER);
+    private long extractSequence(@NotNull feign.Request request) {
+        Collection<String> values = request.headers().get(InternalRequestInterceptor.SEQUENCE_HEADER);
 
-        if (values == null || values.isEmpty())
-            return OptionalLong.empty();
-
-        try {
-            return OptionalLong.of(Long.parseLong(values.iterator().next()));
-        } catch (NumberFormatException ex) {
-            return OptionalLong.empty();
+        if (values != null && !values.isEmpty()) {
+            try {
+                return Long.parseLong(values.iterator().next());
+            } catch (NumberFormatException ignore) { }
         }
+
+        return this.rateLimitManager.nextSequence();
     }
 
     /**
@@ -155,23 +156,6 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
         }
 
         return sent;
-    }
-
-    /**
-     * Extracts the rate-limit bucket key from the internal request header stashed by
-     * {@link InternalRequestInterceptor}. Falls back to longest-prefix URL matching when the header
-     * is absent, reading the precomputed bucket key off the resolved metadata.
-     *
-     * @param response the Feign response whose originating request carries the route header
-     * @return the bucket key string
-     */
-    private @NotNull String extractBucketKey(@NotNull feign.Response response) {
-        Collection<String> values = response.request().headers().get(InternalRequestInterceptor.ROUTE_ID_HEADER);
-
-        if (values != null && !values.isEmpty())
-            return values.iterator().next();
-
-        return this.routeDiscovery.findMatchingMetadata(response.request().url()).getBucketKey();
     }
 
 }

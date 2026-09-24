@@ -9,7 +9,10 @@ import dev.simplified.client.request.Contract;
 import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.gson.GsonSettings;
+import feign.MethodMetadata;
 import feign.Request;
+import feign.RequestLine;
+import feign.RequestTemplate;
 import feign.Response;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -27,7 +30,16 @@ class InternalResponseInterceptorTest {
 
     @Route("127.0.0.1:0")
     interface ShapeContract extends Contract {
+
+        @RequestLine("GET /resource")
+        String resource();
+
     }
+
+    /**
+     * The endpoint every request in a test invokes, as Feign parses it.
+     */
+    private static final MethodMetadata RESOURCE = new feign.Contract.Default().parseAndValidateMetadata(ShapeContract.class).getFirst();
 
     /**
      * The clock reading every request and response in a test is stamped with. It is the real
@@ -51,14 +63,27 @@ class InternalResponseInterceptorTest {
     private final RateLimit policy = this.discovery.getDefaultRoute().getRateLimit();
 
     /**
-     * Mirrors {@link InternalRequestInterceptor#apply}: refuses the request if the bucket is
+     * The bucket the endpoint's next request is gated and counted against.
+     */
+    private String bucket() {
+        return this.manager.getBucketKey(this.key, RESOURCE.configKey());
+    }
+
+    private long count() {
+        return this.manager.getRequestCount(this.bucket());
+    }
+
+    /**
+     * Mirrors {@link InternalRequestInterceptor#apply}: refuses the request if its bucket is
      * exhausted, otherwise counts it.
      */
     private boolean send(long at) {
-        if (this.manager.isRateLimited(this.key, this.policy, at))
+        String bucket = this.bucket();
+
+        if (this.manager.isRateLimited(bucket, this.policy, at))
             return false;
 
-        this.manager.trackRequest(this.key, this.policy, at);
+        this.manager.trackRequest(bucket, this.policy, at);
         return true;
     }
 
@@ -72,9 +97,8 @@ class InternalResponseInterceptorTest {
     }
 
     private Request request(String... headerPairs) {
-        Map<String, Collection<String>> requestHeaders = headers(headerPairs);
-        requestHeaders.put(InternalRequestInterceptor.ROUTE_ID_HEADER, List.of(this.key));
-        return Request.create(Request.HttpMethod.GET, "https://127.0.0.1:0/resource", requestHeaders, null, StandardCharsets.UTF_8, null);
+        RequestTemplate template = new RequestTemplate().methodMetadata(RESOURCE);
+        return Request.create(Request.HttpMethod.GET, "https://127.0.0.1:0/resource", headers(headerPairs), null, StandardCharsets.UTF_8, template);
     }
 
     /**
@@ -145,7 +169,7 @@ class InternalResponseInterceptorTest {
         assertThat(this.send(this.now), is(false));
         assertThat(this.send(resetMillis - 1L), is(false));
         assertThat(this.send(resetMillis), is(true));
-        assertThat(this.manager.getRequestCount(this.key), is(1L));
+        assertThat(this.count(), is(1L));
     }
 
     @Test
@@ -173,11 +197,11 @@ class InternalResponseInterceptorTest {
         for (int i = 0; i < 10; i++)
             this.send(this.now);
 
-        assertThat(this.manager.getRequestCount(this.key), is(11L));
+        assertThat(this.count(), is(11L));
 
         this.interceptor.recordServerLimit(this.gitHubResponse(60, 57, resetSecond), this.now);
 
-        assertThat(this.manager.getRequestCount(this.key), is(3L));
+        assertThat(this.count(), is(3L));
     }
 
     @Test
@@ -193,7 +217,7 @@ class InternalResponseInterceptorTest {
         this.interceptor.recordServerLimit(this.gitHubResponse(second, 60, 58, resetSecond), this.now);
         this.interceptor.recordServerLimit(this.gitHubResponse(first, 60, 59, resetSecond), this.now);
 
-        assertThat(this.manager.getRequestCount(this.key), is(2L));
+        assertThat(this.count(), is(2L));
     }
 
     @Test
@@ -209,7 +233,7 @@ class InternalResponseInterceptorTest {
         this.interceptor.recordServerLimit(this.gitHubResponse(first, 60, 55, resetSecond), this.now);
         this.interceptor.recordServerLimit(this.gitHubResponse(second, 60, 50, resetSecond), this.now);
 
-        assertThat(this.manager.getRequestCount(this.key), is(10L));
+        assertThat(this.count(), is(10L));
     }
 
     @Test
@@ -228,9 +252,9 @@ class InternalResponseInterceptorTest {
             ResponseCache.CACHE_HIT_HEADER, "true"
         ), this.now);
 
-        assertThat(this.manager.getRequestCount(this.key), is(10L));
+        assertThat(this.count(), is(10L));
         assertThat(this.send(this.now), is(true));
-        assertThat(this.manager.getRequestCount(this.key), is(11L));
+        assertThat(this.count(), is(11L));
     }
 
     @Test
@@ -254,7 +278,7 @@ class InternalResponseInterceptorTest {
             ), this.now);
         }
 
-        assertThat(this.manager.getRequestCount(this.key), is(1L));
+        assertThat(this.count(), is(1L));
     }
 
     @Test
@@ -269,7 +293,7 @@ class InternalResponseInterceptorTest {
         this.send(this.now);
         this.interceptor.recordServerLimit(this.revalidationReplay(stored, "ETag", "\"v1\""), this.now);
 
-        assertThat(this.manager.getRequestCount(this.key), is(2L));
+        assertThat(this.count(), is(2L));
     }
 
     @Test

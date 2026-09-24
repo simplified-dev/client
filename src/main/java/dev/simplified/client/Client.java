@@ -252,25 +252,27 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /**
      * Checks whether the type-level default rate-limit bucket is currently exhausted.
      * <p>
-     * Resolves the bucket key from the {@link Route @Route} declared on the endpoint interface via
-     * {@link RouteDiscovery#getDefaultRoute()}. Convenient for single-domain endpoints where every
-     * request shares one bucket; multi-domain contracts should prefer the
-     * {@link DynamicRouteProvider} overload to target a specific route's bucket.
+     * Resolves the bucket from the {@link Route @Route} declared on the endpoint interface via
+     * {@link RouteDiscovery#getDefaultRoute()} and {@link RateLimitManager#getBucketKey(String)}:
+     * the quota the route's latest response named, or the route's own bucket. Convenient for
+     * single-domain endpoints where every request shares one bucket; multi-domain contracts
+     * should prefer the {@link DynamicRouteProvider} overload to target a specific route's bucket.
      *
      * @return {@code true} if the default bucket exists and its request quota is exhausted;
      *         {@code false} otherwise
      */
     public boolean isRateLimited() {
-        return this.rateLimitManager.isRateLimited(this.routeDiscovery.getDefaultRoute().getBucketKey());
+        return this.rateLimitManager.isRateLimited(this.bucketKeyOf(this.routeDiscovery.getDefaultRoute()));
     }
 
     /**
      * Checks whether the rate-limit bucket for the route advertised by the given provider is
      * currently exhausted.
      * <p>
-     * Looks up the contract's matching {@link RouteDiscovery.Metadata} by route, reading its
-     * precomputed bucket key. Returns {@code false} when no route on this contract matches the
-     * provider's route - the bucket has no entries because no request has been made.
+     * Looks up the contract's matching {@link RouteDiscovery.Metadata} by route and resolves its
+     * bucket as {@link #isRateLimited()} does. Returns {@code false} when no route on this
+     * contract matches the provider's route - the bucket has no entries because no request has
+     * been made.
      *
      * @param provider the dynamic route provider supplying the route identifier
      * @return {@code true} if the bucket exists and its request quota is exhausted;
@@ -278,24 +280,25 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      */
     public boolean isRateLimited(@NotNull DynamicRouteProvider provider) {
         return this.routeDiscovery.findByRoute(provider.getRoute())
-            .map(metadata -> this.rateLimitManager.isRateLimited(metadata.getBucketKey()))
+            .map(metadata -> this.rateLimitManager.isRateLimited(this.bucketKeyOf(metadata)))
             .orElse(false);
     }
 
     /**
      * Returns the number of remaining requests allowed for the type-level default rate-limit
-     * bucket before the current window expires.
+     * bucket, resolved as {@link #isRateLimited()} resolves it, before the current window expires.
      *
      * @return the number of remaining allowed requests, or the unlimited sentinel value if no
      *         bucket exists for the type-level default route
      */
     public long getRemainingRequests() {
-        return this.rateLimitManager.getRemaining(this.routeDiscovery.getDefaultRoute().getBucketKey());
+        return this.rateLimitManager.getRemaining(this.bucketKeyOf(this.routeDiscovery.getDefaultRoute()));
     }
 
     /**
      * Returns the number of remaining requests allowed for the bucket identified by the given
-     * route provider before the current window expires.
+     * route provider, resolved as {@link #isRateLimited()} resolves it, before the current window
+     * expires.
      *
      * @param provider the dynamic route provider supplying the route identifier
      * @return the number of remaining allowed requests, or the unlimited sentinel value if no
@@ -303,8 +306,18 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      */
     public long getRemainingRequests(@NotNull DynamicRouteProvider provider) {
         return this.routeDiscovery.findByRoute(provider.getRoute())
-            .map(metadata -> this.rateLimitManager.getRemaining(metadata.getBucketKey()))
+            .map(metadata -> this.rateLimitManager.getRemaining(this.bucketKeyOf(metadata)))
             .orElse(Long.MAX_VALUE);
+    }
+
+    /**
+     * Resolves the bucket a route's requests count against.
+     *
+     * @param route the route to resolve
+     * @return the bucket key {@link RateLimitManager#getBucketKey(String)} resolves the route to
+     */
+    private @NotNull String bucketKeyOf(@NotNull RouteDiscovery.Metadata route) {
+        return this.rateLimitManager.getBucketKey(route.getBucketKey());
     }
 
     // ===== Internal build helpers =====

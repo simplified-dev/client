@@ -294,6 +294,23 @@ public final class RateLimit {
     }
 
     /**
+     * Parses the name of the quota a response counts against from HTTP response headers,
+     * reading {@code X-RateLimit-Resource}.
+     * <p>
+     * GitHub sends it as {@code core}, {@code search}, {@code graphql} and the like, naming
+     * quotas it tracks separately on one host, each with its own limit, remaining count and
+     * reset.
+     *
+     * @param headers the HTTP response headers to inspect
+     * @return the quota name, or empty if the header is absent or blank
+     */
+    public static @NotNull Optional<String> quotaFromHeaders(@NotNull Map<String, Collection<String>> headers) {
+        return getFirst(headers, "X-RateLimit-Resource", "x-ratelimit-resource")
+            .map(String::trim)
+            .filter(quota -> !quota.isEmpty());
+    }
+
+    /**
      * Creates a new unlimited rate-limit instance.
      * <p>
      * Useful for testing or for endpoints that have no effective rate limit.

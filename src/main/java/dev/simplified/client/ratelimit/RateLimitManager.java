@@ -6,6 +6,7 @@ import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.Collection;
 import java.util.Map;
@@ -18,7 +19,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>
  * Each {@link Client} owns a single {@code RateLimitManager}
  * whose buckets are keyed by route identifiers (typically the resolved domain or
- * domain+path string from {@link RouteDiscovery}).
+ * domain+path string from {@link RouteDiscovery}), or by the quota a server names for its
+ * responses, such as GitHub's {@code core} and {@code search}; see
+ * {@link #getBucketKey(String, String)} for which bucket a request counts against.
  * The manager coordinates proactive (client-side) rate-limit enforcement by
  * providing query and mutation methods used by the request and response
  * interceptor pipeline.
@@ -38,6 +41,17 @@ public class RateLimitManager {
      * Map of route identifiers to their corresponding rate-limit buckets.
      */
     private final @NotNull ConcurrentMap<String, RateLimitBucket> buckets = Concurrent.newMap();
+
+    /**
+     * Map of route identifiers to the bucket key of the quota their latest response named.
+     */
+    private final @NotNull ConcurrentMap<String, String> routeQuotas = Concurrent.newMap();
+
+    /**
+     * Map of route identifiers to, per endpoint on the route, the bucket key of the quota the
+     * endpoint's latest response named.
+     */
+    private final @NotNull ConcurrentMap<String, ConcurrentMap<String, String>> endpointQuotas = Concurrent.newMap();
 
     /**
      * The number {@link #nextSequence()} last gave a request.
@@ -241,6 +255,96 @@ public class RateLimitManager {
     }
 
     /**
+     * Applies the rate-limit headers of the response to a numbered request to the bucket of the
+     * quota the response counted against, unless the response to a later request has already
+     * been applied to it.
+     * <p>
+     * When the response names its quota, as GitHub does in {@code X-RateLimit-Resource}, the
+     * bucket is the {@linkplain RouteDiscovery.Metadata#getQuotaKey(String) quota's}, shared by
+     * every route on the host that names it; otherwise it is the route's own. The headers are
+     * applied as {@link #updateFromHeaders(String, Map, long, long)} applies them, and the
+     * bucket they reached becomes the one {@link #getBucketKey(String, String)} resolves the
+     * endpoint to and {@link #getBucketKey(String)} resolves the route to. Headers without both
+     * a limit and a reset leave every bucket untouched and create none.
+     *
+     * @param route the route the request was sent through
+     * @param endpoint identifies the endpoint the request invoked, or {@code null} if unknown
+     * @param headers the response headers to read
+     * @param now the pre-sampled epoch-millisecond timestamp the response was received at
+     * @param sequence the number {@link #nextSequence()} gave the request the response answered
+     */
+    public void updateFromHeaders(
+        @NotNull RouteDiscovery.Metadata route,
+        @Nullable String endpoint,
+        @NotNull Map<String, Collection<String>> headers,
+        long now,
+        long sequence
+    ) {
+        Optional<RateLimit> serverLimit = RateLimit.fromHeaders(headers, now);
+
+        if (serverLimit.isEmpty())
+            return;
+
+        String routeKey = route.getBucketKey();
+        Optional<String> quota = RateLimit.quotaFromHeaders(headers);
+        String bucketId = quota.map(route::getQuotaKey).orElse(routeKey);
+
+        this.getOrCreateBucket(bucketId, serverLimit.get(), now)
+            .updateFromServer(serverLimit.get(), RateLimit.remainingFromHeaders(headers), now, sequence);
+
+        if (quota.isPresent()) {
+            this.routeQuotas.put(routeKey, bucketId);
+
+            if (endpoint != null)
+                this.endpointQuotas.computeIfAbsent(routeKey, key -> Concurrent.newMap()).put(endpoint, bucketId);
+        } else {
+            this.routeQuotas.remove(routeKey);
+            ConcurrentMap<String, String> endpoints = this.endpointQuotas.get(routeKey);
+
+            if (endpoints != null && endpoint != null)
+                endpoints.remove(endpoint);
+        }
+    }
+
+    /**
+     * Resolves the bucket a route's requests count against, for queries that name only the
+     * route.
+     * <p>
+     * That is the bucket of the quota the route's latest response named, or the route's own
+     * bucket while no response has named one. A route whose endpoints count against different
+     * quotas resolves to the one named last; {@link #getBucketKey(String, String)} resolves
+     * each endpoint to its own.
+     *
+     * @param routeKey the route's bucket key
+     * @return the bucket key the route's requests count against
+     */
+    public @NotNull String getBucketKey(@NotNull String routeKey) {
+        return this.routeQuotas.getOrDefault(routeKey, routeKey);
+    }
+
+    /**
+     * Resolves the bucket an endpoint's requests are gated and counted against.
+     * <p>
+     * That is the bucket of the quota the endpoint's latest response named, so two endpoints on
+     * one route that count against different quotas never share one, or the route's own bucket
+     * while no response to the endpoint has named one.
+     *
+     * @param routeKey the bucket key of the route the endpoint is sent through
+     * @param endpoint identifies the endpoint, as the response side passes it to
+     *                 {@link #updateFromHeaders(RouteDiscovery.Metadata, String, Map, long, long)}
+     * @return the bucket key the endpoint's requests count against
+     */
+    public @NotNull String getBucketKey(@NotNull String routeKey, @NotNull String endpoint) {
+        ConcurrentMap<String, String> endpoints = this.endpointQuotas.get(routeKey);
+
+        if (endpoints == null)
+            return routeKey;
+
+        String quotaKey = endpoints.get(endpoint);
+        return quotaKey != null ? quotaKey : routeKey;
+    }
+
+    /**
      * Numbers a request as it is sent, so the response that answers it can be ordered against
      * the responses to other requests through this manager.
      * <p>
@@ -286,10 +390,13 @@ public class RateLimitManager {
     }
 
     /**
-     * Removes all buckets from this manager, discarding all tracked state.
+     * Removes all buckets from this manager, discarding all tracked state, including the quotas
+     * routes and endpoints resolve to.
      */
     public void clear() {
         this.buckets.clear();
+        this.routeQuotas.clear();
+        this.endpointQuotas.clear();
     }
 
     /**

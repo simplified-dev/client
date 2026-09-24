@@ -1,5 +1,6 @@
 package dev.simplified.client.route;
 
+import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
@@ -15,6 +16,7 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -310,6 +312,20 @@ public final class RouteDiscovery {
         private final @NotNull String bucketKey;
 
         /**
+         * The start of every {@linkplain #getQuotaKey(String) quota key}: the route's host and
+         * port, without its path, followed by {@code #}.
+         */
+        @Getter(AccessLevel.NONE)
+        private final @NotNull String quotaKeyPrefix;
+
+        /**
+         * The end of every {@linkplain #getQuotaKey(String) quota key}: {@code "@" + subnetPrefix}
+         * as {@link #bucketKey} ends, or empty when no subnet prefix is configured.
+         */
+        @Getter(AccessLevel.NONE)
+        private final @NotNull String quotaKeySuffix;
+
+        /**
          * Constructs a new metadata entry for the given route, rate-limit policy, and optional
          * subnet prefix.
          *
@@ -322,10 +338,31 @@ public final class RouteDiscovery {
             @NotNull RateLimit rateLimit,
             @NotNull Optional<IPv6Prefix> subnetPrefix
         ) {
+            int slash = route.indexOf('/');
+
             this.route = route;
             this.rateLimit = rateLimit;
             this.fullUrl = "https://" + route;
             this.bucketKey = subnetPrefix.map(p -> route + "@" + p).orElse(route);
+            this.quotaKeyPrefix = (slash < 0 ? route : route.substring(0, slash)) + "#";
+            this.quotaKeySuffix = subnetPrefix.map(p -> "@" + p).orElse("");
+        }
+
+        /**
+         * Composes the bucket key of a quota a server names for the requests it answers on this
+         * route.
+         * <p>
+         * A server names a quota for its whole host, so the key drops the route's path: every
+         * route on one host that names the same quota shares one bucket, and each quota a host
+         * names gets its own. The key is the route's host and port, {@code #}, the quota, and the
+         * subnet prefix {@link #bucketKey} carries, so subnet-rotated clients keep a quota bucket
+         * per subnet.
+         *
+         * @param quota the name of the quota, as {@link RateLimit#quotaFromHeaders(Map)} reads it
+         * @return the bucket key of the quota
+         */
+        public @NotNull String getQuotaKey(@NotNull String quota) {
+            return this.quotaKeyPrefix + quota + this.quotaKeySuffix;
         }
 
     }
