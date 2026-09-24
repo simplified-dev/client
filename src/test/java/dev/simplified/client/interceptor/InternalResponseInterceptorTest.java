@@ -1,6 +1,7 @@
 package dev.simplified.client.interceptor;
 
 import dev.simplified.client.ClientConfig;
+import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
@@ -61,19 +62,45 @@ class InternalResponseInterceptorTest {
         return true;
     }
 
-    private Response response(String... headerPairs) {
+    private static Map<String, Collection<String>> headers(String... headerPairs) {
         Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
         for (int i = 0; i < headerPairs.length; i += 2)
             headers.put(headerPairs[i], List.of(headerPairs[i + 1]));
 
+        return headers;
+    }
+
+    private Request request() {
         Map<String, Collection<String>> requestHeaders = Map.of(InternalRequestInterceptor.ROUTE_ID_HEADER, List.of(this.key));
+        return Request.create(Request.HttpMethod.GET, "https://127.0.0.1:0/resource", requestHeaders, null, StandardCharsets.UTF_8, null);
+    }
+
+    private Response response(String... headerPairs) {
+        return Response.builder()
+            .status(200)
+            .reason("OK")
+            .request(this.request())
+            .headers(headers(headerPairs))
+            .build();
+    }
+
+    /**
+     * Builds the replay {@link CachingFeignClient} answers a {@code 304} with: the stored headers
+     * overlaid by the 304's, marked as a cache hit that names the headers the 304 carried.
+     */
+    private Response revalidationReplay(String[] storedPairs, String... notModifiedPairs) {
+        Map<String, Collection<String>> notModified = headers(notModifiedPairs);
+        Map<String, Collection<String>> replayed = headers(storedPairs);
+        replayed.putAll(notModified);
+        replayed.put(ResponseCache.CACHE_HIT_HEADER, List.of("true"));
+        replayed.put(ResponseCache.REVALIDATED_HEADER, List.copyOf(notModified.keySet()));
 
         return Response.builder()
             .status(200)
             .reason("OK")
-            .request(Request.create(Request.HttpMethod.GET, "https://127.0.0.1:0/resource", requestHeaders, null, StandardCharsets.UTF_8, null))
-            .headers(headers)
+            .request(this.request())
+            .headers(replayed)
             .build();
     }
 
@@ -155,6 +182,45 @@ class InternalResponseInterceptorTest {
         assertThat(this.manager.getRequestCount(this.key), is(10L));
         assertThat(this.send(this.now), is(true));
         assertThat(this.manager.getRequestCount(this.key), is(11L));
+    }
+
+    @Test
+    @DisplayName("A 304 revalidation applies the rate-limit headers it carried, refunding revalidations the server never charged")
+    void revalidationAppliesTheHeadersThe304Carried() {
+        long resetSecond = this.nowSecond + 3600L;
+        String reset = Long.toString(resetSecond);
+        String[] stored = { "ETag", "\"v1\"", "x-ratelimit-limit", "60", "x-ratelimit-remaining", "40", "x-ratelimit-reset", reset };
+
+        this.send(this.now);
+        this.interceptor.recordServerLimit(this.gitHubResponse(60, 59, resetSecond), this.now);
+
+        for (int i = 0; i < 10; i++) {
+            this.send(this.now);
+            this.interceptor.recordServerLimit(this.revalidationReplay(
+                stored,
+                "ETag", "\"v1\"",
+                "x-ratelimit-limit", "60",
+                "x-ratelimit-remaining", "59",
+                "x-ratelimit-reset", reset
+            ), this.now);
+        }
+
+        assertThat(this.manager.getRequestCount(this.key), is(1L));
+    }
+
+    @Test
+    @DisplayName("A 304 revalidation leaves the bucket untouched by stored rate-limit headers the 304 did not carry")
+    void revalidationIgnoresStoredHeaders() {
+        long resetSecond = this.nowSecond + 3600L;
+        String[] stored = { "ETag", "\"v1\"", "x-ratelimit-limit", "60", "x-ratelimit-remaining", "5", "x-ratelimit-reset", Long.toString(resetSecond) };
+
+        this.send(this.now);
+        this.interceptor.recordServerLimit(this.gitHubResponse(60, 59, resetSecond), this.now);
+
+        this.send(this.now);
+        this.interceptor.recordServerLimit(this.revalidationReplay(stored, "ETag", "\"v1\""), this.now);
+
+        assertThat(this.manager.getRequestCount(this.key), is(2L));
     }
 
     @Test

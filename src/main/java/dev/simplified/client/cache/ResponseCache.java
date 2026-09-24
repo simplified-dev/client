@@ -126,6 +126,16 @@ public final class ResponseCache {
     public static final @NotNull String CACHE_STALE_HEADER = "X-Cache-Served-Stale";
 
     /**
+     * Internal marker response header set by {@link CachingFeignClient} on the replay answering a
+     * {@code 304 Not Modified} revalidation, its values naming the headers the 304 carried.
+     * <p>
+     * The replay carries the stored headers overlaid with the 304's, so each named header holds
+     * the value the server sent with the 304 and every other header is replayed from the cache.
+     * Named with {@link NetworkDetails#INTERNAL_HEADER_PREFIX} as an internal header.
+     */
+    public static final @NotNull String REVALIDATED_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Revalidated";
+
+    /**
      * The Caffeine-backed two-level cache of URL bucket -> Vary variants.
      */
     private final @NotNull Cache<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> cache;
@@ -407,16 +417,39 @@ public final class ResponseCache {
     }
 
     /**
+     * Tests whether a header of a {@code 304 Not Modified} response replaces the stored header
+     * of the same name - every header does except hop-by-hop, transport-framing and internal
+     * ones, and one without a value.
+     *
+     * @param name the header name
+     * @param values the header's values
+     * @return {@code true} if the header replaces the stored one
+     */
+    static boolean refreshesStoredHeader(@NotNull String name, @Nullable Collection<String> values) {
+        String lower = name.toLowerCase(Locale.ROOT);
+
+        return !HOP_BY_HOP_HEADERS.contains(lower)
+            && !TRANSPORT_HEADERS.contains(lower)
+            && !NetworkDetails.isInternalHeader(name)
+            && values != null
+            && !values.isEmpty();
+    }
+
+    /**
      * Merges the headers from a 304 response into an existing cached entry, producing a
      * fresh {@link CacheEntry} whose cached view exposes the merged headers while the
      * body bytes, status, and request are inherited from the existing entry.
+     * <p>
+     * {@link CachingFeignClient} answers the revalidation from the same merge, so the replay
+     * matches the refreshed entry.
      *
      * @param existing the cached entry to refresh
      * @param new304Headers the headers from the 304 response
      * @param <T> the decoded body type
      * @return a new {@code CacheEntry} with merged headers and the existing body bytes
+     * @see #refreshesStoredHeader(String, Collection)
      */
-    private static <T> @NotNull CacheEntry<T> mergeHeaders(
+    static <T> @NotNull CacheEntry<T> mergeHeaders(
         @NotNull CacheEntry<T> existing,
         @NotNull Map<String, ? extends Collection<String>> new304Headers
     ) {
@@ -425,21 +458,10 @@ public final class ResponseCache {
         merged.putAll(existingResponse.getHeaders());
 
         for (Map.Entry<String, ? extends Collection<String>> entry : new304Headers.entrySet()) {
-            String name = entry.getKey();
-            String lower = name.toLowerCase(Locale.ROOT);
-
-            if (HOP_BY_HOP_HEADERS.contains(lower) || TRANSPORT_HEADERS.contains(lower))
-                continue;
-
-            if (NetworkDetails.isInternalHeader(name))
-                continue;
-
             Collection<String> values = entry.getValue();
 
-            if (values == null || values.isEmpty())
-                continue;
-
-            merged.put(name, Concurrent.newUnmodifiableList(values));
+            if (refreshesStoredHeader(entry.getKey(), values))
+                merged.put(entry.getKey(), Concurrent.newUnmodifiableList(values));
         }
 
         ConcurrentMap<String, ConcurrentList<String>> mergedView = Concurrent.newUnmodifiableTreeMap(

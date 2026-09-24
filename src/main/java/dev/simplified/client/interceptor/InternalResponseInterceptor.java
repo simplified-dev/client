@@ -10,9 +10,11 @@ import dev.simplified.client.route.RouteDiscovery;
 import feign.InvocationContext;
 import feign.ResponseInterceptor;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.util.Collection;
 import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * Feign {@link ResponseInterceptor} that extracts server-advertised rate limit headers from
@@ -38,8 +40,9 @@ import java.util.Map;
  * HTTP cache semantics (fresh-hit short-circuiting, conditional revalidation, 304 header
  * merge) live in {@link CachingFeignClient CachingFeignClient}, which is the client Feign
  * executes requests through, so the cache-hit responses it synthesizes reach this interceptor
- * like live ones. Their rate-limit headers are the ones stored with the cache entry, so they
- * are skipped.
+ * like live ones. A fresh or stale-if-error replay carries only the rate-limit headers stored
+ * with the cache entry, so it is skipped. A replay answering a {@code 304 Not Modified} is
+ * applied through the headers the server sent with the 304, exactly as a live response is.
  * <p>
  * This class is instantiated internally by {@link Client} during Feign
  * builder configuration and is not intended for direct use by application code.
@@ -75,20 +78,51 @@ public final class InternalResponseInterceptor implements ResponseInterceptor {
 
     /**
      * Applies a response's rate-limit headers to the bucket of the route it answered.
-     * <p>
-     * A response synthesized by {@link CachingFeignClient}, marked with
-     * {@link ResponseCache#CACHE_HIT_HEADER}, is skipped. Its rate-limit headers were stored
-     * with the cache entry and describe the server's quota at that moment: a delta reset would
-     * be anchored to the wrong instant and a remaining count would roll the bucket back.
      *
      * @param response the response to read
      * @param now the epoch-millisecond timestamp the response was received at
+     * @see #serverHeaders(Map)
      */
     void recordServerLimit(@NotNull feign.Response response, long now) {
-        if (response.headers().containsKey(ResponseCache.CACHE_HIT_HEADER))
-            return;
+        Map<String, Collection<String>> headers = serverHeaders(response.headers());
 
-        this.rateLimitManager.updateFromHeaders(this.extractBucketKey(response), response.headers(), now);
+        if (headers != null)
+            this.rateLimitManager.updateFromHeaders(this.extractBucketKey(response), headers, now);
+    }
+
+    /**
+     * Selects the headers of a response that the server sent as it answered.
+     * <p>
+     * A live response's headers all are. A response synthesized by {@link CachingFeignClient},
+     * marked with {@link ResponseCache#CACHE_HIT_HEADER}, replays headers stored with the cache
+     * entry, which describe the server's quota when the entry was cached: a delta reset would be
+     * anchored to the wrong instant and a remaining count would roll the bucket back. A fresh or
+     * stale-if-error replay therefore has none. A replay answering a {@code 304 Not Modified}
+     * has exactly the headers {@link ResponseCache#REVALIDATED_HEADER} names, which hold the
+     * values the server sent with the 304.
+     *
+     * @param headers the response headers
+     * @return the headers the server sent, or {@code null} for a fresh or stale-if-error replay
+     */
+    private static @Nullable Map<String, Collection<String>> serverHeaders(@NotNull Map<String, Collection<String>> headers) {
+        if (!headers.containsKey(ResponseCache.CACHE_HIT_HEADER))
+            return headers;
+
+        Collection<String> revalidated = headers.get(ResponseCache.REVALIDATED_HEADER);
+
+        if (revalidated == null)
+            return null;
+
+        Map<String, Collection<String>> sent = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+
+        for (String name : revalidated) {
+            Collection<String> values = headers.get(name);
+
+            if (values != null)
+                sent.put(name, values);
+        }
+
+        return sent;
     }
 
     /**
