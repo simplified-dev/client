@@ -9,10 +9,11 @@ import java.time.temporal.ChronoUnit;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 /**
  * Immutable rate-limit policy describing the maximum number of requests allowed
- * within a sliding time window.
+ * within a time window.
  * <p>
  * This class models the <em>policy</em> (quota and window duration) rather than
  * the live request count, which is tracked externally by {@link RateLimitBucket}.
@@ -21,6 +22,11 @@ import java.util.Optional;
  *   <li>{@code RateLimit-Limit} maps to {@link #limit}</li>
  *   <li>{@code RateLimit-Reset} maps to {@link #resetSeconds}</li>
  * </ul>
+ * <p>
+ * A policy parsed from response headers also carries {@link #resetEpochMillis}, the instant the
+ * server's quota resets at, so the bucket enforcing it ends its window when the server does
+ * rather than a fixed duration after the window opened. A client-configured policy carries none,
+ * and its window runs for {@link #windowDurationMillis} from the moment the bucket opens it.
  * <p>
  * Instances can be obtained in several ways:
  * <ul>
@@ -43,7 +49,27 @@ public final class RateLimit {
      * Equivalent to calling {@link #unlimited()} but avoids allocating a new
      * object on each access.
      */
-    public static final @NotNull RateLimit UNLIMITED = new RateLimit(Long.MAX_VALUE, Long.MAX_VALUE / 1000L, true);
+    public static final @NotNull RateLimit UNLIMITED = new RateLimit(Long.MAX_VALUE, Long.MAX_VALUE / 1000L, true, 0L);
+
+    /**
+     * Smallest reset header value read as an epoch second rather than as delta seconds.
+     * <p>
+     * One billion seconds is 2001-09-09T01:46:40Z as an instant and over thirty-one years as a
+     * delta, a window no server advertises. A fixed bound rather than a comparison with the current
+     * second keeps an epoch reset that has already passed - a response that crossed the reset in
+     * flight, or a server clock behind the local one - from reading as a decades-long delta.
+     */
+    private static final long EPOCH_SECONDS_THRESHOLD = 1_000_000_000L;
+
+    /**
+     * Smallest reset header value read as an epoch millisecond rather than as an epoch second.
+     * <p>
+     * One trillion milliseconds is the instant {@link #EPOCH_SECONDS_THRESHOLD} seconds names,
+     * 2001-09-09T01:46:40Z, so every epoch-millisecond reset since then reaches it, while one
+     * trillion seconds is the year 33658, which no epoch-second reset reaches. Like the smaller
+     * bound, it is fixed so that a reset already past reads in the same unit as one to come.
+     */
+    private static final long EPOCH_MILLIS_THRESHOLD = 1_000_000_000_000L;
 
     /**
      * Maximum number of requests permitted within a single window, mirroring {@code RateLimit-Limit}.
@@ -51,7 +77,8 @@ public final class RateLimit {
     private final long limit;
 
     /**
-     * Window duration in seconds, mirroring {@code RateLimit-Reset} (delta seconds until quota resets).
+     * Window duration in seconds, mirroring {@code RateLimit-Reset}; for a policy parsed from headers,
+     * the seconds that remained until the server's quota reset when the headers were read.
      */
     private final long resetSeconds;
 
@@ -59,6 +86,12 @@ public final class RateLimit {
      * Normalized window duration in milliseconds, pre-computed for efficient elapsed-time comparisons.
      */
     private final long windowDurationMillis;
+
+    /**
+     * Epoch-millisecond instant at which the server-advertised quota resets, or {@code 0} for a
+     * client-configured policy whose window has no fixed end.
+     */
+    private final long resetEpochMillis;
 
     /**
      * Whether this instance represents an effectively unlimited policy on the client side.
@@ -71,14 +104,16 @@ public final class RateLimit {
      * @param limit maximum requests allowed in the window
      * @param resetSeconds window length or server-advertised reset interval in seconds
      * @param unlimited {@code true} to mark this instance as having no effective limit
+     * @param resetEpochMillis the epoch-millisecond instant the server's quota resets at, or {@code 0} for none
      */
-    private RateLimit(long limit, long resetSeconds, boolean unlimited) {
+    private RateLimit(long limit, long resetSeconds, boolean unlimited, long resetEpochMillis) {
         this.limit = limit;
         this.resetSeconds = resetSeconds;
         this.unlimited = unlimited;
+        this.resetEpochMillis = resetEpochMillis;
 
         // For "unlimited", we still give a very large window for consistency
-        long effectiveReset = unlimited ? Long.MAX_VALUE / 1000L : Math.max(resetSeconds, 1L);
+        long effectiveReset = unlimited ? Long.MAX_VALUE / 1000L : Math.clamp(resetSeconds, 1L, Long.MAX_VALUE / 1000L);
         this.windowDurationMillis = effectiveReset * 1000L;
     }
 
@@ -107,7 +142,8 @@ public final class RateLimit {
         this(
             limit,
             unit.getDuration().multipliedBy(window).getSeconds(),
-            false
+            false,
+            0L
         );
     }
 
@@ -140,6 +176,10 @@ public final class RateLimit {
      *       {@code X-RateLimit-Reset}</li>
      * </ol>
      * <p>
+     * The reset value may be delta seconds, as the RFC draft and APIs such as Hypixel's send it,
+     * an epoch second, as GitHub sends {@code X-RateLimit-Reset}, or an epoch millisecond; see
+     * {@link #fromHeaders(long, long, long)} for how the three are told apart.
+     * <p>
      * If neither format provides both a limit and a reset value, an empty
      * {@link Optional} is returned, indicating that rate-limit information is
      * not available in the response.
@@ -149,6 +189,21 @@ public final class RateLimit {
      *         empty if insufficient header information is present
      */
     public static @NotNull Optional<RateLimit> fromHeaders(@NotNull Map<String, Collection<String>> headers) {
+        return fromHeaders(headers, System.currentTimeMillis());
+    }
+
+    /**
+     * Parses rate-limit metadata from HTTP response headers against a pre-sampled clock reading.
+     * <p>
+     * Behaves as {@link #fromHeaders(Map)}, with {@code now} standing in for the current time when a
+     * delta reset is anchored to an instant and when an epoch reset is converted to seconds.
+     *
+     * @param headers the HTTP response headers to inspect
+     * @param now the epoch-millisecond timestamp the headers were received at
+     * @return an {@link Optional} containing the parsed {@link RateLimit}, or
+     *         empty if insufficient header information is present
+     */
+    public static @NotNull Optional<RateLimit> fromHeaders(@NotNull Map<String, Collection<String>> headers, long now) {
         // Try standard headers first (RFC draft)
         Optional<Long> limit = getFirstLong(headers, "RateLimit-Limit", "ratelimit-limit");
         Optional<Long> reset = getFirstLong(headers, "RateLimit-Reset", "ratelimit-reset");
@@ -163,7 +218,7 @@ public final class RateLimit {
         if (limit.isEmpty() || reset.isEmpty())
             return Optional.empty();
 
-        return Optional.of(fromHeaders(limit.get(), reset.get()));
+        return Optional.of(fromHeaders(limit.get(), reset.get(), now));
     }
 
     /**
@@ -172,14 +227,87 @@ public final class RateLimit {
      * <p>
      * This is a convenience method for constructing a rate limit when the
      * header values have already been extracted.  The {@code remaining} count,
-     * if relevant, is tracked externally by {@link RateLimitBucket}.
+     * if relevant, is tracked externally by {@link RateLimitBucket}.  The reset
+     * value is read as {@link #fromHeaders(long, long, long)} reads it, against
+     * the current time.
      *
      * @param limit the maximum number of requests allowed in the window
-     * @param resetSeconds the number of seconds until the quota resets
+     * @param resetSeconds the number of seconds until the quota resets, or the
+     *                     epoch second or epoch millisecond at which it resets
      * @return a new {@link RateLimit} reflecting the server-advertised policy
      */
     public static @NotNull RateLimit fromHeaders(long limit, long resetSeconds) {
-        return new RateLimit(limit, resetSeconds, false);
+        return fromHeaders(limit, resetSeconds, System.currentTimeMillis());
+    }
+
+    /**
+     * Creates a {@link RateLimit} from server-provided limit and reset values against a
+     * pre-sampled clock reading.
+     * <p>
+     * The reset's unit is told apart by its magnitude:
+     * <ul>
+     *   <li><b>below one billion</b> - delta seconds, the form of the RFC draft's
+     *       {@code RateLimit-Reset}; the policy resets that many seconds after {@code now}</li>
+     *   <li><b>one billion up to one trillion</b> - an epoch second, the form GitHub sends in
+     *       {@code X-RateLimit-Reset}</li>
+     *   <li><b>one trillion and above</b> - an epoch millisecond</li>
+     * </ul>
+     * One billion seconds and one trillion milliseconds are the same instant,
+     * 2001-09-09T01:46:40Z, so each epoch form covers every reset from then until the year 33658,
+     * and no delta reaches the thirty-one years one billion seconds spans. An epoch reset resets
+     * at the instant it names, and the policy's {@link #getResetSeconds() resetSeconds} is the
+     * seconds from {@code now} until then, rounded up and never negative. Every form carries the
+     * absolute {@link #getResetEpochMillis() reset instant}.
+     *
+     * @param limit the maximum number of requests allowed in the window
+     * @param reset the number of seconds until the quota resets, or the epoch second or epoch
+     *              millisecond at which it resets
+     * @param now the epoch-millisecond timestamp the values were received at
+     * @return a new {@link RateLimit} reflecting the server-advertised policy
+     */
+    public static @NotNull RateLimit fromHeaders(long limit, long reset, long now) {
+        if (reset < EPOCH_SECONDS_THRESHOLD) {
+            long secondsUntil = Math.max(0L, reset);
+            return new RateLimit(limit, secondsUntil, false, now + secondsUntil * 1000L);
+        }
+
+        long resetEpochMillis = reset < EPOCH_MILLIS_THRESHOLD ? reset * 1000L : reset;
+        long secondsUntil = Math.max(0L, Math.ceilDiv(resetEpochMillis - now, 1000L));
+        return new RateLimit(limit, secondsUntil, false, resetEpochMillis);
+    }
+
+    /**
+     * Parses the server's remaining request count for the current window from HTTP response
+     * headers, reading {@code RateLimit-Remaining} before {@code X-RateLimit-Remaining}.
+     *
+     * @param headers the HTTP response headers to inspect
+     * @return the remaining request count, or empty if neither header is present or parseable
+     */
+    public static @NotNull OptionalLong remainingFromHeaders(@NotNull Map<String, Collection<String>> headers) {
+        return getFirstLong(
+            headers,
+            "RateLimit-Remaining", "ratelimit-remaining",
+            "X-RateLimit-Remaining", "x-ratelimit-remaining"
+        )
+            .map(OptionalLong::of)
+            .orElseGet(OptionalLong::empty);
+    }
+
+    /**
+     * Parses the name of the quota a response counts against from HTTP response headers,
+     * reading {@code X-RateLimit-Resource}.
+     * <p>
+     * GitHub sends it as {@code core}, {@code search}, {@code graphql} and the like, naming
+     * quotas it tracks separately on one host, each with its own limit, remaining count and
+     * reset.
+     *
+     * @param headers the HTTP response headers to inspect
+     * @return the quota name, or empty if the header is absent or blank
+     */
+    public static @NotNull Optional<String> quotaFromHeaders(@NotNull Map<String, Collection<String>> headers) {
+        return getFirst(headers, "X-RateLimit-Resource", "x-ratelimit-resource")
+            .map(String::trim)
+            .filter(quota -> !quota.isEmpty());
     }
 
     /**
@@ -191,7 +319,7 @@ public final class RateLimit {
      * @return a fresh unlimited {@link RateLimit} instance
      */
     public static @NotNull RateLimit unlimited() {
-        return new RateLimit(Long.MAX_VALUE, Long.MAX_VALUE / 1000L, true);
+        return new RateLimit(Long.MAX_VALUE, Long.MAX_VALUE / 1000L, true, 0L);
     }
 
     /**

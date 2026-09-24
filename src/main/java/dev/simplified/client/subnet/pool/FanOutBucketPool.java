@@ -133,12 +133,14 @@ public final class FanOutBucketPool<C extends Contract> implements SubnetBucketP
 
     /**
      * Returns the request count tracked against this bucket's subnet for the pool's anchor route,
-     * sampled from the shared {@link RateLimitManager}. Reads the bucket's
-     * {@linkplain SubnetBucket#getAnchorBucketKey() precomputed anchor bucket key} - no per-call
-     * string composition. Used by {@link #selectLeastUsed()} to compare bucket load.
+     * sampled from the shared {@link RateLimitManager}. Resolves the bucket's
+     * {@linkplain SubnetBucket#getAnchorBucketKey() precomputed anchor bucket key} through
+     * {@link RateLimitManager#getBucketKey(String)}, so a route whose server names its quota is
+     * read from that quota's bucket - no per-call string composition. Used by
+     * {@link #selectLeastUsed()} to compare bucket load.
      */
     private long bucketCount(@NotNull SubnetBucket<C> bucket) {
-        return this.sharedManager.getRequestCount(bucket.getAnchorBucketKey());
+        return this.sharedManager.getRequestCount(this.sharedManager.getBucketKey(bucket.getAnchorBucketKey()));
     }
 
     private @NotNull RateLimitException saturationException() {

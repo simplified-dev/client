@@ -12,6 +12,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -37,7 +38,8 @@ import java.util.TreeMap;
  *       dispatching to the delegate. If the server replies with {@code 304 Not Modified},
  *       the cached entry is refreshed in place per
  *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
- *       §4.3.4</a> and a synthesized replay of the cached bytes is returned.</li>
+ *       §4.3.4</a> and a synthesized replay of the cached bytes is returned, carrying the
+ *       refreshed headers.</li>
  *   <li>On a stale cache hit where the origin returns {@code 5xx} within the entry's
  *       {@code stale-if-error} window, the cached bytes are served in place of the error
  *       response per <a href="https://datatracker.ietf.org/doc/html/rfc5861#section-4">RFC
@@ -56,7 +58,10 @@ import java.util.TreeMap;
  * {@link ResponseCache#CACHE_HIT_HEADER} for fresh and 304 replays, and
  * {@link ResponseCache#CACHE_STALE_HEADER} for stale-if-error replays. They are
  * preserved by {@link Response#getHeaders(Map)} and visible to application code, letting
- * observability consumers distinguish replayed responses from live exchanges.
+ * observability consumers distinguish replayed responses from live exchanges. A 304 replay
+ * also carries the internal {@link ResponseCache#REVALIDATED_HEADER}, naming the headers the
+ * 304 supplied, so a response interceptor can tell what the server sent from what the cache
+ * stored.
  *
  * @see ResponseCache
  * @see <a href="https://datatracker.ietf.org/doc/html/rfc7234">RFC 7234 - HTTP/1.1 Caching</a>
@@ -113,7 +118,7 @@ public final class CachingFeignClient implements Client {
      *         {@code null} if the caller should proceed to the delegate
      * @throws IOException if the delegate fails during a stale revalidation
      */
-    private @Nullable feign.Response serveFromCache(
+    @Nullable feign.Response serveFromCache(
         @NotNull Request request,
         @NotNull Request.Options options,
         @NotNull HttpMethod method,
@@ -138,7 +143,7 @@ public final class CachingFeignClient implements Client {
 
             feign.Util.ensureClosed(response.body());
 
-            return this.synthesizeFreshHit(request, entry, now);
+            return this.synthesizeRevalidatedHit(request, entry, now, response.headers());
         }
 
         if (isServerError(response.status()) && cached.canServeStaleOnError(now)) {
@@ -172,7 +177,39 @@ public final class CachingFeignClient implements Client {
         @NotNull Instant now
     ) {
         long ageSeconds = Math.max(0L, entry.response().currentAge(now).getSeconds());
-        return this.synthesize(originalRequest, entry, now, ageSeconds, false);
+        return this.synthesize(originalRequest, entry, now, ageSeconds, false, null);
+    }
+
+    /**
+     * Builds the synthetic replay answering a {@code 304 Not Modified} revalidation of the given
+     * cached entry.
+     * <p>
+     * The replay carries the entry's headers refreshed by the 304's, the same merge
+     * {@link ResponseCache#updateOn304} stores, plus {@link ResponseCache#REVALIDATED_HEADER}
+     * naming each header the 304 supplied.
+     *
+     * @param originalRequest the original request
+     * @param entry the cached entry the 304 revalidated
+     * @param now the synthesized timestamp
+     * @param notModifiedHeaders the headers of the {@code 304} response
+     * @return the synthesized revalidation replay
+     */
+    private @NotNull feign.Response synthesizeRevalidatedHit(
+        @NotNull Request originalRequest,
+        @NotNull CacheEntry<?> entry,
+        @NotNull Instant now,
+        @NotNull Map<String, Collection<String>> notModifiedHeaders
+    ) {
+        CacheEntry<?> refreshed = ResponseCache.mergeHeaders(entry, notModifiedHeaders);
+        List<String> revalidated = new ArrayList<>(notModifiedHeaders.size());
+
+        notModifiedHeaders.forEach((name, values) -> {
+            if (ResponseCache.refreshesStoredHeader(name, values))
+                revalidated.add(name);
+        });
+
+        long ageSeconds = Math.max(0L, refreshed.response().currentAge(now).getSeconds());
+        return this.synthesize(originalRequest, refreshed, now, ageSeconds, false, revalidated);
     }
 
     /**
@@ -193,17 +230,19 @@ public final class CachingFeignClient implements Client {
         @NotNull Instant now
     ) {
         long ageSeconds = Math.max(0L, entry.response().currentAge(now).getSeconds());
-        return this.synthesize(originalRequest, entry, now, ageSeconds, true);
+        return this.synthesize(originalRequest, entry, now, ageSeconds, true, null);
     }
 
     /**
-     * Core synthesis helper shared by fresh-hit and stale-hit paths.
+     * Core synthesis helper shared by the fresh-hit, revalidation and stale-hit paths.
      *
      * @param originalRequest the original request that was short-circuited
      * @param entry the cached entry whose bytes and headers will be served
      * @param now the timestamp for request-start and response-received headers
      * @param ageSeconds the computed {@code Age} value to advertise
      * @param servedStale whether this is a stale-if-error replay
+     * @param revalidated the names of the headers a {@code 304} supplied, or {@code null} for a
+     *                    replay no revalidation answered
      * @return the synthesized feign response
      */
     private @NotNull feign.Response synthesize(
@@ -211,10 +250,11 @@ public final class CachingFeignClient implements Client {
         @NotNull CacheEntry<?> entry,
         @NotNull Instant now,
         long ageSeconds,
-        boolean servedStale
+        boolean servedStale,
+        @Nullable List<String> revalidated
     ) {
         Response.CachedImpl<?> cached = entry.response();
-        Map<String, Collection<String>> responseHeaders = buildResponseHeaders(cached, now, ageSeconds, servedStale);
+        Map<String, Collection<String>> responseHeaders = buildResponseHeaders(cached, now, ageSeconds, servedStale, revalidated);
         Request syntheticRequest = buildSyntheticRequest(originalRequest, now);
 
         return feign.Response.builder()
@@ -309,13 +349,16 @@ public final class CachingFeignClient implements Client {
      * @param now the synthesized response-received timestamp
      * @param ageSeconds the computed cache age in seconds
      * @param servedStale whether to include the stale-served marker
+     * @param revalidated the names {@link ResponseCache#REVALIDATED_HEADER} carries, or
+     *                    {@code null} to omit it
      * @return the response headers for the synthetic response
      */
     private static @NotNull Map<String, Collection<String>> buildResponseHeaders(
         @NotNull Response.CachedImpl<?> cached,
         @NotNull Instant now,
         long ageSeconds,
-        boolean servedStale
+        boolean servedStale,
+        @Nullable List<String> revalidated
     ) {
         TreeMap<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
@@ -329,6 +372,9 @@ public final class CachingFeignClient implements Client {
 
         if (servedStale)
             headers.put(ResponseCache.CACHE_STALE_HEADER, List.of("true"));
+
+        if (revalidated != null)
+            headers.put(ResponseCache.REVALIDATED_HEADER, revalidated);
 
         headers.put(NetworkDetails.RESPONSE_RECEIVED, List.of(now.toString()));
 

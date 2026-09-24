@@ -1,6 +1,7 @@
 package dev.simplified.client.route;
 
 import dev.simplified.client.ClientConfig;
+import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitConfig;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.subnet.IPv6Prefix;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.util.Optional;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -67,6 +69,26 @@ class RouteDiscoveryBucketKeyTest {
         RouteDiscovery d = discovery(ip, 48);
         String expected = "127.0.0.1:0@" + IPv6Prefix.of(ip.getAddress(), 48);
         assertThat(d.getDefaultRoute().getBucketKey(), is(expected));
+    }
+
+    @Test
+    @DisplayName("A quota key is the route's host and the quota, whatever the route's path")
+    void quotaKeyIsHostAndQuota() {
+        RouteDiscovery.Metadata users = new RouteDiscovery.Metadata("api.github.com/users", RateLimit.UNLIMITED, Optional.empty());
+        RouteDiscovery.Metadata root = new RouteDiscovery.Metadata("api.github.com", RateLimit.UNLIMITED, Optional.empty());
+
+        assertThat(users.getQuotaKey("core"), is("api.github.com#core"));
+        assertThat(root.getQuotaKey("core"), is(users.getQuotaKey("core")));
+        assertThat(root.getQuotaKey("search"), is(not(root.getQuotaKey("core"))));
+    }
+
+    @Test
+    @DisplayName("A quota key carries the subnet prefix the bucketKey carries")
+    void quotaKeyCarriesSubnetPrefix() throws Exception {
+        IPv6Prefix prefix = IPv6Prefix.of(ipv6("2602:fa02:0a00:1234::beef").getAddress(), 56);
+        RouteDiscovery.Metadata metadata = new RouteDiscovery.Metadata("api.github.com/users", RateLimit.UNLIMITED, Optional.of(prefix));
+
+        assertThat(metadata.getQuotaKey("core"), is("api.github.com#core@" + prefix));
     }
 
     @Test

@@ -20,7 +20,6 @@ import dev.simplified.client.subnet.pool.SubnetBucket;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.gson.GsonSettings;
-import dev.simplified.lazy.Lazy;
 import dev.simplified.reflection.Reflection;
 import dev.simplified.reflection.accessor.MethodAccessor;
 import feign.codec.Decoder;
@@ -38,6 +37,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -299,16 +299,33 @@ public final class ClientConfig<C extends Contract> {
          * }</pre>
          *
          * <p>The Gson is materialised once via {@link GsonSettings#create()} on first
-         * error decode (memoised through {@link Lazy}) so the cost is paid only when
-         * the error path is actually taken. Subsequent error decodes reuse the cached
-         * Gson without re-running {@code create()}.</p>
+         * error decode so the cost is paid only when the error path is actually taken.
+         * Subsequent error decodes reuse the cached Gson without re-running
+         * {@code create()}, and a {@code create()} that throws is tried again on the next
+         * decode.</p>
          *
          * @param errorDecoder the Gson-aware error decoder
          * @return this builder
          */
         public @NotNull Builder<C> withErrorDecoder(@NotNull GsonAwareErrorDecoder errorDecoder) {
-            Lazy<Gson> gsonForDecoder = Lazy.of(() -> this.gsonSettings.create());
-            return this.withErrorDecoder(context -> errorDecoder.decode(gsonForDecoder.get(), context));
+            AtomicReference<Gson> gsonForDecoder = new AtomicReference<>();
+
+            return this.withErrorDecoder(context -> {
+                Gson gson = gsonForDecoder.get();
+
+                if (gson == null) {
+                    synchronized (gsonForDecoder) {
+                        gson = gsonForDecoder.get();
+
+                        if (gson == null) {
+                            gson = this.gsonSettings.create();
+                            gsonForDecoder.set(gson);
+                        }
+                    }
+                }
+
+                return errorDecoder.decode(gson, context);
+            });
         }
 
         /**

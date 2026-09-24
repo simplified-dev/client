@@ -1,5 +1,6 @@
 package dev.simplified.client.route;
 
+import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
@@ -12,9 +13,11 @@ import dev.simplified.collection.ConcurrentMap;
 import org.jetbrains.annotations.NotNull;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -89,47 +92,36 @@ public final class RouteDiscovery {
     }
 
     /**
-     * Extracts route metadata from a target, which may be either a {@link Class} or a
-     * {@link Method}.
+     * Extracts route metadata from a target, which may be either the endpoint interface or one
+     * of its methods.
      * <p>
-     * The extraction attempts two strategies in order:
+     * The extraction attempts two strategies in order, each against the target's own
+     * annotations:
      * <ol>
-     *   <li>A direct {@link Route @Route} annotation on the class (for a class target)
-     *       or on the declaring class (for a method target).</li>
-     *   <li>A {@link DynamicRoute @DynamicRoute}-annotated custom annotation on the target,
-     *       whose designated method is invoked reflectively to obtain a
-     *       {@link DynamicRouteProvider}.</li>
+     *   <li>A direct {@link Route @Route} annotation.</li>
+     *   <li>A {@link DynamicRoute @DynamicRoute}-annotated custom annotation, whose designated
+     *       method is invoked reflectively to obtain a {@link DynamicRouteProvider}.</li>
      * </ol>
+     * A method without either yields nothing, so {@link #getMetadata(Method)} gives it the
+     * type-level route; the type-level route never stands in for a method's own.
      *
-     * @param target a {@link Class} or {@link Method} to inspect for route annotations
+     * @param target the endpoint interface or one of its methods
      * @param subnetPrefix the optional subnet prefix to bake into the resulting metadata's bucket key
      * @return an {@link Optional} containing the resolved {@link Metadata}, or empty if
      *         no route annotation is found
      */
     private static @NotNull Optional<Metadata> extractRouteFromTarget(
-        @NotNull Object target,
+        @NotNull AnnotatedElement target,
         @NotNull Optional<IPv6Prefix> subnetPrefix
     ) {
-        Class<?> targetClass;
-        if (target instanceof Class<?> clazz)
-            targetClass = clazz;
-        else if (target instanceof Method method)
-            targetClass = method.getDeclaringClass();
-        else
-            return Optional.empty();
-
-        Route routeAnno = targetClass.getAnnotation(Route.class);
+        Route routeAnno = target.getAnnotation(Route.class);
         if (routeAnno != null) {
             String route = stripProtocol(routeAnno.value());
             RateLimit rateLimit = RateLimit.fromAnnotation(routeAnno.rateLimit());
             return Optional.of(new Metadata(route, rateLimit, subnetPrefix));
         }
 
-        Annotation[] annotations = (target instanceof Method method)
-            ? method.getAnnotations()
-            : targetClass.getAnnotations();
-
-        for (Annotation annotation : annotations) {
+        for (Annotation annotation : target.getAnnotations()) {
             DynamicRoute dynamicRoute = annotation.annotationType().getAnnotation(DynamicRoute.class);
 
             if (dynamicRoute == null)
@@ -310,6 +302,20 @@ public final class RouteDiscovery {
         private final @NotNull String bucketKey;
 
         /**
+         * The start of every {@linkplain #getQuotaKey(String) quota key}: the route's host and
+         * port, without its path, followed by {@code #}.
+         */
+        @Getter(AccessLevel.NONE)
+        private final @NotNull String quotaKeyPrefix;
+
+        /**
+         * The end of every {@linkplain #getQuotaKey(String) quota key}: {@code "@" + subnetPrefix}
+         * as {@link #bucketKey} ends, or empty when no subnet prefix is configured.
+         */
+        @Getter(AccessLevel.NONE)
+        private final @NotNull String quotaKeySuffix;
+
+        /**
          * Constructs a new metadata entry for the given route, rate-limit policy, and optional
          * subnet prefix.
          *
@@ -322,10 +328,31 @@ public final class RouteDiscovery {
             @NotNull RateLimit rateLimit,
             @NotNull Optional<IPv6Prefix> subnetPrefix
         ) {
+            int slash = route.indexOf('/');
+
             this.route = route;
             this.rateLimit = rateLimit;
             this.fullUrl = "https://" + route;
             this.bucketKey = subnetPrefix.map(p -> route + "@" + p).orElse(route);
+            this.quotaKeyPrefix = (slash < 0 ? route : route.substring(0, slash)) + "#";
+            this.quotaKeySuffix = subnetPrefix.map(p -> "@" + p).orElse("");
+        }
+
+        /**
+         * Composes the bucket key of a quota a server names for the requests it answers on this
+         * route.
+         * <p>
+         * A server names a quota for its whole host, so the key drops the route's path: every
+         * route on one host that names the same quota shares one bucket, and each quota a host
+         * names gets its own. The key is the route's host and port, {@code #}, the quota, and the
+         * subnet prefix {@link #bucketKey} carries, so subnet-rotated clients keep a quota bucket
+         * per subnet.
+         *
+         * @param quota the name of the quota, as {@link RateLimit#quotaFromHeaders(Map)} reads it
+         * @return the bucket key of the quota
+         */
+        public @NotNull String getQuotaKey(@NotNull String quota) {
+            return this.quotaKeyPrefix + quota + this.quotaKeySuffix;
         }
 
     }

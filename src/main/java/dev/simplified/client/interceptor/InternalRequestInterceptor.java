@@ -7,11 +7,10 @@ import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.route.RouteDiscovery;
+import feign.MethodMetadata;
 import feign.RequestInterceptor;
 import feign.RequestTemplate;
 import org.jetbrains.annotations.NotNull;
-
-import java.lang.reflect.Method;
 
 /**
  * Feign {@link RequestInterceptor} that applies route resolution and client-side rate limit
@@ -21,11 +20,17 @@ import java.lang.reflect.Method;
  * <ol>
  *   <li>Resolves the target {@link RouteDiscovery.Metadata} for the invoked endpoint method
  *       via {@link RouteDiscovery}.</li>
- *   <li>Checks whether the route is currently rate-limited using {@link RateLimitManager}.
+ *   <li>Resolves the bucket the endpoint's requests count against through
+ *       {@link RateLimitManager#getBucketKey(String, String)}: the quota the endpoint's latest
+ *       response named, or the route's own bucket.</li>
+ *   <li>Checks whether that bucket is currently rate-limited using {@link RateLimitManager}.
  *       If the limit has been reached, a {@link RateLimitException} is thrown to abort the
  *       request before it leaves the client.</li>
  *   <li>Records the request in the rate limit tracker so future calls can be evaluated
  *       against the configured quota.</li>
+ *   <li>Numbers the request with {@link RateLimitManager#nextSequence()}, replacing any number
+ *       an earlier attempt of the same template carried, so {@link InternalResponseInterceptor}
+ *       can tell a late response from the response to a later request.</li>
  *   <li>Replaces the placeholder target URL on the template with the real HTTPS URL
  *       obtained from the route metadata.</li>
  * </ol>
@@ -56,24 +61,25 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
     /**
      * The discovery engine that maps endpoint methods to their route metadata. Each
      * {@link RouteDiscovery.Metadata} carries a precomputed
-     * {@linkplain RouteDiscovery.Metadata#getBucketKey() bucket key} that this interceptor reads
-     * directly - no per-request composition.
+     * {@linkplain RouteDiscovery.Metadata#getBucketKey() bucket key} that this interceptor hands
+     * to the manager directly - no per-request composition.
      */
     private final @NotNull RouteDiscovery routeDiscovery;
 
     /**
-     * Internal header key used to carry the resolved bucket key from request to response interceptor.
+     * Internal header key used to carry the request's {@linkplain RateLimitManager#nextSequence()
+     * sequence number} from request to response interceptor.
      */
-    static final @NotNull String ROUTE_ID_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Route-Id";
+    static final @NotNull String SEQUENCE_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Request-Sequence";
 
     /**
      * {@inheritDoc}
      */
     @Override
     public void apply(@NotNull RequestTemplate template) {
-        Method method = template.methodMetadata().method();
-        RouteDiscovery.Metadata routeMetadata = this.routeDiscovery.getMetadata(method);
-        String bucketKey = routeMetadata.getBucketKey();
+        MethodMetadata endpoint = template.methodMetadata();
+        RouteDiscovery.Metadata routeMetadata = this.routeDiscovery.getMetadata(endpoint.method());
+        String bucketKey = this.rateLimitManager.getBucketKey(routeMetadata.getBucketKey(), endpoint.configKey());
         long now = System.currentTimeMillis();
 
         if (this.rateLimitManager.isRateLimited(bucketKey, routeMetadata.getRateLimit(), now))
@@ -81,7 +87,8 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
 
         this.rateLimitManager.trackRequest(bucketKey, routeMetadata.getRateLimit(), now);
 
-        template.header(ROUTE_ID_HEADER, bucketKey);
+        template.removeHeader(SEQUENCE_HEADER);
+        template.header(SEQUENCE_HEADER, Long.toString(this.rateLimitManager.nextSequence()));
         template.target(routeMetadata.getFullUrl());
     }
 
