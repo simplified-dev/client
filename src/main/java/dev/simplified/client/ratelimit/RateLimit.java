@@ -59,7 +59,17 @@ public final class RateLimit {
      * second keeps an epoch reset that has already passed - a response that crossed the reset in
      * flight, or a server clock behind the local one - from reading as a decades-long delta.
      */
-    private static final long EPOCH_RESET_THRESHOLD = 1_000_000_000L;
+    private static final long EPOCH_SECONDS_THRESHOLD = 1_000_000_000L;
+
+    /**
+     * Smallest reset header value read as an epoch millisecond rather than as an epoch second.
+     * <p>
+     * One trillion milliseconds is the instant {@link #EPOCH_SECONDS_THRESHOLD} seconds names,
+     * 2001-09-09T01:46:40Z, so every epoch-millisecond reset since then reaches it, while one
+     * trillion seconds is the year 33658, which no epoch-second reset reaches. Like the smaller
+     * bound, it is fixed so that a reset already past reads in the same unit as one to come.
+     */
+    private static final long EPOCH_MILLIS_THRESHOLD = 1_000_000_000_000L;
 
     /**
      * Maximum number of requests permitted within a single window, mirroring {@code RateLimit-Limit}.
@@ -167,8 +177,8 @@ public final class RateLimit {
      * </ol>
      * <p>
      * The reset value may be delta seconds, as the RFC draft and APIs such as Hypixel's send it,
-     * or an epoch second, as GitHub sends {@code X-RateLimit-Reset}; see
-     * {@link #fromHeaders(long, long, long)} for how the two are told apart.
+     * an epoch second, as GitHub sends {@code X-RateLimit-Reset}, or an epoch millisecond; see
+     * {@link #fromHeaders(long, long, long)} for how the three are told apart.
      * <p>
      * If neither format provides both a limit and a reset value, an empty
      * {@link Optional} is returned, indicating that rate-limit information is
@@ -223,7 +233,7 @@ public final class RateLimit {
      *
      * @param limit the maximum number of requests allowed in the window
      * @param resetSeconds the number of seconds until the quota resets, or the
-     *                     epoch second at which it resets
+     *                     epoch second or epoch millisecond at which it resets
      * @return a new {@link RateLimit} reflecting the server-advertised policy
      */
     public static @NotNull RateLimit fromHeaders(long limit, long resetSeconds) {
@@ -234,27 +244,36 @@ public final class RateLimit {
      * Creates a {@link RateLimit} from server-provided limit and reset values against a
      * pre-sampled clock reading.
      * <p>
-     * A reset of at least one billion is an epoch second, the form GitHub sends in
-     * {@code X-RateLimit-Reset}; the policy resets at that instant and its
-     * {@link #getResetSeconds() resetSeconds} is the seconds from {@code now} until then, rounded
-     * up and never negative. A smaller reset is delta seconds, the form of the RFC draft's
-     * {@code RateLimit-Reset}; the policy resets that many seconds after {@code now}. Either way
-     * the result carries the absolute {@link #getResetEpochMillis() reset instant}.
+     * The reset's unit is told apart by its magnitude:
+     * <ul>
+     *   <li><b>below one billion</b> - delta seconds, the form of the RFC draft's
+     *       {@code RateLimit-Reset}; the policy resets that many seconds after {@code now}</li>
+     *   <li><b>one billion up to one trillion</b> - an epoch second, the form GitHub sends in
+     *       {@code X-RateLimit-Reset}</li>
+     *   <li><b>one trillion and above</b> - an epoch millisecond</li>
+     * </ul>
+     * One billion seconds and one trillion milliseconds are the same instant,
+     * 2001-09-09T01:46:40Z, so each epoch form covers every reset from then until the year 33658,
+     * and no delta reaches the thirty-one years one billion seconds spans. An epoch reset resets
+     * at the instant it names, and the policy's {@link #getResetSeconds() resetSeconds} is the
+     * seconds from {@code now} until then, rounded up and never negative. Every form carries the
+     * absolute {@link #getResetEpochMillis() reset instant}.
      *
      * @param limit the maximum number of requests allowed in the window
-     * @param reset the number of seconds until the quota resets, or the epoch second at which it resets
+     * @param reset the number of seconds until the quota resets, or the epoch second or epoch
+     *              millisecond at which it resets
      * @param now the epoch-millisecond timestamp the values were received at
      * @return a new {@link RateLimit} reflecting the server-advertised policy
      */
     public static @NotNull RateLimit fromHeaders(long limit, long reset, long now) {
-        if (reset >= EPOCH_RESET_THRESHOLD) {
-            long resetEpochMillis = reset > Long.MAX_VALUE / 1000L ? Long.MAX_VALUE : reset * 1000L;
-            long secondsUntil = Math.max(0L, reset - Math.floorDiv(now, 1000L));
-            return new RateLimit(limit, secondsUntil, false, resetEpochMillis);
+        if (reset < EPOCH_SECONDS_THRESHOLD) {
+            long secondsUntil = Math.max(0L, reset);
+            return new RateLimit(limit, secondsUntil, false, now + secondsUntil * 1000L);
         }
 
-        long secondsUntil = Math.max(0L, reset);
-        return new RateLimit(limit, secondsUntil, false, now + secondsUntil * 1000L);
+        long resetEpochMillis = reset < EPOCH_MILLIS_THRESHOLD ? reset * 1000L : reset;
+        long secondsUntil = Math.max(0L, Math.ceilDiv(resetEpochMillis - now, 1000L));
+        return new RateLimit(limit, secondsUntil, false, resetEpochMillis);
     }
 
     /**

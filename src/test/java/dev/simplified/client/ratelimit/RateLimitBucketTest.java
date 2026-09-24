@@ -65,6 +65,19 @@ class RateLimitBucketTest {
     }
 
     @Test
+    @DisplayName("A bucket exhausted under an epoch-millisecond reset becomes usable at that instant")
+    void exhaustedBucketUsableAtMillisecondReset() {
+        long resetMillis = NOW + 90_500L;
+        RateLimitBucket bucket = new RateLimitBucket(RateLimit.UNLIMITED, NOW);
+        bucket.updateRateLimit(RateLimit.fromHeaders(5, resetMillis, NOW), NOW);
+
+        exhaust(bucket, 5, NOW);
+
+        assertThat(bucket.isRateLimited(resetMillis - 1L), is(true));
+        assertThat(bucket.isRateLimited(resetMillis), is(false));
+    }
+
+    @Test
     @DisplayName("Remaining reads the full limit once the window has ended, before any request rotates it")
     void remainingRecoversWithoutRotation() {
         long resetMillis = (NOW_SECOND + 60L) * 1000L;

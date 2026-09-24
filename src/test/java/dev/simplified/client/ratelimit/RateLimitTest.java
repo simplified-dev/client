@@ -68,6 +68,65 @@ class RateLimitTest {
     }
 
     @Test
+    @DisplayName("An epoch-millisecond X-RateLimit-Reset yields a policy that resets at that instant")
+    void epochMillisecondResetEndsAtThatInstant() {
+        long resetMillis = NOW + 3_600_000L;
+        RateLimit limit = RateLimit.fromHeaders(
+            headers("x-ratelimit-limit", "60", "x-ratelimit-reset", Long.toString(resetMillis)),
+            NOW
+        ).orElseThrow();
+
+        assertThat(limit.getResetEpochMillis(), is(resetMillis));
+        assertThat(limit.getResetSeconds(), is(3600L));
+        assertThat(limit.getWindowDurationMillis(), is(3_600_000L));
+    }
+
+    @Test
+    @DisplayName("An epoch-millisecond reset converts to seconds until then rounded up")
+    void epochMillisecondResetRoundsSecondsUp() {
+        RateLimit limit = RateLimit.fromHeaders(60, NOW + 59_600L, NOW);
+
+        assertThat(limit.getResetEpochMillis(), is(NOW + 59_600L));
+        assertThat(limit.getResetSeconds(), is(60L));
+    }
+
+    @Test
+    @DisplayName("The largest delta reset, one below a billion, is seconds after receipt")
+    void largestDeltaReset() {
+        RateLimit limit = RateLimit.fromHeaders(60, 999_999_999L, NOW);
+
+        assertThat(limit.getResetEpochMillis(), is(NOW + 999_999_999_000L));
+        assertThat(limit.getResetSeconds(), is(999_999_999L));
+    }
+
+    @Test
+    @DisplayName("The smallest epoch-second reset, one billion, is the instant 2001-09-09T01:46:40Z")
+    void smallestEpochSecondReset() {
+        RateLimit limit = RateLimit.fromHeaders(60, 1_000_000_000L, NOW);
+
+        assertThat(limit.getResetEpochMillis(), is(1_000_000_000_000L));
+        assertThat(limit.getResetSeconds(), is(0L));
+    }
+
+    @Test
+    @DisplayName("The largest epoch-second reset, one below a trillion, is read in seconds")
+    void largestEpochSecondReset() {
+        RateLimit limit = RateLimit.fromHeaders(60, 999_999_999_999L, NOW);
+
+        assertThat(limit.getResetEpochMillis(), is(999_999_999_999_000L));
+        assertThat(limit.getResetSeconds(), is(999_999_999_999L - NOW_SECOND));
+    }
+
+    @Test
+    @DisplayName("The smallest epoch-millisecond reset, one trillion, is the same instant as one billion seconds")
+    void smallestEpochMillisecondReset() {
+        RateLimit limit = RateLimit.fromHeaders(60, 1_000_000_000_000L, NOW);
+
+        assertThat(limit.getResetEpochMillis(), is(1_000_000_000_000L));
+        assertThat(limit.getResetSeconds(), is(0L));
+    }
+
+    @Test
     @DisplayName("A delta RateLimit-Reset yields a policy that resets that many seconds after receipt")
     void deltaResetAnchorsToReceipt() {
         RateLimit limit = RateLimit.fromHeaders(
