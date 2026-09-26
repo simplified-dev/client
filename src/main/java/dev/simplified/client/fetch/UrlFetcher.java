@@ -62,16 +62,21 @@ import java.util.TreeMap;
  *       {@link Response.DirectImpl} immediately. On a stale hit with an {@code ETag} or
  *       {@code Last-Modified} validator, attach {@code If-None-Match} /
  *       {@code If-Modified-Since} and dispatch a conditional request; on
- *       {@code 304 Not Modified}, refresh the cached headers and replay the cached body;
+ *       {@code 304 Not Modified}, refresh the cached entry and replay the cached body under
+ *       the refreshed headers, or under the stored ones when
+ *       {@link ResponseCache#updateOn304} refreshed nothing;
  *       on a {@code 5xx} within the entry's {@code stale-if-error} window, replay the
  *       cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}.</li>
  *   <li>Check the local rate limit; raise {@link UrlFetchException.RateLimited} if exhausted.</li>
- *   <li>Track the request and dispatch through the shared Apache transport.</li>
+ *   <li>Track the request and dispatch through the shared Apache transport, recording the
+ *       instant the response arrived on the request's context so the response's
+ *       {@link NetworkDetails} carry the whole round trip.</li>
  *   <li>Read the response body capped at {@link UrlFetcherConfig#getMaxBodyBytes()};
  *       raise {@link UrlFetchException.BodyCapExceeded} if the cap is hit.</li>
- *   <li>Build a {@link Response.DirectImpl}, record it on the cache for observability, and
- *       offer it to the cache for storage.</li>
- *   <li>Raise {@link UrlFetchException} for non-success statuses; otherwise return.</li>
+ *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>
+ *   <li>Raise {@link UrlFetchException} for an {@linkplain Response#isError() error} status,
+ *       which is never offered to the cache; otherwise offer the response to the cache for
+ *       storage and return it.</li>
  * </ol>
  *
  * @see UrlFetcherConfig
@@ -264,10 +269,11 @@ public final class UrlFetcher {
         HttpClientContext context = HttpClientContext.create();
 
         try (CloseableHttpResponse apacheResponse = this.http.execute(get, context)) {
+            context.setAttribute(NetworkDetails.RESPONSE_RECEIVED, Instant.now());
             int statusCode = apacheResponse.getCode();
 
             if (statusCode == HttpStatus.NOT_MODIFIED.getCode() && revalidating != null)
-                return this.serveOn304(request, apacheResponse, revalidating);
+                return this.serveOn304(request, apacheResponse, context, revalidating);
 
             if (HttpState.SERVER_ERROR.containsCode(statusCode) && revalidating != null
                 && revalidating.response().canServeStaleOnError(Instant.now())) {
@@ -288,7 +294,6 @@ public final class UrlFetcher {
             );
 
             this.responseCache.recordLastResponse(response);
-            this.responseCache.store(response, body);
 
             if (response.isError())
                 throw new UrlFetchException(
@@ -300,6 +305,7 @@ public final class UrlFetcher {
                     url
                 );
 
+            this.responseCache.store(response, body);
             return response;
         } catch (UrlFetchException ex) {
             throw ex;
@@ -311,6 +317,7 @@ public final class UrlFetcher {
     private @NotNull Response.DirectImpl<byte[]> serveOn304(
         @NotNull Request request,
         @NotNull CloseableHttpResponse apacheResponse,
+        @NotNull HttpClientContext context,
         @NotNull CacheEntry<?> revalidating
     ) {
         CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, request.getUrl());
@@ -318,9 +325,11 @@ public final class UrlFetcher {
             revalidating.response().varyHeaderNames(),
             Collections.emptyMap()
         );
-        this.responseCache.updateOn304(key, fingerprint, headersFromApache(apacheResponse));
+        CacheEntry<?> refreshed = this.responseCache
+            .updateOn304(key, fingerprint, headersFromApache(apacheResponse), new NetworkDetails(context))
+            .orElse(revalidating);
         EntityUtils.consumeQuietly(apacheResponse.getEntity());
-        return this.serveFromCache(request, revalidating, false);
+        return this.serveFromCache(request, refreshed, false);
     }
 
     private @NotNull Response.DirectImpl<byte[]> serveFromCache(

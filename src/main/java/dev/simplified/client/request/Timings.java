@@ -22,8 +22,8 @@ import java.util.concurrent.TimeUnit;
  *   <li><b>Concurrency limits</b> - maximum total connections and maximum connections per
  *       route in the {@link PoolingHttpClientConnectionManager}.</li>
  *   <li><b>Client-level caching</b> - entries in the RFC 7234 response cache are evicted by
- *       per-entry freshness ({@code Cache-Control: max-age} / {@code s-maxage} /
- *       {@code Expires}) extended by any {@code stale-if-error} window, with a hard ceiling
+ *       per-entry freshness ({@code Cache-Control: max-age} / {@code Expires}) extended by
+ *       any {@code stale-if-error} window, with a hard ceiling
  *       of {@link #cacheSafetyFallback()} so nothing survives eternally. Total cache weight
  *       is bounded by {@link #maxCacheBytes()}, summing raw-body bytes, header bytes, and
  *       per-entry overhead.</li>

@@ -20,6 +20,14 @@ import java.util.concurrent.ConcurrentMap;
  * {@code Timings#cacheSafetyFallback}, guaranteeing that even a response carrying
  * {@code Cache-Control: immutable, max-age=99999999} will eventually be evicted.
  * <p>
+ * The lifetime is counted from the write that created or last replaced the bucket.
+ * {@link ResponseCache} writes a bucket only as a whole, holding every variant, so the
+ * lifetime is always computed over the populated bucket: a bucket whose longest living
+ * duration is zero, one holding no response with explicit freshness or a
+ * {@code stale-if-error} window, expires as it is written. An entry outlives its freshness
+ * only by its {@code stale-if-error} window, or by the age it had when it arrived, so a stale
+ * entry is held for revalidation only within that margin.
+ * <p>
  * The safety cap is baked into {@link #expireAfterCreate(CacheKey.UrlKey, ConcurrentMap, long)}
  * rather than layered on top via {@code Caffeine#expireAfterWrite(...)} because Caffeine
  * rejects combining a custom {@code Expiry} with a fixed write/access duration at build
@@ -67,9 +75,10 @@ public final class ResponseCacheExpiry implements Expiry<CacheKey.UrlKey, Concur
      * {@inheritDoc}
      * <p>
      * Recomputes the living duration on update, matching the behaviour of
-     * {@link #expireAfterCreate(CacheKey.UrlKey, ConcurrentMap, long)}. Updates occur
-     * when a new Vary variant is added to an existing bucket or when {@code updateOn304}
-     * refreshes the entry after a successful revalidation.
+     * {@link #expireAfterCreate(CacheKey.UrlKey, ConcurrentMap, long)}, so the bucket's
+     * lifetime restarts from the replacement. An update is a write of a new bucket over a
+     * live one: {@link ResponseCache#store} adding or replacing a Vary variant, or
+     * {@link ResponseCache#updateOn304} refreshing one after a successful revalidation.
      */
     @Override
     public long expireAfterUpdate(
