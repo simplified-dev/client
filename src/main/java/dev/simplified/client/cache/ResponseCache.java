@@ -2,6 +2,7 @@ package dev.simplified.client.cache;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Ticker;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import dev.simplified.client.decoder.InternalErrorDecoder;
 import dev.simplified.client.decoder.InternalResponseDecoder;
@@ -16,6 +17,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -27,38 +29,53 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
- * Merged facade over the client's HTTP response cache and the "last response" observability
- * channel, replacing the legacy unbounded {@code recentResponses} list with an RFC 7234
- * compliant private cache.
+ * Facade over the client's RFC 7234 private HTTP response cache and its "last response"
+ * observability channel.
  * <p>
  * The cache is a two-level Caffeine structure: the outer {@link Cache} is keyed by
- * {@link CacheKey.UrlKey} (HTTP method + canonicalized URL) and holds an inner
- * {@link java.util.concurrent.ConcurrentMap ConcurrentHashMap} of
- * {@link CacheKey.VaryFingerprint} to {@link Response.CachedImpl}. This lets Caffeine evict
+ * {@link CacheKey.UrlKey} (HTTP method + canonicalized URL) and holds a bucket, an inner
+ * {@link ConcurrentHashMap} of
+ * {@link CacheKey.VaryFingerprint} to {@link CacheEntry}. This lets Caffeine evict
  * whole URL buckets while still honouring content-negotiation variants, and avoids the
  * O(N) partial-key scans a flat composite-key layout would require.
  * <p>
+ * A bucket is never changed in place. {@link #store(Response, byte[])} and
+ * {@link #updateOn304} write a new bucket, holding the current bucket's variants plus the
+ * stored or refreshed one, through {@code compute} on the cache's {@link Cache#asMap() map
+ * view}, so Caffeine weighs the populated bucket and sets its lifetime from every variant it
+ * holds.
+ * <p>
  * Eviction is driven by three layered mechanisms:
  * <ul>
- *   <li><b>Per-entry freshness</b> - {@link ResponseCacheExpiry} computes a TTL for each
- *       bucket from each variant's {@link Response.CachedImpl#freshnessLifetime()
- *       freshness lifetime} plus its {@code stale-if-error} window, then clamps it to
- *       the constructor-supplied safety fallback</li>
+ *   <li><b>Per-bucket lifetime</b> - {@link ResponseCacheExpiry} ends each bucket's lifetime,
+ *       counted from the write that created or last replaced it, after the longest
+ *       {@link Response.CachedImpl#freshnessLifetime() freshness lifetime} plus
+ *       {@code stale-if-error} window among its variants, clamped to the
+ *       constructor-supplied safety fallback</li>
  *   <li><b>Weight-based eviction</b> - {@link ResponseCacheWeigher} sums raw-body bytes,
  *       header bytes, and an object-graph overhead per variant, with a total cap of
  *       the constructor-supplied max cache bytes</li>
  *   <li><b>Explicit invalidation</b> - unsafe HTTP methods invalidate the target URL
  *       (and any {@code Location} / {@code Content-Location} redirects) per
- *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.4">RFC 7234 §4.4</a></li>
+ *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.4">RFC 7234 §4.4</a>,
+ *       and {@link #invalidateAll()} drops every entry</li>
  * </ul>
+ * <p>
+ * A drop by {@link #invalidateAll()} also holds against answers still in flight:
+ * {@link #store(Response, byte[])} keeps a response, and {@link #updateOn304} applies a
+ * {@code 304 Not Modified}, only when its request was sent after the last drop, so an answer to
+ * a request sent before it cannot put the dropped state back.
  * <p>
  * In addition to the cache itself, this facade owns the client's single-slot
  * "last response" observability reference, exposing it via {@link #getLastResponse()}.
  * Because {@link ApiException ApiException} implements
  * {@link Response}, the same {@link AtomicReference} carries both success and error
- * snapshots, replacing the conflated roles of the old {@code recentResponses} list.
+ * snapshots.
  * <p>
  * This class is a <b>private/user-agent cache</b> per
  * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-1.2">RFC 7234 §1.2</a>;
@@ -146,6 +163,20 @@ public final class ResponseCache {
     private final @NotNull AtomicReference<Response<?>> lastResponse = new AtomicReference<>();
 
     /**
+     * Orders {@link #invalidateAll()} against {@link #store(Response, byte[])} and
+     * {@link #updateOn304}: a drop holds the write lock while it records {@link #emptiedAt} and
+     * empties the cache, and a store or refresh holds the read lock while it compares its
+     * request's start with {@link #emptiedAt} and writes the bucket.
+     */
+    private final @NotNull ReadWriteLock dropLock = new ReentrantReadWriteLock();
+
+    /**
+     * The instant {@link #invalidateAll()} last emptied the cache, or {@link Instant#EPOCH} before
+     * it has; read and written only under {@link #dropLock}.
+     */
+    private @NotNull Instant emptiedAt = Instant.EPOCH;
+
+    /**
      * Constructs a new response cache with the given byte cap and safety fallback.
      * <p>
      * Caffeine is configured with weight-based eviction capped at {@code maxCacheBytes},
@@ -159,10 +190,23 @@ public final class ResponseCache {
      *                                   freshness
      */
     public ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis) {
+        this(maxCacheBytes, cacheSafetyFallbackMillis, Ticker.systemTicker());
+    }
+
+    /**
+     * Constructs a new response cache whose bucket lifetimes are measured on the given ticker.
+     *
+     * @param maxCacheBytes the maximum total weight of all cached variants in bytes
+     * @param cacheSafetyFallbackMillis the absolute upper bound on any entry's lifetime, in
+     *                                  milliseconds
+     * @param ticker the time source Caffeine measures bucket lifetimes against
+     */
+    ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, @NotNull Ticker ticker) {
         this.cache = Caffeine.newBuilder()
             .maximumWeight(maxCacheBytes)
             .weigher(new ResponseCacheWeigher())
             .expireAfter(new ResponseCacheExpiry(Duration.ofMillis(cacheSafetyFallbackMillis)))
+            .ticker(ticker)
             .recordStats()
             .build();
     }
@@ -250,8 +294,8 @@ public final class ResponseCache {
 
     /**
      * Stores a decoded response and its captured body bytes in the cache if it passes the
-     * RFC 7234 §3 storage predicate. No-ops when the storage predicate rejects the response
-     * for any reason (see the class-level Javadoc and inline rules below).
+     * RFC 7234 §3 storage predicate and its request was sent after the last
+     * {@link #invalidateAll()}. No-ops when any rule below rejects the response.
      * <p>
      * Storage rules:
      * <ul>
@@ -262,7 +306,21 @@ public final class ResponseCache {
      *       405, 410, 414, 501}} unless explicit freshness is present -> skip</li>
      *   <li>response carries the {@link #CACHE_HIT_HEADER} marker (replay from this cache)
      *       -> skip</li>
+     *   <li>the start of the response's {@linkplain NetworkDetails#getRoundTrip() round trip}
+     *       is not after the instant {@link #invalidateAll()} last emptied the cache -> skip,
+     *       so an answer to a request in flight across a drop cannot re-enter the cache</li>
+     *   <li>the response carries no request start, which {@link NetworkDetails} reads as
+     *       {@link Instant#EPOCH} -> skip: nothing shows its request was sent after the last
+     *       drop, and {@link Response.CachedImpl#currentAge(Instant)} measures an entry's age
+     *       from that round trip, so the entry could never be judged fresh</li>
      * </ul>
+     * <p>
+     * The entry joins its URL's bucket through {@code compute}, which writes a new bucket
+     * holding the current bucket's variants and this one, replacing any variant with the same
+     * Vary fingerprint. Caffeine weighs the new bucket and sets its lifetime from every variant it
+     * holds, so a bucket whose longest freshness lifetime plus {@code stale-if-error} window is
+     * zero - a response with neither explicit freshness nor a {@code stale-if-error} window - is
+     * expired as it is written and is never answered by {@link #lookup}.
      * <p>
      * Streaming responses skip this overload entirely - the decoder pipeline routes them
      * around the cache because their bodies cannot be replayed.
@@ -278,15 +336,21 @@ public final class ResponseCache {
         if (!shouldStore(decoded))
             return;
 
+        Instant sent = decoded.getDetails().getRoundTrip().startedAt();
         CacheEntry<?> entry = buildEntry(decoded, body);
         Response.CachedImpl<?> cached = entry.response();
 
         CacheKey.UrlKey key = CacheKey.UrlKey.of(cached.getRequest().getMethod(), cached.getRequest().getUrl());
         CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(cached.varyHeaderNames(), toMultimap(cached.getHeaders()));
+        Lock lock = this.dropLock.readLock();
+        lock.lock();
 
-        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants = this.cache.asMap()
-            .computeIfAbsent(key, k -> new ConcurrentHashMap<>());
-        variants.put(fingerprint, entry);
+        try {
+            if (sent.isAfter(this.emptiedAt))
+                this.cache.asMap().compute(key, (k, variants) -> withVariant(variants, fingerprint, entry));
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -321,45 +385,114 @@ public final class ResponseCache {
     }
 
     /**
+     * Drops every cached entry and records the instant it did so.
+     * <p>
+     * {@link #store(Response, byte[])} refuses a response, and {@link #updateOn304} a
+     * {@code 304 Not Modified}, whose request was sent at or before that instant, so an answer to
+     * a request in flight across the drop cannot put the dropped state back; a request whose
+     * start falls in the same clock tick as the drop counts as sent before it. A store or refresh
+     * racing the drop either writes before it, and its entry is dropped, or compares its
+     * request's start after it, and is refused when that request was sent before.
+     */
+    public void invalidateAll() {
+        Lock lock = this.dropLock.writeLock();
+        lock.lock();
+
+        try {
+            this.emptiedAt = Instant.now();
+            this.cache.invalidateAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
      * Refreshes a cached variant after a successful {@code 304 Not Modified} revalidation
      * per <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
      * §4.3.4</a>.
      * <p>
-     * Builds a new {@link Response.CachedImpl} whose headers are the cached entry's headers
-     * overlaid with the end-to-end headers from the 304 response, never touching
-     * {@code Content-Length}, {@code Content-Encoding}, or {@code Transfer-Encoding}. The
-     * raw body, status, and request are carried forward unchanged from the cached entry.
-     * The resulting entry replaces the old one under the same {@code (UrlKey, VaryFingerprint)}
-     * pair, which triggers {@link ResponseCacheExpiry#expireAfterUpdate} and resets the
-     * bucket's TTL from the newly-parsed {@code Cache-Control} directives.
+     * Builds a new {@link CacheEntry} whose headers are the cached entry's headers overlaid
+     * with the end-to-end headers from the 304 response, and whose age is measured from the 304
+     * exchange (see {@link #mergeHeaders(CacheEntry, Map, NetworkDetails)}). The raw body,
+     * status, and request are carried forward unchanged from the cached entry. The refreshed
+     * entry replaces the old one through {@code compute}, in a new bucket holding the bucket's
+     * other variants, which triggers {@link ResponseCacheExpiry#expireAfterUpdate} and restarts
+     * the bucket's lifetime from the refreshed {@code Cache-Control} directives.
      * <p>
-     * If no variant is found at the given key/fingerprint, the method is a no-op - the
-     * entry was likely evicted by the safety fallback or weight pressure between the
-     * original read and the revalidation.
+     * The method is a no-op when no bucket or no variant is found at the given key/fingerprint -
+     * the bucket expired, was evicted by weight pressure, or was invalidated or dropped between
+     * the lookup and the revalidation - and when the conditional request was sent at or before
+     * the instant {@link #invalidateAll()} last emptied the cache, or carries no request start,
+     * so a revalidation in flight across a drop cannot refresh an entry stored after it.
      *
      * @param key the URL bucket of the cached variant
      * @param fingerprint the Vary fingerprint of the cached variant
      * @param new304Headers the headers returned on the {@code 304} revalidation response
+     * @param revalidation the network details of the {@code 304} exchange
+     * @return the refreshed entry now in the cache, or {@link Optional#empty()} if nothing was
+     *         refreshed
      */
-    public void updateOn304(
+    public @NotNull Optional<CacheEntry<?>> updateOn304(
         @NotNull CacheKey.UrlKey key,
         @NotNull CacheKey.VaryFingerprint fingerprint,
-        @NotNull Map<String, ? extends Collection<String>> new304Headers
+        @NotNull Map<String, ? extends Collection<String>> new304Headers,
+        @NotNull NetworkDetails revalidation
     ) {
-        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants = this.cache.getIfPresent(key);
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> current = this.cache.getIfPresent(key);
 
-        if (variants == null)
-            return;
+        if (current == null || !current.containsKey(fingerprint))
+            return Optional.empty();
 
-        CacheEntry<?> existing = variants.get(fingerprint);
+        Instant sent = revalidation.getRoundTrip().startedAt();
+        AtomicReference<CacheEntry<?>> refreshed = new AtomicReference<>();
+        Lock lock = this.dropLock.readLock();
+        lock.lock();
 
-        if (existing == null)
-            return;
+        try {
+            if (sent.isAfter(this.emptiedAt)) {
+                this.cache.asMap().computeIfPresent(key, (k, variants) -> {
+                    CacheEntry<?> existing = variants.get(fingerprint);
 
-        variants.put(fingerprint, mergeHeaders(existing, new304Headers));
+                    if (existing == null)
+                        return variants;
+
+                    refreshed.set(mergeHeaders(existing, new304Headers, revalidation));
+                    return withVariant(variants, fingerprint, refreshed.get());
+                });
+            }
+        } finally {
+            lock.unlock();
+        }
+
+        return Optional.ofNullable(refreshed.get());
     }
 
     // ===== Internals =====
+
+    /**
+     * Builds the bucket a write puts in the cache: a new map holding the given bucket's variants,
+     * with {@code entry} under {@code fingerprint}.
+     * <p>
+     * The bucket in the cache is never modified, so Caffeine sees every change as a write and
+     * recomputes the bucket's weight and lifetime from what it holds.
+     *
+     * @param variants the bucket currently in the cache, or {@code null} if there is none
+     * @param fingerprint the Vary fingerprint to put {@code entry} under
+     * @param entry the variant to add or replace
+     * @return a new bucket holding {@code variants} and {@code entry}
+     */
+    private static @NotNull java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> withVariant(
+        @Nullable java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants,
+        @NotNull CacheKey.VaryFingerprint fingerprint,
+        @NotNull CacheEntry<?> entry
+    ) {
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> bucket = variants == null
+            ? new ConcurrentHashMap<>()
+            : new ConcurrentHashMap<>(variants);
+
+        bucket.put(fingerprint, entry);
+        return bucket;
+    }
 
     /**
      * Applies the RFC 7234 §3 storage predicate to a decoded response.
@@ -389,8 +522,9 @@ public final class ResponseCache {
         if (DEFAULT_CACHEABLE_STATUSES.contains(status))
             return true;
 
-        // Non-default-cacheable statuses are only stored if explicit freshness was advertised.
-        return cc.maxAge().isPresent() || cc.sMaxAge().isPresent() || hasHeader(decoded.getHeaders(), "Expires");
+        // Non-default-cacheable statuses are only stored if explicit freshness was advertised;
+        // s-maxage binds only shared caches, so it does not count for this private one.
+        return cc.maxAge().isPresent() || hasHeader(decoded.getHeaders(), "Expires");
     }
 
     /**
@@ -440,22 +574,32 @@ public final class ResponseCache {
      * fresh {@link CacheEntry} whose cached view exposes the merged headers while the
      * body bytes, status, and request are inherited from the existing entry.
      * <p>
+     * The 304 is the new response for age purposes per
+     * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
+     * §4.3.4</a>: the merged view reports the 304 exchange's network details, and the stored
+     * {@code Age} is kept only when the 304 carries its own, so the refreshed entry's
+     * {@linkplain Response.CachedImpl#currentAge(Instant) age} is counted from the revalidation.
+     * <p>
      * {@link CachingFeignClient} answers the revalidation from the same merge, so the replay
      * matches the refreshed entry.
      *
      * @param existing the cached entry to refresh
      * @param new304Headers the headers from the 304 response
+     * @param revalidation the network details of the {@code 304} exchange
      * @param <T> the decoded body type
-     * @return a new {@code CacheEntry} with merged headers and the existing body bytes
+     * @return a new {@code CacheEntry} with merged headers, the 304's network details and the
+     *         existing body bytes
      * @see #refreshesStoredHeader(String, Collection)
      */
     static <T> @NotNull CacheEntry<T> mergeHeaders(
         @NotNull CacheEntry<T> existing,
-        @NotNull Map<String, ? extends Collection<String>> new304Headers
+        @NotNull Map<String, ? extends Collection<String>> new304Headers,
+        @NotNull NetworkDetails revalidation
     ) {
         Response.CachedImpl<T> existingResponse = existing.response();
         TreeMap<String, ConcurrentList<String>> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         merged.putAll(existingResponse.getHeaders());
+        merged.remove("Age");
 
         for (Map.Entry<String, ? extends Collection<String>> entry : new304Headers.entrySet()) {
             Collection<String> values = entry.getValue();
@@ -469,7 +613,7 @@ public final class ResponseCache {
             merged
         );
 
-        return new CacheEntry<>(existingResponse.withHeaders(mergedView), existing.body());
+        return new CacheEntry<>(existingResponse.withHeaders(mergedView, revalidation), existing.body());
     }
 
     /**

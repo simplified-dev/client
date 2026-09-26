@@ -1,6 +1,7 @@
 package dev.simplified.client.response;
 
 import dev.simplified.annotations.Getter;
+import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.util.time.Stopwatch;
 import org.apache.hc.core5.http.protocol.BasicHttpContext;
 import org.apache.hc.core5.http.protocol.HttpContext;
@@ -133,9 +134,8 @@ public final class NetworkDetails {
     /**
      * Constructs a {@link NetworkDetails} by extracting internal headers from a Feign response.
      * <p>
-     * Timing headers are read from the request headers (where they were injected by the
-     * interceptor), while the response-received timestamp is read from the response headers.
-     * Any missing header defaults to {@link Instant#EPOCH} for timestamps.
+     * Reads the headers as {@link #NetworkDetails(Map, Map)} does, from the response and the
+     * request it answers.
      *
      * @param response the Feign response from which to extract network timing and TLS metadata
      */
@@ -146,20 +146,27 @@ public final class NetworkDetails {
     /**
      * Constructs a {@link NetworkDetails} from raw response and request header maps.
      * <p>
-     * Response headers supply only the response-received timestamp; every other timing
-     * marker plus the TLS protocol and cipher are read from the request headers (where the
-     * interceptor injected them at send time). Any missing header defaults to
-     * {@link Instant#EPOCH} for timestamps and {@link Optional#empty()} for strings.
+     * The request start is read from the request headers, or from the response headers when the
+     * request carries none - {@link CachingFeignClient} records it on the response it returns,
+     * because Feign rebuilds that response around the request it built. The response-received
+     * timestamp is read from the response headers. The DNS, TCP and TLS markers and the TLS
+     * protocol and cipher are read from the request headers, which carry them only when the
+     * transport set them on the request. Any missing header defaults to {@link Instant#EPOCH}
+     * for timestamps and {@link Optional#empty()} for strings.
      *
-     * @param responseHeaders the response headers carrying the response-received marker
-     * @param requestHeaders the request headers carrying the timing and TLS markers injected
-     *                       by the interceptor layer
+     * @param responseHeaders the response headers carrying the response-received marker, and the
+     *                        request-start marker when the request headers lack it
+     * @param requestHeaders the request headers carrying the request-start, timing and TLS markers
+     *                       the transport set
      */
     public NetworkDetails(
         @NotNull Map<String, Collection<String>> responseHeaders,
         @NotNull Map<String, Collection<String>> requestHeaders
     ) {
-        Instant requestStart = extractInstant(requestHeaders, REQUEST_START);
+        Instant requestStart = extractHeader(requestHeaders, REQUEST_START)
+            .or(() -> extractHeader(responseHeaders, REQUEST_START))
+            .map(Instant::parse)
+            .orElse(Instant.EPOCH);
         Instant responseReceived = extractInstant(responseHeaders, RESPONSE_RECEIVED);
         this.roundTrip = Stopwatch.of(requestStart, responseReceived);
 
@@ -215,14 +222,16 @@ public final class NetworkDetails {
      * interceptor layer.
      * <p>
      * Internal headers use the {@code X-Internal-} prefix and are excluded from the
-     * public response headers exposed through {@link Response#getHeaders()}.
+     * public response headers exposed through {@link Response#getHeaders()}. The prefix is
+     * matched ignoring case, as HTTP header names are, because a {@link feign.Response}
+     * holds its header names in lower case.
      *
      * @param headerName the header name to test
-     * @return {@code true} if the header name starts with the internal header prefix;
-     *         {@code false} otherwise
+     * @return {@code true} if the header name starts with the internal header prefix, in any
+     *         case; {@code false} otherwise
      */
     public static boolean isInternalHeader(@NotNull String headerName) {
-        return headerName.startsWith(INTERNAL_HEADER_PREFIX);
+        return headerName.regionMatches(true, 0, INTERNAL_HEADER_PREFIX, 0, INTERNAL_HEADER_PREFIX.length());
     }
 
     /**

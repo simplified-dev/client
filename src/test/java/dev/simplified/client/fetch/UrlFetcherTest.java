@@ -14,16 +14,34 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class UrlFetcherTest {
 
     private HttpServer server;
     private URI baseUri;
+
+    /**
+     * The requests {@code /fresh} has answered.
+     */
+    private final AtomicInteger freshHits = new AtomicInteger();
+
+    /**
+     * The requests {@code /unavailable} has answered.
+     */
+    private final AtomicInteger unavailableHits = new AtomicInteger();
+
+    /**
+     * The requests {@code /revalidated} has answered.
+     */
+    private final AtomicInteger revalidatedHits = new AtomicInteger();
 
     @BeforeEach
     void startServer() throws IOException {
@@ -48,6 +66,45 @@ class UrlFetcherTest {
         this.server.createContext("/bad", exchange -> {
             byte[] body = "nope".getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(503, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/fresh", exchange -> {
+            this.freshHits.incrementAndGet();
+            byte[] body = "fresh".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unavailable", exchange -> {
+            this.unavailableHits.incrementAndGet();
+            byte[] body = "down".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(503, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/revalidated", exchange -> {
+            this.revalidatedHits.incrementAndGet();
+            exchange.getResponseHeaders().add("ETag", "\"v1\"");
+
+            if (exchange.getRequestHeaders().containsKey("If-None-Match")) {
+                exchange.getResponseHeaders().add("Cache-Control", "max-age=100");
+                exchange.sendResponseHeaders(304, -1);
+                exchange.close();
+                return;
+            }
+
+            byte[] body = "revalidated".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.getResponseHeaders().add("Age", "120");
+            exchange.sendResponseHeaders(200, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
             }
@@ -97,6 +154,47 @@ class UrlFetcherTest {
             return;
         }
         throw new AssertionError("Expected UrlFetchException for HTTP 503");
+    }
+
+    @Test
+    @DisplayName("Serves a fresh response from the cache without reaching the origin again")
+    void servesFreshResponseFromCache() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        Response<String> live = fetcher.get(this.baseUri.resolve("/fresh"));
+        Response<String> replay = fetcher.get(this.baseUri.resolve("/fresh"));
+
+        assertThat(this.freshHits.get(), is(1));
+        assertThat(live.isFromCache(), is(false));
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(replay.getBody(), is(equalTo("fresh")));
+    }
+
+    @Test
+    @DisplayName("Raises an error status on every fetch, never replaying it from the cache")
+    void neverReplaysAnErrorStatus() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        assertThrows(UrlFetchException.class, () -> fetcher.bytes(this.baseUri.resolve("/unavailable")));
+        assertThrows(UrlFetchException.class, () -> fetcher.bytes(this.baseUri.resolve("/unavailable")));
+        assertThat(this.unavailableHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 304 is answered with the refreshed entry, which is then aged from the revalidation")
+    void notModifiedReplaysTheRefreshedEntry() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/revalidated");
+
+        Response<String> live = fetcher.get(uri);
+        Response<String> revalidated = fetcher.get(uri);
+        Response<String> replay = fetcher.get(uri);
+
+        assertThat(live.isFromCache(), is(false));
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(revalidated.getHeaders().get("Cache-Control"), contains("max-age=100"));
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(replay.getBody(), is(equalTo("revalidated")));
+        assertThat(this.revalidatedHits.get(), is(2));
     }
 
 }

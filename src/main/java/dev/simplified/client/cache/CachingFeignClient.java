@@ -7,6 +7,7 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.Client;
 import feign.Request;
+import feign.hc5.ApacheHttp5Client;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -14,7 +15,6 @@ import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -25,21 +25,24 @@ import java.util.TreeMap;
  * conditional validators on stale revalidation, and invalidates cached entries after
  * successful unsafe-method exchanges.
  * <p>
- * Sits between Feign's decoder pipeline and the underlying
- * {@link feign.httpclient.ApacheHttpClient}, so that:
+ * Sits between Feign and the underlying transport, typically an {@link ApacheHttp5Client},
+ * so that:
  * <ul>
  *   <li>On a fresh cache hit, a synthesized {@link feign.Response} is returned
- *       immediately without touching the network. Feign's decoder pipeline then runs on
- *       the synthesized response, re-decoding the cached raw bytes into a fresh
+ *       immediately without touching the network. Feign's response interceptors and decoder
+ *       then run on the synthesized response, re-decoding the cached raw bytes into a fresh
  *       {@link Response.Impl} and updating
- *       {@link ResponseCache#recordLastResponse(Response)} naturally.</li>
+ *       {@link ResponseCache#recordLastResponse(Response)} as a live response does.</li>
  *   <li>On a stale cache hit with a validator, {@code If-None-Match} and/or
  *       {@code If-Modified-Since} are attached to a copy of the original request before
  *       dispatching to the delegate. If the server replies with {@code 304 Not Modified},
- *       the cached entry is refreshed in place per
+ *       {@link ResponseCache#updateOn304} replaces the cached entry with one carrying the
+ *       304's headers and aged from the 304 exchange, restarting its bucket's lifetime, per
  *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
- *       §4.3.4</a> and a synthesized replay of the cached bytes is returned, carrying the
- *       refreshed headers.</li>
+ *       §4.3.4</a>, and a synthesized replay of the cached bytes is returned, carrying the
+ *       refreshed headers. A stale entry is held only while its bucket lives, which
+ *       {@link ResponseCacheExpiry} ends once its freshness lifetime plus
+ *       {@code stale-if-error} window has passed since it was stored.</li>
  *   <li>On a stale cache hit where the origin returns {@code 5xx} within the entry's
  *       {@code stale-if-error} window, the cached bytes are served in place of the error
  *       response per <a href="https://datatracker.ietf.org/doc/html/rfc5861#section-4">RFC
@@ -49,10 +52,17 @@ import java.util.TreeMap;
  *       {@code Location} and {@code Content-Location} redirects.</li>
  * </ul>
  * <p>
- * Storage of fresh responses is handled by {@link InternalResponseDecoder} after decoding, not here,
- * so that only responses that successfully passed the decoder are ever stored and so that
- * the stored {@link Response.Impl} carries its decoded body alongside the raw bytes for
- * direct observability.
+ * Every response the delegate returns carries its round trip: any
+ * {@linkplain NetworkDetails#isInternalHeader(String) internal header} in it is dropped, and the
+ * instant before the request was handed to the delegate and the instant the delegate returned
+ * are added to the response's headers as {@link NetworkDetails#REQUEST_START} and
+ * {@link NetworkDetails#RESPONSE_RECEIVED}. {@link NetworkDetails} reads both there, so a stored
+ * response's {@link Response.CachedImpl#currentAge(Instant) age} and the request start
+ * {@link ResponseCache#store} compares with its last drop are measured from them.
+ * <p>
+ * Storage is not handled here. {@link InternalResponseDecoder} offers each buffered response it
+ * decodes to {@link ResponseCache#store}, which keeps the raw body bytes; a replay is decoded
+ * from them afresh.
  * <p>
  * Synthesized cache-hit responses carry two non-internal marker headers:
  * {@link ResponseCache#CACHE_HIT_HEADER} for fresh and 304 replays, and
@@ -95,7 +105,7 @@ public final class CachingFeignClient implements Client {
             }
         }
 
-        feign.Response response = this.delegate.execute(request, options);
+        feign.Response response = this.exchange(request, options);
 
         if (!method.isSafe() && isSuccessOrRedirect(response.status()))
             this.invalidateAfterMutation(request, response);
@@ -134,16 +144,17 @@ public final class CachingFeignClient implements Client {
             return null;
 
         Request conditional = this.withConditionalHeaders(request, cached);
-        feign.Response response = this.delegate.execute(conditional, options);
+        feign.Response response = this.exchange(conditional, options);
 
         if (response.status() == 304) {
+            NetworkDetails revalidation = new NetworkDetails(response);
             CacheKey.UrlKey key = CacheKey.UrlKey.of(method, request.url());
             CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(cached.varyHeaderNames(), request.headers());
-            this.responseCache.updateOn304(key, fingerprint, response.headers());
+            this.responseCache.updateOn304(key, fingerprint, response.headers(), revalidation);
 
             feign.Util.ensureClosed(response.body());
 
-            return this.synthesizeRevalidatedHit(request, entry, now, response.headers());
+            return this.synthesizeRevalidatedHit(request, entry, now, response.headers(), revalidation);
         }
 
         if (isServerError(response.status()) && cached.canServeStaleOnError(now)) {
@@ -158,13 +169,10 @@ public final class CachingFeignClient implements Client {
      * Builds a synthetic {@link feign.Response} that replays the given cached entry's
      * body and headers without consulting the network.
      * <p>
-     * The synthetic request carries the original request URL, method, and caller headers
-     * plus an {@code X-Internal-Request-Start} timestamp set to {@code now}; zero-length
-     * DNS, TCP, and TLS stopwatches are stamped alongside so that
-     * {@link NetworkDetails#NetworkDetails(feign.Response)} reports a zero round-trip
-     * duration instead of reading {@link Instant#EPOCH} defaults. The synthetic response
-     * carries the cached headers, {@code Age}, {@link ResponseCache#CACHE_HIT_HEADER},
-     * and an {@code X-Internal-Response-Received} timestamp matching the request start.
+     * The replay answers the original request and carries the cached headers, {@code Age},
+     * {@link ResponseCache#CACHE_HIT_HEADER}, and {@link NetworkDetails#REQUEST_START} and
+     * {@link NetworkDetails#RESPONSE_RECEIVED} both set to {@code now}, so
+     * {@link NetworkDetails#NetworkDetails(feign.Response)} reports a zero round trip.
      *
      * @param originalRequest the original request being short-circuited
      * @param entry the cached entry whose bytes will be served
@@ -184,23 +192,25 @@ public final class CachingFeignClient implements Client {
      * Builds the synthetic replay answering a {@code 304 Not Modified} revalidation of the given
      * cached entry.
      * <p>
-     * The replay carries the entry's headers refreshed by the 304's, the same merge
-     * {@link ResponseCache#updateOn304} stores, plus {@link ResponseCache#REVALIDATED_HEADER}
-     * naming each header the 304 supplied.
+     * The replay carries the entry's headers refreshed by the 304's and its age counted from
+     * the 304 exchange, the same merge {@link ResponseCache#updateOn304} stores, plus
+     * {@link ResponseCache#REVALIDATED_HEADER} naming each header the 304 supplied.
      *
      * @param originalRequest the original request
      * @param entry the cached entry the 304 revalidated
      * @param now the synthesized timestamp
      * @param notModifiedHeaders the headers of the {@code 304} response
+     * @param revalidation the network details of the {@code 304} exchange
      * @return the synthesized revalidation replay
      */
     private @NotNull feign.Response synthesizeRevalidatedHit(
         @NotNull Request originalRequest,
         @NotNull CacheEntry<?> entry,
         @NotNull Instant now,
-        @NotNull Map<String, Collection<String>> notModifiedHeaders
+        @NotNull Map<String, Collection<String>> notModifiedHeaders,
+        @NotNull NetworkDetails revalidation
     ) {
-        CacheEntry<?> refreshed = ResponseCache.mergeHeaders(entry, notModifiedHeaders);
+        CacheEntry<?> refreshed = ResponseCache.mergeHeaders(entry, notModifiedHeaders, revalidation);
         List<String> revalidated = new ArrayList<>(notModifiedHeaders.size());
 
         notModifiedHeaders.forEach((name, values) -> {
@@ -255,10 +265,9 @@ public final class CachingFeignClient implements Client {
     ) {
         Response.CachedImpl<?> cached = entry.response();
         Map<String, Collection<String>> responseHeaders = buildResponseHeaders(cached, now, ageSeconds, servedStale, revalidated);
-        Request syntheticRequest = buildSyntheticRequest(originalRequest, now);
 
         return feign.Response.builder()
-            .request(syntheticRequest)
+            .request(originalRequest)
             .status(cached.getStatus().getCode())
             .reason(cached.getStatus().getMessage())
             .headers(responseHeaders)
@@ -310,43 +319,44 @@ public final class CachingFeignClient implements Client {
     }
 
     /**
-     * Builds a synthetic {@link feign.Request} carrying zero-duration timing headers so
-     * that {@link NetworkDetails#NetworkDetails(feign.Response)} reports a zero round-trip
-     * on cache hits rather than reading {@link Instant#EPOCH} defaults.
+     * Sends a request through the delegate and records the round trip on its response.
+     * <p>
+     * Every {@linkplain NetworkDetails#isInternalHeader(String) internal header} in the
+     * delegate's response is dropped: only this client sets them, and an origin or proxy that
+     * echoes the ones the client sends must not stand in for its round trip. The instant before
+     * the delegate is called and the instant it returns are then added to the response's headers
+     * as {@link NetworkDetails#REQUEST_START} and {@link NetworkDetails#RESPONSE_RECEIVED}. The
+     * request start is recorded on the response rather than the request because Feign rebuilds
+     * the response it is handed around the request it built.
      *
-     * @param original the original request to copy headers and URL from
-     * @param now the timestamp to stamp on all timing headers
-     * @return a new feign.Request with timing headers stamped
+     * @param request the request to send
+     * @param options the Feign request options
+     * @return the delegate's response, carrying its round trip
+     * @throws IOException if the delegate fails
      */
-    private static @NotNull Request buildSyntheticRequest(@NotNull Request original, @NotNull Instant now) {
-        List<String> nowList = List.of(now.toString());
-        Map<String, Collection<String>> headers = new HashMap<>(original.headers());
+    private @NotNull feign.Response exchange(@NotNull Request request, @NotNull Request.Options options) throws IOException {
+        Instant sent = Instant.now();
+        feign.Response response = this.delegate.execute(request, options);
+        Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
-        headers.put(NetworkDetails.REQUEST_START, nowList);
-        headers.put(NetworkDetails.DNS_START, nowList);
-        headers.put(NetworkDetails.DNS_END, nowList);
-        headers.put(NetworkDetails.TCP_CONNECT_START, nowList);
-        headers.put(NetworkDetails.TCP_CONNECT_END, nowList);
-        headers.put(NetworkDetails.TLS_HANDSHAKE_START, nowList);
-        headers.put(NetworkDetails.TLS_HANDSHAKE_END, nowList);
+        response.headers().forEach((name, values) -> {
+            if (!NetworkDetails.isInternalHeader(name))
+                headers.put(name, values);
+        });
 
-        return Request.create(
-            original.httpMethod(),
-            original.url(),
-            headers,
-            original.body(),
-            original.charset(),
-            original.requestTemplate()
-        );
+        headers.put(NetworkDetails.REQUEST_START, List.of(sent.toString()));
+        headers.put(NetworkDetails.RESPONSE_RECEIVED, List.of(Instant.now().toString()));
+
+        return response.toBuilder().headers(headers).build();
     }
 
     /**
      * Builds the response headers for a synthesized cache-hit response by copying the
-     * cached variant's stored headers and adding the cache marker, {@code Age}, and
-     * {@code X-Internal-Response-Received} timestamp.
+     * cached variant's stored headers and adding the cache marker, {@code Age}, and the
+     * {@code X-Internal-Request-Start} and {@code X-Internal-Response-Received} timestamps.
      *
      * @param cached the cached variant whose headers will be replayed
-     * @param now the synthesized response-received timestamp
+     * @param now the synthesized request-start and response-received timestamp
      * @param ageSeconds the computed cache age in seconds
      * @param servedStale whether to include the stale-served marker
      * @param revalidated the names {@link ResponseCache#REVALIDATED_HEADER} carries, or
@@ -376,6 +386,7 @@ public final class CachingFeignClient implements Client {
         if (revalidated != null)
             headers.put(ResponseCache.REVALIDATED_HEADER, revalidated);
 
+        headers.put(NetworkDetails.REQUEST_START, List.of(now.toString()));
         headers.put(NetworkDetails.RESPONSE_RECEIVED, List.of(now.toString()));
 
         return headers;

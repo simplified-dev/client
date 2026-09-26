@@ -47,7 +47,8 @@ import java.util.stream.Collectors;
  * standalone URL fetcher), and {@link CachedImpl} wraps any {@code Response} with behavioral
  * accessors that compute RFC 7234 cache semantics (freshness, age, revalidation capability)
  * from the wrapped headers and {@link NetworkDetails}. {@code CachedImpl} carries no decoded
- * body of its own; every cache-specific value is derived on demand from the source response.
+ * body of its own; every cache-specific value is derived on demand from the headers and network
+ * details it exposes.
  *
  * @param <T> the deserialized type of the response body
  * @see Request
@@ -503,17 +504,19 @@ public interface Response<T> {
      * Cache-aware view that wraps any {@link Response} with RFC 7234 cache semantics.
      * <p>
      * {@code CachedImpl} holds no decoded body of its own - every getter except
-     * {@link #getHeaders()} delegates straight through to the wrapped source response, while
-     * {@code getHeaders()} returns a snapshot that may have been sanitized (transport headers
-     * stripped) or merged with a {@code 304 Not Modified} update without rebuilding the
-     * underlying envelope. Used as the response side of {@code ResponseCache}'s entry tuple,
-     * where the cached entry is both a first-class {@link Response} (status, headers, body)
-     * and a carrier of freshness and revalidation logic; the body bytes for replay live
-     * alongside in the cache's storage tuple.
+     * {@link #getHeaders()} and {@link #getDetails()} delegates straight through to the wrapped
+     * source response. {@code getHeaders()} returns a snapshot that may have been sanitized
+     * (transport headers stripped) or merged with a {@code 304 Not Modified} update, and
+     * {@code getDetails()} the round trip its age is measured from - the source's, or that of
+     * the {@code 304} exchange that refreshed it - without rebuilding the underlying envelope.
+     * Used as the response side of {@code ResponseCache}'s entry tuple, where the cached entry
+     * is both a first-class {@link Response} (status, headers, body) and a carrier of freshness
+     * and revalidation logic; the body bytes for replay live alongside in the cache's storage
+     * tuple.
      * <p>
-     * The wrapped source's headers and timings remain the single source of truth - this
-     * class stores no decoded body or duplicated header state of its own. Parsed
-     * {@code Cache-Control} directives are the one exception: each {@code CachedImpl}
+     * The wrapped source remains the single source of truth for the body, status and request -
+     * this class stores no decoded body of its own. Parsed
+     * {@code Cache-Control} directives are memoised as well: each {@code CachedImpl}
      * memoises its directives in a {@link Lazy} populated from {@link #headers} on first
      * access, because the same lookup runs three to four times per cache decision
      * ({@code isFresh}, {@code mustRevalidate}, {@code canServeStaleOnError} via
@@ -541,6 +544,12 @@ public interface Response<T> {
         private final @NotNull ConcurrentMap<String, ConcurrentList<String>> headers;
 
         /**
+         * The network details this cached view reports, the source's or those of the
+         * {@code 304 Not Modified} exchange that last refreshed it.
+         */
+        private final @NotNull NetworkDetails details;
+
+        /**
          * The {@code Cache-Control} directives parsed from {@link #headers}, read once and
          * reused for the lifetime of this {@code CachedImpl} - {@code freshnessLifetime},
          * {@code mustRevalidate}, {@code staleIfError} and {@code canServeStaleOnError} all
@@ -550,46 +559,76 @@ public interface Response<T> {
         private final @NotNull CacheControl cacheControl;
 
         /**
-         * Constructs a cached view wrapping the given source with the given headers.
+         * Constructs a cached view wrapping the given source with the given headers and network
+         * details.
          *
          * @param source the wrapped source response
          * @param headers the headers to expose from this cached view
+         * @param details the network details to report from this cached view
          */
-        private CachedImpl(@NotNull Response<T> source, @NotNull ConcurrentMap<String, ConcurrentList<String>> headers) {
+        private CachedImpl(
+            @NotNull Response<T> source,
+            @NotNull ConcurrentMap<String, ConcurrentList<String>> headers,
+            @NotNull NetworkDetails details
+        ) {
             this.source = source;
             this.headers = headers;
+            this.details = details;
             this.cacheControl = CacheControl.parseFromHeaders(headers);
         }
 
         /**
          * Builds a {@code CachedImpl} wrapping the given source response.
          * <p>
-         * The wrapped source's headers are exposed as-is; any laziness in {@code source}
-         * (e.g. a deferred body decoder on {@link Impl} or {@link DirectImpl}) is preserved -
-         * a cached entry that was never {@link #getBody()}-ed defers its decode until the
-         * next reader, including the cache replay path.
+         * The wrapped source's headers and network details are exposed as-is; any laziness in
+         * the body of {@code source} (e.g. a deferred body decoder on {@link Impl} or
+         * {@link DirectImpl}) is preserved - a cached entry that was never
+         * {@link #getBody()}-ed defers its decode until the next reader, including the cache
+         * replay path.
          *
          * @param source the source response to wrap
          * @param <U> the deserialized body type
          * @return a new {@code CachedImpl} wrapping {@code source}
          */
         public static <U> @NotNull CachedImpl<U> from(@NotNull Response<U> source) {
-            return new CachedImpl<>(source, source.getHeaders());
+            return new CachedImpl<>(source, source.getHeaders(), source.getDetails());
         }
 
         /**
-         * Returns a new {@code CachedImpl} wrapping the same source but exposing the given
-         * headers in place of the source's.
+         * Returns a new {@code CachedImpl} wrapping the same source and reporting the same
+         * network details, but exposing the given headers in place of this view's.
          * <p>
          * Used by {@link ResponseCache} to expose a sanitized header view (transport-framing
-         * headers stripped before storage) and to refresh entries after {@code 304 Not Modified}
-         * revalidations without rebuilding the body decoder.
+         * headers stripped before storage) without rebuilding the body decoder.
          *
          * @param overridden the headers to expose from the returned view
          * @return a new cached view sharing this source but exposing {@code overridden}
          */
         public @NotNull CachedImpl<T> withHeaders(@NotNull ConcurrentMap<String, ConcurrentList<String>> overridden) {
-            return new CachedImpl<>(this.source, overridden);
+            return new CachedImpl<>(this.source, overridden, this.details);
+        }
+
+        /**
+         * Returns a new {@code CachedImpl} wrapping the same source but exposing the given
+         * headers and reporting the given network details in place of this view's.
+         * <p>
+         * Used by {@link ResponseCache} to refresh an entry after a {@code 304 Not Modified}
+         * revalidation per
+         * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
+         * §4.3.4</a>: the refreshed view carries the merged headers and the 304 exchange's
+         * round trip, so its {@link #currentAge(Instant) age} is measured from the
+         * revalidation rather than from the response first stored.
+         *
+         * @param overridden the headers to expose from the returned view
+         * @param details the network details to report from the returned view
+         * @return a new cached view sharing this source but exposing {@code overridden} and
+         *         reporting {@code details}
+         */
+        public @NotNull CachedImpl<T> withHeaders(
+            @NotNull ConcurrentMap<String, ConcurrentList<String>> overridden,
+            @NotNull NetworkDetails details
+        ) {
+            return new CachedImpl<>(this.source, overridden, details);
         }
 
         @Override
@@ -604,7 +643,7 @@ public interface Response<T> {
 
         @Override
         public @NotNull NetworkDetails getDetails() {
-            return this.source.getDetails();
+            return this.details;
         }
 
         @Override
@@ -638,19 +677,19 @@ public interface Response<T> {
          * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.1">RFC 7234
          * Section 4.2.1</a>.
          * <p>
-         * Priority order: {@code s-maxage} > {@code max-age} > ({@code Expires} -
-         * {@code Date}) > {@link Duration#ZERO}. Heuristic freshness (§4.2.2) is
-         * deliberately not implemented; responses with no explicit freshness information
-         * are treated as stale on arrival and always force revalidation.
+         * Priority order: {@code max-age} > ({@code Expires} - {@code Date}) >
+         * {@link Duration#ZERO}. {@code s-maxage} is ignored: it binds only shared caches
+         * (<a href="https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.9">RFC 7234
+         * §5.2.2.9</a>), and {@link ResponseCache} is a private cache. Heuristic freshness
+         * (§4.2.2) is deliberately not implemented; a response with no explicit freshness
+         * information is stale on arrival, and {@link ResponseCache} keeps it only as long as a
+         * {@code stale-if-error} window it carries.
          *
          * @return the freshness lifetime, or {@link Duration#ZERO} if no freshness
          *         information is present
          */
         public @NotNull Duration freshnessLifetime() {
             CacheControl cc = this.cacheControl();
-
-            if (cc.sMaxAge().isPresent())
-                return Duration.ofSeconds(cc.sMaxAge().getAsLong());
 
             if (cc.maxAge().isPresent())
                 return Duration.ofSeconds(cc.maxAge().getAsLong());
@@ -669,13 +708,14 @@ public interface Response<T> {
         /**
          * Computes this response's current age per
          * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3">RFC 7234
-         * Section 4.2.3</a>, anchored on the inherited {@link NetworkDetails#getRoundTrip()}
-         * bookends.
+         * Section 4.2.3</a>, anchored on the {@link NetworkDetails#getRoundTrip()} bookends of
+         * {@link #getDetails()}.
          * <p>
          * The formula honours an upstream {@code Age} response header (injected by CDNs
          * like Cloudflare), the server-reported {@code Date}, and the local
          * request/response timestamps, selecting the conservative maximum of apparent and
-         * corrected age as the initial age.
+         * corrected age as the initial age. A view refreshed by a {@code 304 Not Modified}
+         * reports that exchange's round trip, so its age is counted from the revalidation.
          *
          * @param now the reference instant for the age computation
          * @return the response's current age as a {@link Duration}
