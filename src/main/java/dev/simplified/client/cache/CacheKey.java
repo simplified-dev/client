@@ -21,10 +21,11 @@ import java.util.TreeMap;
  * Key records used to identify cached HTTP responses in {@link ResponseCache}.
  * <p>
  * The cache uses a two-level structure - {@link UrlKey} selects an inner map of
- * {@code Vary}-variants, and {@link VaryFingerprint} selects a specific variant within
- * that map. This lets Caffeine evict whole URL buckets atomically while still respecting
- * content-negotiation variants on cache hits. A flat composite key would force O(N)
- * iteration for Vary lookups because Caffeine does not support partial-key scans.
+ * {@code Vary}-variants, and {@link VaryFingerprint}, taken from the request that produced a
+ * variant, selects a specific variant within that map. This lets Caffeine evict whole URL
+ * buckets atomically while still respecting content-negotiation variants on cache hits. A flat
+ * composite key would force O(N) iteration for Vary lookups because Caffeine does not support
+ * partial-key scans.
  * <p>
  * Both records are immutable value types with content-based equality. {@code UrlKey}
  * canonicalizes query strings by sorting parameters alphabetically so that a HashMap-based
@@ -147,8 +148,14 @@ public final class CacheKey {
     }
 
     /**
-     * Content-negotiation fingerprint for a cached response variant, built from the
-     * subset of request headers listed in the stored response's {@code Vary} header.
+     * Content-negotiation fingerprint of a request: its values of the headers a cached
+     * response's {@code Vary} header names.
+     * <p>
+     * A variant is held under the fingerprint of the request that produced it, and a later
+     * request selects it when its own fingerprint over the same names is equal, per
+     * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.1">RFC 7234 §4.1</a>. A
+     * header the request does not carry has the empty value, so two requests that both omit it
+     * match on it.
      * <p>
      * The backing map is an unmodifiable {@link ConcurrentMap} produced by
      * {@link Concurrent#toUnmodifiableTreeMap(java.util.Comparator)} with
@@ -157,24 +164,26 @@ public final class CacheKey {
      * {@code dev.simplified.collection.atomic.AtomicMap#equals(Object)} to the backing
      * sorted map, giving content-based equality without any manual overrides.
      *
-     * @param values the Vary header values for this variant, keyed by lowercased Vary name
+     * @param values the request's value of each header the response's {@code Vary} names, keyed
+     *               by lowercased header name
      */
     public record VaryFingerprint(@NotNull ConcurrentMap<String, String> values) {
 
         /**
-         * Sentinel fingerprint for cache entries whose stored response had no {@code Vary} header.
+         * Sentinel fingerprint of every request against a response with no {@code Vary} header.
          */
         public static final @NotNull VaryFingerprint EMPTY = new VaryFingerprint(Concurrent.newUnmodifiableMap());
 
         /**
-         * Builds a fingerprint from the given Vary header names and the current request's
-         * headers. Vary names are lowercased for comparison; request header values are
-         * looked up case-insensitively and joined with {@code ", "} if multi-valued.
-         * Returns {@link #EMPTY} if {@code varyNames} is empty.
+         * Builds the fingerprint of a request over the given {@code Vary} header names. Vary
+         * names are lowercased for comparison; request header values are looked up
+         * case-insensitively and joined with {@code ", "} if multi-valued, and a header the
+         * request does not carry has the empty value. Returns {@link #EMPTY} if
+         * {@code varyNames} is empty.
          *
-         * @param varyNames the set of header names listed in the cached response's {@code Vary} header
-         * @param requestHeaders the current request's headers (any map whose values are
-         *                       collections of strings)
+         * @param varyNames the set of header names listed in a response's {@code Vary} header
+         * @param requestHeaders the request's headers (any map whose values are collections of
+         *                       strings)
          * @return the fingerprint for this {@code (varyNames, requestHeaders)} pair
          */
         public static @NotNull VaryFingerprint of(

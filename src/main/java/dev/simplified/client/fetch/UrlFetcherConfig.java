@@ -104,12 +104,14 @@ public final class UrlFetcherConfig {
     private final @NotNull ConcurrentMap<String, String> queries;
 
     /**
-     * The static headers appended to every outbound request, including the default {@code User-Agent}.
+     * The static headers added to each request the fetcher sends and to the follow-up of each
+     * redirect it follows, including the default {@code User-Agent} and {@code Accept}.
      */
     private final @NotNull ConcurrentMap<String, String> headers;
 
     /**
-     * The lazily-evaluated dynamic headers appended to every outbound request when present.
+     * The lazily-evaluated dynamic headers added, when their supplier yields a value, to the
+     * same requests as the static headers.
      */
     private final @NotNull ConcurrentMap<String, Supplier<Optional<String>>> dynamicHeaders;
 
@@ -292,6 +294,11 @@ public final class UrlFetcherConfig {
 
         /**
          * Adds a single static header.
+         * <p>
+         * The header is added to each request the fetcher sends, where its response cache sees
+         * it, and to the follow-up of each redirect it follows. A request carrying
+         * {@code Authorization} or {@code Cookie} does not follow a redirect to another host or
+         * port: the fetcher returns the {@code 3xx} response.
          *
          * @param name the header name
          * @param value the header value
@@ -303,7 +310,8 @@ public final class UrlFetcherConfig {
         }
 
         /**
-         * Adds all entries from the given map as static headers.
+         * Adds all entries from the given map as static headers, each as
+         * {@link #withHeader(String, String)} describes.
          *
          * @param headers the headers to add
          * @return this builder
@@ -315,6 +323,11 @@ public final class UrlFetcherConfig {
 
         /**
          * Adds a single dynamic header whose value is evaluated lazily on each request.
+         * <p>
+         * The supplier is invoked once per fetch, one the cache answers included; if it returns
+         * {@link Optional#empty()}, the header is omitted for that request. The header reaches
+         * the same requests, and affects redirects the same way, as a static header added by
+         * {@link #withHeader(String, String)}.
          *
          * @param name the header name
          * @param valueSupplier the supplier producing the header value, or empty to omit
@@ -326,7 +339,8 @@ public final class UrlFetcherConfig {
         }
 
         /**
-         * Adds all entries from the given map as dynamic headers.
+         * Adds all entries from the given map as dynamic headers, each as
+         * {@link #withDynamicHeader(String, Supplier)} describes.
          *
          * @param dynamicHeaders the dynamic headers to add
          * @return this builder

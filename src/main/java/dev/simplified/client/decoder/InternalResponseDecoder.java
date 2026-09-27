@@ -34,10 +34,10 @@ import java.util.function.Supplier;
  *       HTTP connection back to the pool. If the return type is {@code Response<InputStream>},
  *       the stream is wrapped in a {@link Response.StreamingImpl} envelope providing access
  *       to {@link NetworkDetails}, status, and headers. In either case the envelope is not
- *       offered to {@link ResponseCache#store(Response, byte[])} because streaming
- *       bodies are not replayable, but the envelope is still passed to
- *       {@link ResponseCache#recordLastResponse(Response)} so observability callers see
- *       the latest exchange.</li>
+ *       offered to {@link ResponseCache#store} because streaming bodies are not replayable,
+ *       but the envelope is still passed to
+ *       {@link ResponseCache#recordLastResponse(Response)} so observability callers see the
+ *       latest exchange.</li>
  *   <li><b>{@code byte[]}</b> - delegates to Feign's {@link DefaultDecoder} which reads
  *       the entire response body into a byte array. The response body is closed after
  *       decoding.</li>
@@ -52,12 +52,12 @@ import java.util.function.Supplier;
  * For non-streaming types, a {@link Response.Impl} envelope is built around the original
  * anchor (used for status / headers / request) plus a body supplier that closes over the
  * captured bytes; the typed body is materialized on demand via the envelope's
- * {@link Response.Impl#getBody()}. The envelope and the captured bytes are then offered
- * to {@link ResponseCache#store(Response, byte[])}, which applies the RFC 7234 §3
- * storage predicate and either stores the entry or drops it. The envelope is always
- * passed to
- * {@link ResponseCache#recordLastResponse(Response)} regardless of caching decisions so
- * that {@link Client#getLastResponse() Client.getLastResponse()}
+ * {@link Response.Impl#getBody()}. The envelope, the captured bytes and the headers of the
+ * request Feign sent for it - the contract's headers and the client's configured ones - are
+ * then offered to {@link ResponseCache#store}, which applies the RFC 7234 §3 storage predicate
+ * and either stores the entry, as the variant for those request headers, or drops it. The
+ * envelope is always passed to {@link ResponseCache#recordLastResponse(Response)} regardless
+ * of caching decisions so that {@link Client#getLastResponse() Client.getLastResponse()}
  * observes every outcome.
  * <p>
  * Responses replayed from the cache via
@@ -160,7 +160,7 @@ public final class InternalResponseDecoder implements Decoder {
 
             Response.Impl<Object> response = new Response.Impl<>(feignResponse, bodyDecoder);
             this.responseCache.recordLastResponse(response);
-            this.responseCache.store(response, bodyData);
+            this.responseCache.store(response, bodyData, feignResponse.request().headers());
 
             if (shouldWrap)
                 return response;

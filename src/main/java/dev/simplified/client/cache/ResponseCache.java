@@ -19,9 +19,6 @@ import org.jetbrains.annotations.Nullable;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -44,7 +41,17 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * whole URL buckets while still honouring content-negotiation variants, and avoids the
  * O(N) partial-key scans a flat composite-key layout would require.
  * <p>
- * A bucket is never changed in place. {@link #store(Response, byte[])} and
+ * Variants are selected per
+ * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.1">RFC 7234 §4.1</a>. A
+ * variant is held under the {@link CacheKey.VaryFingerprint fingerprint} of the request that
+ * produced it - that request's values of the headers its response's {@code Vary} names - and
+ * answers a later request only when that request carries the same values. Callers pass a
+ * request's headers as the request leaves the client, the client's configured static and
+ * dynamic headers included, to {@link #store}, {@link #lookup} and {@link #updateOn304} alike. A
+ * response that varies on a header the transport sets below the cache with a value those
+ * headers do not fix is not stored.
+ * <p>
+ * A bucket is never changed in place. {@link #store} and
  * {@link #updateOn304} write a new bucket, holding the current bucket's variants plus the
  * stored or refreshed one, through {@code compute} on the cache's {@link Cache#asMap() map
  * view}, so Caffeine weighs the populated bucket and sets its lifetime from every variant it
@@ -67,7 +74,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * </ul>
  * <p>
  * A drop by {@link #invalidateAll()} also holds against answers still in flight:
- * {@link #store(Response, byte[])} keeps a response, and {@link #updateOn304} applies a
+ * {@link #store} keeps a response, and {@link #updateOn304} applies a
  * {@code 304 Not Modified}, only when its request was sent after the last drop, so an answer to
  * a request sent before it cannot put the dropped state back.
  * <p>
@@ -129,7 +136,7 @@ public final class ResponseCache {
      * Deliberately <b>not</b> prefixed with {@code X-Internal-} so that
      * {@link Response#getHeaders(Map)} preserves it in the public view. This lets callers
      * observe cache hits via {@link Response#isFromCache()} and lets
-     * {@link #store(Response, byte[])} skip re-storing entries that originated from the
+     * {@link #store} skip re-storing entries that originated from the
      * cache itself.
      */
     public static final @NotNull String CACHE_HIT_HEADER = "X-Cache-Hit";
@@ -163,7 +170,7 @@ public final class ResponseCache {
     private final @NotNull AtomicReference<Response<?>> lastResponse = new AtomicReference<>();
 
     /**
-     * Orders {@link #invalidateAll()} against {@link #store(Response, byte[])} and
+     * Orders {@link #invalidateAll()} against {@link #store} and
      * {@link #updateOn304}: a drop holds the write lock while it records {@link #emptiedAt} and
      * empties the cache, and a store or refresh holds the read lock while it compares its
      * request's start with {@link #emptiedAt} and writes the bucket.
@@ -254,18 +261,23 @@ public final class ResponseCache {
     // ===== Cache operations =====
 
     /**
-     * Looks up a cached entry matching the given request.
+     * Looks up the cached variant a request may be answered with.
      * <p>
-     * Resolves the outer {@link CacheKey.UrlKey} bucket, then iterates the inner Vary map
-     * and returns the first entry whose response's
-     * {@link Response.CachedImpl#varyHeaderNames() vary header names} match the current
-     * request's headers. Returns {@link Optional#empty()} if no bucket or variant matches.
-     * Freshness and revalidation decisions are the caller's responsibility (typically
+     * Resolves the outer {@link CacheKey.UrlKey} bucket, then returns a variant whose
+     * fingerprint - the values, in the request that produced it, of the headers its response's
+     * {@link Response.CachedImpl#varyHeaderNames() Vary} names - equals the values of the same
+     * headers in {@code requestHeaders}, per
+     * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.1">RFC 7234 §4.1</a>. A
+     * variant whose response has no {@code Vary} matches every request. When variants stored
+     * under different {@code Vary} header sets both match, which one is returned is unspecified.
+     * Returns {@link Optional#empty()} if no bucket or variant matches. Freshness and
+     * revalidation decisions are the caller's responsibility (typically
      * {@link CachingFeignClient}).
      *
      * @param method the HTTP method of the lookup request
      * @param url the raw URL of the lookup request (will be canonicalized internally)
-     * @param requestHeaders the lookup request's headers, used for Vary matching
+     * @param requestHeaders the lookup request's headers as it leaves the client, compared with
+     *                       the headers {@link #store} was given for each variant's request
      * @return the matching cached entry, or {@link Optional#empty()} if none
      */
     public @NotNull Optional<CacheEntry<?>> lookup(
@@ -279,14 +291,11 @@ public final class ResponseCache {
         if (variants == null || variants.isEmpty())
             return Optional.empty();
 
-        for (CacheEntry<?> candidate : variants.values()) {
-            Response.CachedImpl<?> response = candidate.response();
-            Set<String> varyNames = response.varyHeaderNames();
-            CacheKey.VaryFingerprint lookupFp = CacheKey.VaryFingerprint.of(varyNames, requestHeaders);
-            CacheKey.VaryFingerprint storedFp = CacheKey.VaryFingerprint.of(varyNames, toMultimap(response.getHeaders()));
+        for (Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>> variant : variants.entrySet()) {
+            Set<String> varyNames = variant.getValue().response().varyHeaderNames();
 
-            if (lookupFp.equals(storedFp))
-                return Optional.of(candidate);
+            if (CacheKey.VaryFingerprint.of(varyNames, requestHeaders).equals(variant.getKey()))
+                return Optional.of(variant.getValue());
         }
 
         return Optional.empty();
@@ -301,7 +310,15 @@ public final class ResponseCache {
      * <ul>
      *   <li>{@code Cache-Control: no-store} -> skip</li>
      *   <li>method is not {@link HttpMethod#isCacheable() cacheable} -> skip</li>
-     *   <li>{@code Vary: *} -> skip</li>
+     *   <li>{@code Vary} names {@code *}, or a header whose value the origin received
+     *       {@code requestHeaders} do not fix ({@code Cookie} when the request carries none, which
+     *       the transport adds from a cookie store that can change between requests, or an
+     *       {@linkplain NetworkDetails#isInternalHeader(String) internal header}, which carries
+     *       per-request values) -> skip, as no later request could be shown to match. Every other
+     *       header the transport sets - {@code Accept-Encoding} and {@code User-Agent} when the
+     *       request carries none, a Feign transport's {@code Accept} default, {@code Host} - takes a
+     *       value fixed by the request's own headers and URL, so requests that match on their own
+     *       headers match on the wire</li>
      *   <li>status not in the default cacheable set {@code {200, 203, 204, 300, 301, 404,
      *       405, 410, 414, 501}} unless explicit freshness is present -> skip</li>
      *   <li>response carries the {@link #CACHE_HIT_HEADER} marker (replay from this cache)
@@ -315,12 +332,15 @@ public final class ResponseCache {
      *       from that round trip, so the entry could never be judged fresh</li>
      * </ul>
      * <p>
-     * The entry joins its URL's bucket through {@code compute}, which writes a new bucket
-     * holding the current bucket's variants and this one, replacing any variant with the same
-     * Vary fingerprint. Caffeine weighs the new bucket and sets its lifetime from every variant it
-     * holds, so a bucket whose longest freshness lifetime plus {@code stale-if-error} window is
-     * zero - a response with neither explicit freshness nor a {@code stale-if-error} window - is
-     * expired as it is written and is never answered by {@link #lookup}.
+     * The entry is held under the {@link CacheKey.VaryFingerprint} of {@code requestHeaders} -
+     * their values of the headers the response's {@code Vary} names - which {@link #lookup}
+     * compares a later request's values with. It joins its URL's bucket through
+     * {@code compute}, which writes a new bucket holding the current bucket's variants and this
+     * one, replacing any variant with the same fingerprint. Caffeine weighs the new bucket and
+     * sets its lifetime from every variant it holds, so a bucket whose longest freshness
+     * lifetime plus {@code stale-if-error} window is zero - a response with neither explicit
+     * freshness nor a {@code stale-if-error} window - is expired as it is written and is never
+     * answered by {@link #lookup}.
      * <p>
      * Streaming responses skip this overload entirely - the decoder pipeline routes them
      * around the cache because their bodies cannot be replayed.
@@ -331,17 +351,26 @@ public final class ResponseCache {
      *
      * @param decoded the decoded response to consider for caching
      * @param body the captured body bytes to store alongside {@code decoded} for replay
+     * @param requestHeaders the headers of the request that produced {@code decoded}, as it left
+     *                       the client
      */
-    public void store(@NotNull Response<?> decoded, byte @NotNull [] body) {
+    public void store(
+        @NotNull Response<?> decoded,
+        byte @NotNull [] body,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders
+    ) {
         if (!shouldStore(decoded))
             return;
 
         Instant sent = decoded.getDetails().getRoundTrip().startedAt();
         CacheEntry<?> entry = buildEntry(decoded, body);
         Response.CachedImpl<?> cached = entry.response();
+        CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(cached.varyHeaderNames(), requestHeaders);
+
+        if (!isMatchable(fingerprint))
+            return;
 
         CacheKey.UrlKey key = CacheKey.UrlKey.of(cached.getRequest().getMethod(), cached.getRequest().getUrl());
-        CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(cached.varyHeaderNames(), toMultimap(cached.getHeaders()));
         Lock lock = this.dropLock.readLock();
         lock.lock();
 
@@ -387,7 +416,7 @@ public final class ResponseCache {
     /**
      * Drops every cached entry and records the instant it did so.
      * <p>
-     * {@link #store(Response, byte[])} refuses a response, and {@link #updateOn304} a
+     * {@link #store} refuses a response, and {@link #updateOn304} a
      * {@code 304 Not Modified}, whose request was sent at or before that instant, so an answer to
      * a request in flight across the drop cannot put the dropped state back; a request whose
      * start falls in the same clock tick as the drop counts as sent before it. A store or refresh
@@ -419,6 +448,10 @@ public final class ResponseCache {
      * other variants, which triggers {@link ResponseCacheExpiry#expireAfterUpdate} and restarts
      * the bucket's lifetime from the refreshed {@code Cache-Control} directives.
      * <p>
+     * The variant is addressed as {@link #lookup} matched it: by the
+     * {@link CacheKey.VaryFingerprint} of the revalidated request's headers over the headers the
+     * cached response's {@code Vary} names, which equals the fingerprint the variant is held under.
+     * <p>
      * The method is a no-op when no bucket or no variant is found at the given key/fingerprint -
      * the bucket expired, was evicted by weight pressure, or was invalidated or dropped between
      * the lookup and the revalidation - and when the conditional request was sent at or before
@@ -426,7 +459,8 @@ public final class ResponseCache {
      * so a revalidation in flight across a drop cannot refresh an entry stored after it.
      *
      * @param key the URL bucket of the cached variant
-     * @param fingerprint the Vary fingerprint of the cached variant
+     * @param fingerprint the fingerprint of the revalidated request's headers over the headers the
+     *                    cached response's {@code Vary} names
      * @param new304Headers the headers returned on the {@code 304} revalidation response
      * @param revalidation the network details of the {@code 304} exchange
      * @return the refreshed entry now in the cache, or {@link Optional#empty()} if nothing was
@@ -514,9 +548,6 @@ public final class ResponseCache {
         if (cc.noStore())
             return false;
 
-        if (hasVaryWildcard(decoded.getHeaders()))
-            return false;
-
         int status = decoded.getStatus().getCode();
 
         if (DEFAULT_CACHEABLE_STATUSES.contains(status))
@@ -525,6 +556,36 @@ public final class ResponseCache {
         // Non-default-cacheable statuses are only stored if explicit freshness was advertised;
         // s-maxage binds only shared caches, so it does not count for this private one.
         return cc.maxAge().isPresent() || hasHeader(decoded.getHeaders(), "Expires");
+    }
+
+    /**
+     * Tests whether a later request can be matched against the fingerprint of the request that
+     * produced a response.
+     * <p>
+     * A fingerprint cannot be matched when it names {@code *}, which matches no request, or a
+     * header whose value the origin received is not fixed by the request's own headers:
+     * <ul>
+     *   <li>{@code Cookie} with no value - the transport adds a {@code Cookie} from its cookie
+     *       store to a request carrying none, and the store can change between two requests</li>
+     *   <li>an {@linkplain NetworkDetails#isInternalHeader(String) internal header}, which
+     *       carries each request's own sequence number and timings</li>
+     * </ul>
+     *
+     * @param fingerprint the fingerprint of the request that produced a response
+     * @return {@code true} if a later request can be matched against {@code fingerprint}
+     */
+    private static boolean isMatchable(@NotNull CacheKey.VaryFingerprint fingerprint) {
+        for (Map.Entry<String, String> selecting : fingerprint.values().entrySet()) {
+            String name = selecting.getKey();
+
+            if ("*".equals(name) || NetworkDetails.isInternalHeader(name))
+                return false;
+
+            if ("cookie".equals(name) && selecting.getValue().isEmpty())
+                return false;
+        }
+
+        return true;
     }
 
     /**
@@ -626,39 +687,6 @@ public final class ResponseCache {
      */
     private static boolean hasHeader(@NotNull ConcurrentMap<String, ConcurrentList<String>> headers, @NotNull String name) {
         return headers.getOptional(name).isPresent();
-    }
-
-    /**
-     * Returns {@code true} if the {@code Vary} header is present and has a value of {@code *}.
-     *
-     * @param headers the header map to search
-     * @return {@code true} if {@code Vary: *} is present
-     */
-    private static boolean hasVaryWildcard(@NotNull ConcurrentMap<String, ConcurrentList<String>> headers) {
-        return headers.getOptional("Vary")
-            .flatMap(ConcurrentList::findFirst)
-            .map(value -> "*".equals(value.trim()))
-            .orElse(false);
-    }
-
-    /**
-     * Adapts a {@link ConcurrentMap} of {@link ConcurrentList} values into a plain
-     * {@code Map<String, Collection<String>>} for use with Feign-style APIs and helpers
-     * that expect a standard multimap shape.
-     *
-     * @param source the project-style concurrent header map
-     * @return a read-only view of the same headers as a plain multimap
-     */
-    private static @NotNull Map<String, Collection<String>> toMultimap(@NotNull ConcurrentMap<String, ConcurrentList<String>> source) {
-        if (source.isEmpty())
-            return Collections.emptyMap();
-
-        Map<String, Collection<String>> out = new HashMap<>(source.size());
-
-        for (Map.Entry<String, ConcurrentList<String>> entry : source.entrySet())
-            out.put(entry.getKey(), List.copyOf(entry.getValue()));
-
-        return Collections.unmodifiableMap(out);
     }
 
 }

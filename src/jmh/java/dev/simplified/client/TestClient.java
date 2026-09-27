@@ -68,8 +68,6 @@ public final class TestClient {
         feign.Client transport = new ApacheHttp5Client(ApacheClientFactory.configure(
             options.getTimings(),
             options.getQueries(),
-            options.getHeaders(),
-            options.getDynamicHeaders(),
             options.getInet6Address(),
             trustAll
         ).build());
