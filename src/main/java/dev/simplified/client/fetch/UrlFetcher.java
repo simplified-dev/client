@@ -57,16 +57,19 @@ import java.util.TreeMap;
  * <p>
  * Per-request flow:
  * <ol>
+ *   <li>Build the request's headers: the configured static headers, then the present value of
+ *       each dynamic header, read once. The request is sent with them, and the cache looks it up,
+ *       stores its response and refreshes that response's variant by them, so a response's
+ *       {@code Vary} is matched against the values the origin received.</li>
  *   <li>Resolve a rate-limit bucket id via {@link UrlFetcherConfig#getBucketResolver()}.</li>
- *   <li>Look up the URL in the {@link ResponseCache}; on a fresh hit, serve a synthesized
- *       {@link Response.DirectImpl} immediately. On a stale hit with an {@code ETag} or
- *       {@code Last-Modified} validator, attach {@code If-None-Match} /
+ *   <li>Look up the URL and the request's headers in the {@link ResponseCache}; on a fresh hit,
+ *       serve a synthesized {@link Response.DirectImpl} immediately. On a stale hit with an
+ *       {@code ETag} or {@code Last-Modified} validator, attach {@code If-None-Match} /
  *       {@code If-Modified-Since} and dispatch a conditional request; on
- *       {@code 304 Not Modified}, refresh the cached entry and replay the cached body under
- *       the refreshed headers, or under the stored ones when
- *       {@link ResponseCache#updateOn304} refreshed nothing;
- *       on a {@code 5xx} within the entry's {@code stale-if-error} window, replay the
- *       cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}.</li>
+ *       {@code 304 Not Modified}, refresh the cached entry and replay the cached body under the
+ *       refreshed headers, or under the stored ones when {@link ResponseCache#updateOn304}
+ *       refreshed nothing; on a {@code 5xx} within the entry's {@code stale-if-error} window,
+ *       replay the cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}.</li>
  *   <li>Check the local rate limit; raise {@link UrlFetchException.RateLimited} if exhausted.</li>
  *   <li>Track the request and dispatch through the shared Apache transport, recording the
  *       instant the response arrived on the request's context so the response's
@@ -118,8 +121,6 @@ public final class UrlFetcher {
         this.http = ApacheClientFactory.configure(
             options.getTimings(),
             options.getQueries(),
-            options.getHeaders(),
-            options.getDynamicHeaders(),
             options.getInet6Address()
         ).build();
     }
@@ -237,11 +238,12 @@ public final class UrlFetcher {
 
     private @NotNull Response.DirectImpl<byte[]> fetch(@NotNull URI url) {
         Request request = new Request.Impl(HttpMethod.GET, url.toString());
+        Map<String, Collection<String>> requestHeaders = this.requestHeaders();
         String bucketId = this.options.getBucketResolver().apply(url);
         RateLimit policy = this.options.getDefaultRateLimit();
         long now = System.currentTimeMillis();
 
-        Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, url.toString(), Collections.emptyMap());
+        Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, url.toString(), requestHeaders);
 
         if (hit.isPresent() && hit.get().response().isFresh(Instant.now()))
             return this.serveFromCache(request, hit.get(), false);
@@ -252,15 +254,36 @@ public final class UrlFetcher {
         this.rateLimitManager.trackRequest(bucketId, policy, now);
 
         CacheEntry<?> revalidating = hit.filter(e -> e.response().canRevalidate()).orElse(null);
-        return this.executeAndStore(url, request, revalidating);
+        return this.executeAndStore(url, request, requestHeaders, revalidating);
+    }
+
+    /**
+     * Builds the headers a request carries: each configured static header, then the present
+     * value of each dynamic header, whose supplier is read once for the request.
+     * <p>
+     * The same headers are looked up in the cache, sent, stored with the response and used to
+     * address the variant a {@code 304 Not Modified} refreshes, so the cache matches a
+     * response's {@code Vary} against the values the origin received.
+     *
+     * @return the request's headers, keyed case-insensitively
+     */
+    private @NotNull Map<String, Collection<String>> requestHeaders() {
+        Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        this.options.getHeaders().forEach((name, value) -> headers.computeIfAbsent(name, key -> new ArrayList<>()).add(value));
+        this.options.getDynamicHeaders().forEach((name, supplier) -> supplier.get()
+            .ifPresent(value -> headers.computeIfAbsent(name, key -> new ArrayList<>()).add(value))
+        );
+        return headers;
     }
 
     private @NotNull Response.DirectImpl<byte[]> executeAndStore(
         @NotNull URI url,
         @NotNull Request request,
+        @NotNull Map<String, Collection<String>> requestHeaders,
         @Nullable CacheEntry<?> revalidating
     ) {
         HttpGet get = new HttpGet(url);
+        requestHeaders.forEach((name, values) -> values.forEach(value -> get.addHeader(name, value)));
 
         if (revalidating != null)
             CacheRevalidation.buildConditionalHeaders(Collections.emptyMap(), revalidating.response())
@@ -273,7 +296,7 @@ public final class UrlFetcher {
             int statusCode = apacheResponse.getCode();
 
             if (statusCode == HttpStatus.NOT_MODIFIED.getCode() && revalidating != null)
-                return this.serveOn304(request, apacheResponse, context, revalidating);
+                return this.serveOn304(request, requestHeaders, apacheResponse, context, revalidating);
 
             if (HttpState.SERVER_ERROR.containsCode(statusCode) && revalidating != null
                 && revalidating.response().canServeStaleOnError(Instant.now())) {
@@ -305,7 +328,7 @@ public final class UrlFetcher {
                     url
                 );
 
-            this.responseCache.store(response, body);
+            this.responseCache.store(response, body, requestHeaders);
             return response;
         } catch (UrlFetchException ex) {
             throw ex;
@@ -316,6 +339,7 @@ public final class UrlFetcher {
 
     private @NotNull Response.DirectImpl<byte[]> serveOn304(
         @NotNull Request request,
+        @NotNull Map<String, Collection<String>> requestHeaders,
         @NotNull CloseableHttpResponse apacheResponse,
         @NotNull HttpClientContext context,
         @NotNull CacheEntry<?> revalidating
@@ -323,7 +347,7 @@ public final class UrlFetcher {
         CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, request.getUrl());
         CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(
             revalidating.response().varyHeaderNames(),
-            Collections.emptyMap()
+            requestHeaders
         );
         CacheEntry<?> refreshed = this.responseCache
             .updateOn304(key, fingerprint, headersFromApache(apacheResponse), new NetworkDetails(context))

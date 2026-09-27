@@ -9,6 +9,7 @@ import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.JsonApiException;
+import dev.simplified.client.exception.NotModifiedException;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
@@ -102,12 +103,16 @@ public final class ClientConfig<C extends Contract> {
     private final @NotNull ConcurrentMap<String, String> queries;
 
     /**
-     * The static headers appended to every outbound HTTP request.
+     * The static headers added to each request the client builds from its contract. The
+     * connection warm-up probe does not carry them, nor does the header-less {@code GET} the
+     * transport sends to follow a {@code 301}/{@code 302} answer to a {@code POST} or a
+     * {@code 303} answer to any method but {@code GET} and {@code HEAD}.
      */
     private final @NotNull ConcurrentMap<String, String> headers;
 
     /**
-     * The lazily-evaluated dynamic headers appended to every outbound HTTP request when present.
+     * The lazily-evaluated dynamic headers added, when their supplier yields a value, to the
+     * same requests as the static headers.
      */
     private final @NotNull ConcurrentMap<String, Supplier<Optional<String>>> dynamicHeaders;
 
@@ -353,6 +358,14 @@ public final class ClientConfig<C extends Contract> {
 
         /**
          * Adds a single static header.
+         * <p>
+         * The header is added to each request the client builds from its contract, where the
+         * response cache sees it. A request carrying {@code Authorization} or {@code Cookie}
+         * does not follow a redirect to another host or port: the {@code 3xx} is the response,
+         * raised as a {@link NotModifiedException} like any other {@code 3xx}. Neither the
+         * connection warm-up probe nor the header-less {@code GET} the transport sends to follow
+         * a {@code 301}/{@code 302} answer to a {@code POST}, or a {@code 303} answer to any
+         * method but {@code GET} and {@code HEAD}, carries the header.
          *
          * @param name the header name
          * @param value the header value
@@ -364,7 +377,8 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
-         * Adds all entries from the given map as static headers.
+         * Adds all entries from the given map as static headers, each as
+         * {@link #withHeader(String, String)} describes.
          *
          * @param headers the headers to add
          * @return this builder
@@ -377,8 +391,10 @@ public final class ClientConfig<C extends Contract> {
         /**
          * Adds a single dynamic header whose value is evaluated lazily on each request.
          * <p>
-         * The supplier is invoked at request time; if it returns {@link Optional#empty()},
-         * the header is omitted for that request.
+         * The supplier is invoked once for each request the client builds from its contract; if
+         * it returns {@link Optional#empty()}, the header is omitted for that request. The
+         * header reaches the same requests, and affects redirects the same way, as a static
+         * header added by {@link #withHeader(String, String)}.
          *
          * @param name the header name
          * @param valueSupplier the supplier producing the header value, or empty to omit
@@ -390,7 +406,8 @@ public final class ClientConfig<C extends Contract> {
         }
 
         /**
-         * Adds all entries from the given map as dynamic headers.
+         * Adds all entries from the given map as dynamic headers, each as
+         * {@link #withDynamicHeader(String, Supplier)} describes.
          *
          * @param dynamicHeaders the dynamic headers to add
          * @return this builder

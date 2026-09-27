@@ -36,7 +36,8 @@ import java.util.TreeMap;
  *   <li>On a stale cache hit with a validator, {@code If-None-Match} and/or
  *       {@code If-Modified-Since} are attached to a copy of the original request before
  *       dispatching to the delegate. If the server replies with {@code 304 Not Modified},
- *       {@link ResponseCache#updateOn304} replaces the cached entry with one carrying the
+ *       {@link ResponseCache#updateOn304} replaces the cached entry, addressed by the
+ *       {@link CacheKey.VaryFingerprint} of the request's headers, with one carrying the
  *       304's headers and aged from the 304 exchange, restarting its bucket's lifetime, per
  *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
  *       §4.3.4</a>, and a synthesized replay of the cached bytes is returned, carrying the
@@ -51,6 +52,13 @@ import java.util.TreeMap;
  *       {@code DELETE}), the cache is invalidated for the target URL plus any
  *       {@code Location} and {@code Content-Location} redirects.</li>
  * </ul>
+ * <p>
+ * A request is matched to a cached variant by its own headers, as Feign built it: the
+ * contract's headers and the configured static and dynamic headers the client's Feign target
+ * adds before the request reaches this class. The delegate sends those headers, and
+ * {@link InternalResponseDecoder} stores the answer under the same request's headers, so a
+ * response's {@code Vary} is matched against the values the origin received (see
+ * {@link ResponseCache#lookup}).
  * <p>
  * Every response the delegate returns carries its round trip: any
  * {@linkplain NetworkDetails#isInternalHeader(String) internal header} in it is dropped, and the

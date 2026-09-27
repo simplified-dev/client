@@ -34,7 +34,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Supplier;
 
 /**
  * Shared factory that assembles a fully configured Apache {@link HttpClientBuilder} for use
@@ -49,7 +48,7 @@ import java.util.function.Supplier;
  *       {@link NetworkDetails} attributes.</li>
  *   <li>A request interceptor that stamps the request-start timestamp, propagates the
  *       captured timing attributes onto the outbound request as {@code X-Internal-} headers,
- *       and applies the configured static queries, static headers, and dynamic headers.</li>
+ *       and appends the configured static queries to the request URL.</li>
  *   <li>Pool sizing, eviction, keep-alive, and connection time-to-live derived from the
  *       given {@link Timings}.</li>
  *   <li>An optional local IPv6 address binding when supplied.</li>
@@ -59,6 +58,9 @@ import java.util.function.Supplier;
  * {@code new ApacheHttp5Client(builder.build())} for Feign integration, while
  * {@code UrlFetcher} calls {@code builder.build()} directly to obtain a raw
  * {@link CloseableHttpClient CloseableHttpClient}.
+ * <p>
+ * The configured static and dynamic headers are not applied here: each caller adds them to the
+ * request it hands the transport, where its response cache sees the values the origin receives.
  *
  * @see Client
  * @see Timings
@@ -70,14 +72,11 @@ public final class ApacheClientFactory {
     /**
      * Configures a new {@link HttpClientBuilder} with shared client infrastructure, using
      * the JDK default TLS strategy. Equivalent to
-     * {@link #configure(Timings, Map, Map, Map, Optional, TlsSocketStrategy) configure(...,
+     * {@link #configure(Timings, Map, Optional, TlsSocketStrategy) configure(...,
      * DefaultClientTlsStrategy.createSystemDefault())}.
      *
      * @param timings the connection pool, timeout, and keep-alive configuration
      * @param queries static query parameters appended to every outbound request URL
-     * @param headers static headers appended to every outbound request
-     * @param dynamicHeaders lazily-evaluated headers appended to every outbound request when
-     *                       the supplier yields a present value
      * @param inet6Address the optional local IPv6 address for outbound socket binding
      * @return a configured {@link HttpClientBuilder} ready to be {@code build()}-ed or further
      *         customized by the caller
@@ -85,12 +84,9 @@ public final class ApacheClientFactory {
     public static @NotNull HttpClientBuilder configure(
         @NotNull Timings timings,
         @NotNull Map<String, String> queries,
-        @NotNull Map<String, String> headers,
-        @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders,
         @NotNull Optional<Inet6Address> inet6Address
     ) {
-        return configure(timings, queries, headers, dynamicHeaders, inet6Address,
-            DefaultClientTlsStrategy.createSystemDefault());
+        return configure(timings, queries, inet6Address, DefaultClientTlsStrategy.createSystemDefault());
     }
 
     /**
@@ -102,9 +98,6 @@ public final class ApacheClientFactory {
      *
      * @param timings the connection pool, timeout, and keep-alive configuration
      * @param queries static query parameters appended to every outbound request URL
-     * @param headers static headers appended to every outbound request
-     * @param dynamicHeaders lazily-evaluated headers appended to every outbound request when
-     *                       the supplier yields a present value
      * @param inet6Address the optional local IPv6 address for outbound socket binding
      * @param tlsDelegate the TLS socket strategy applied to HTTPS routes; wrapped by
      *                    {@link TimedTlsSocketStrategy} so handshake timings are still captured
@@ -114,8 +107,6 @@ public final class ApacheClientFactory {
     public static @NotNull HttpClientBuilder configure(
         @NotNull Timings timings,
         @NotNull Map<String, String> queries,
-        @NotNull Map<String, String> headers,
-        @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders,
         @NotNull Optional<Inet6Address> inet6Address,
         @NotNull TlsSocketStrategy tlsDelegate
     ) {
@@ -159,10 +150,6 @@ public final class ApacheClientFactory {
                 addHeader(request, context, NetworkDetails.TLS_CIPHER);
 
                 if (!queries.isEmpty()) appendQueryParameters(request, queries);
-                headers.forEach(request::addHeader);
-                dynamicHeaders.forEach((key, supplier) -> supplier.get()
-                    .ifPresent(value -> request.addHeader(key, value))
-                );
             })
             .setKeepAliveStrategy((response, context) -> {
                 TimeValue keepAlive = DefaultConnectionKeepAliveStrategy.INSTANCE.getKeepAliveDuration(response, context);

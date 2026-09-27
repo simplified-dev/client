@@ -6,6 +6,8 @@ import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.Feign;
+import feign.Headers;
+import feign.Param;
 import feign.Request;
 import feign.RequestLine;
 import feign.codec.Decoder;
@@ -47,6 +49,21 @@ class ResponseCacheTest {
 
     }
 
+    /**
+     * The test resource, read with a request header the caller chooses.
+     */
+    interface Negotiated {
+
+        @RequestLine("GET /resource")
+        @Headers("Accept: {accept}")
+        Response<byte[]> accept(@Param("accept") String accept);
+
+        @RequestLine("GET /resource")
+        @Headers("Cookie: {cookie}")
+        Response<byte[]> cookie(@Param("cookie") String cookie);
+
+    }
+
     private static final String URL = "https://127.0.0.1:0/resource";
 
     private static final byte[] BODY = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
@@ -68,16 +85,30 @@ class ResponseCacheTest {
      */
     private Function<Request, feign.Response> origin = request -> answer(request, 200, "Cache-Control", "max-age=60");
 
-    private final Resource resource = Feign.builder()
-        .client(new CachingFeignClient(
-            (request, options) -> {
-                this.sent.add(request);
-                return this.origin.apply(request);
-            },
-            this.cache
-        ))
-        .decoder(new InternalResponseDecoder(new Decoder.Default(), this.cache))
-        .target(Resource.class, "https://127.0.0.1:0");
+    private final Resource resource = this.proxy(Resource.class);
+
+    private final Negotiated negotiated = this.proxy(Negotiated.class);
+
+    /**
+     * Builds a Feign proxy whose transport is a {@link CachingFeignClient} over the scripted
+     * origin, decoding through the {@link InternalResponseDecoder} that stores each answer.
+     *
+     * @param contract the contract the proxy implements
+     * @param <T> the contract type
+     * @return the proxy
+     */
+    private <T> T proxy(Class<T> contract) {
+        return Feign.builder()
+            .client(new CachingFeignClient(
+                (request, options) -> {
+                    this.sent.add(request);
+                    return this.origin.apply(request);
+                },
+                this.cache
+            ))
+            .decoder(new InternalResponseDecoder(new Decoder.Default(), this.cache))
+            .target(contract, "https://127.0.0.1:0");
+    }
 
     private static Map<String, Collection<String>> headers(String... pairs) {
         Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
@@ -97,13 +128,67 @@ class ResponseCacheTest {
      * @return the answer
      */
     private static feign.Response answer(Request request, int status, String... headerPairs) {
+        return answer(request, status, status == 304 ? new byte[0] : BODY, headerPairs);
+    }
+
+    /**
+     * Builds an answer with the given body, carrying no round-trip markers.
+     *
+     * @param request the request the answer responds to
+     * @param status the answer's status code
+     * @param body the answer's body
+     * @param headerPairs the answer's headers, as alternating names and values
+     * @return the answer
+     */
+    private static feign.Response answer(Request request, int status, byte[] body, String... headerPairs) {
         return feign.Response.builder()
             .status(status)
             .reason(status == 304 ? "Not Modified" : "OK")
             .request(request)
             .headers(headers(headerPairs))
-            .body(status == 304 ? new byte[0] : BODY)
+            .body(body)
             .build();
+    }
+
+    /**
+     * Reads the first value of a request header, ignoring the name's case.
+     *
+     * @param request the request
+     * @param name the header name
+     * @return the header's first value, or an empty string when the request carries none
+     */
+    private static String header(Request request, String name) {
+        return request.headers().entrySet().stream()
+            .filter(entry -> entry.getKey().equalsIgnoreCase(name))
+            .flatMap(entry -> entry.getValue().stream())
+            .findFirst()
+            .orElse("");
+    }
+
+    /**
+     * Answers each request with its own {@code Accept} value as the body, stale on arrival under
+     * a validator naming that value, and a conditional request carrying that validator with a
+     * {@code 304} that makes it fresh for ten minutes.
+     *
+     * @param request the request
+     * @return the answer
+     */
+    private static feign.Response negotiatedAnswer(Request request) {
+        String accept = header(request, "Accept");
+        String etag = "\"" + accept + "\"";
+
+        if (etag.equals(header(request, ETag.IF_NONE_MATCH_HEADER)))
+            return answer(request, 304, "Vary", "Accept", "Cache-Control", "max-age=600", "ETag", etag);
+
+        return answer(
+            request,
+            200,
+            accept.getBytes(StandardCharsets.UTF_8),
+            "Vary", "Accept",
+            "Cache-Control", "max-age=60",
+            "Age", "120",
+            "ETag", etag
+        );
     }
 
     private Optional<CacheEntry<?>> lookup() {
@@ -118,7 +203,7 @@ class ResponseCacheTest {
      */
     private void storeDirectly(String... headerPairs) {
         Request request = Request.create(Request.HttpMethod.GET, URL, headers(), null, StandardCharsets.UTF_8, null);
-        this.cache.store(new Response.Impl<>(answer(request, 200, headerPairs), () -> BODY), BODY);
+        this.cache.store(new Response.Impl<>(answer(request, 200, headerPairs), () -> BODY), BODY, request.headers());
     }
 
     @Test
@@ -307,7 +392,7 @@ class ResponseCacheTest {
         String now = Instant.now().toString();
 
         feign.Response unstamped = answer(request, 200, "Cache-Control", "max-age=60", NetworkDetails.RESPONSE_RECEIVED, now);
-        this.cache.store(new Response.Impl<>(unstamped, () -> BODY), BODY);
+        this.cache.store(new Response.Impl<>(unstamped, () -> BODY), BODY, request.headers());
 
         assertThat(this.lookup().isPresent(), is(false));
 
@@ -318,7 +403,7 @@ class ResponseCacheTest {
             NetworkDetails.REQUEST_START, now,
             NetworkDetails.RESPONSE_RECEIVED, now
         );
-        this.cache.store(new Response.Impl<>(stamped, () -> BODY), BODY);
+        this.cache.store(new Response.Impl<>(stamped, () -> BODY), BODY, request.headers());
 
         assertThat(this.lookup().isPresent(), is(true));
     }
@@ -336,6 +421,124 @@ class ResponseCacheTest {
         assertThat(replay.getDetails().getRoundTrip().durationNanos(), is(0L));
         assertThat(live.getHeaders().keySet(), everyItem(not(startsWithIgnoringCase(NetworkDetails.INTERNAL_HEADER_PREFIX))));
         assertThat(replay.getHeaders().keySet(), everyItem(not(startsWithIgnoringCase(NetworkDetails.INTERNAL_HEADER_PREFIX))));
+    }
+
+    @Test
+    @DisplayName("A response varying on a request header is replayed to a request with the same value, not a different one")
+    void variantIsReplayedOnlyToTheSameValue() {
+        this.origin = request -> answer(request, 200, "Vary", "Accept", "Cache-Control", "max-age=60");
+
+        Response<byte[]> live = this.negotiated.accept("application/json");
+        Response<byte[]> replay = this.negotiated.accept("application/json");
+        Response<byte[]> other = this.negotiated.accept("text/plain");
+
+        assertThat(live.isFromCache(), is(false));
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(other.isFromCache(), is(false));
+        assertThat(this.sent, hasSize(2));
+    }
+
+    @Test
+    @DisplayName("Two variants of one URL are held together and each is replayed to its own request")
+    void variantsOfOneUrlCoexist() {
+        this.origin = request -> answer(
+            request,
+            200,
+            header(request, "Accept").getBytes(StandardCharsets.UTF_8),
+            "Vary", "Accept",
+            "Cache-Control", "max-age=60"
+        );
+
+        this.negotiated.accept("a");
+        this.negotiated.accept("b");
+        Response<byte[]> a = this.negotiated.accept("a");
+        Response<byte[]> b = this.negotiated.accept("b");
+
+        assertThat(this.sent, hasSize(2));
+        assertThat(a.isFromCache(), is(true));
+        assertThat(new String(a.getBody(), StandardCharsets.UTF_8), is("a"));
+        assertThat(b.isFromCache(), is(true));
+        assertThat(new String(b.getBody(), StandardCharsets.UTF_8), is("b"));
+    }
+
+    @Test
+    @DisplayName("A 304 refreshes the variant it revalidates and leaves the URL's other variant as stored")
+    void notModifiedRefreshesTheVariantRevalidated() {
+        this.origin = ResponseCacheTest::negotiatedAnswer;
+        this.negotiated.accept("a");
+        this.negotiated.accept("b");
+
+        Response<byte[]> revalidated = this.negotiated.accept("a");
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(new String(revalidated.getBody(), StandardCharsets.UTF_8), is("a"));
+        assertThat(this.sent, hasSize(3));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"a\""));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(120));
+        Response<byte[]> replay = this.negotiated.accept("a");
+
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(3));
+        assertThat(
+            this.cache.lookup(HttpMethod.GET, URL, headers("Accept", "a")).orElseThrow().response().getHeaders().get("Cache-Control"),
+            contains("max-age=600")
+        );
+        assertThat(
+            this.cache.lookup(HttpMethod.GET, URL, headers("Accept", "b")).orElseThrow().response().getHeaders().get("Cache-Control"),
+            contains("max-age=60")
+        );
+    }
+
+    @Test
+    @DisplayName("A response with no Vary is replayed to every request for its URL")
+    void responseWithoutVaryMatchesEveryRequest() {
+        this.negotiated.accept("a");
+        Response<byte[]> replay = this.negotiated.accept("b");
+
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(1));
+    }
+
+    @Test
+    @DisplayName("A response whose Vary names * among other headers is not stored")
+    void wildcardAmongVaryNamesIsNotStored() {
+        this.origin = request -> answer(request, 200, "Vary", "Accept, *", "Cache-Control", "max-age=60");
+
+        this.resource.get();
+
+        assertThat(this.resource.get().isFromCache(), is(false));
+        assertThat(this.sent, hasSize(2));
+    }
+
+    @Test
+    @DisplayName("A response varying on an internal header is not stored, as each request carries its own value")
+    void internalHeaderVariantIsNotStored() {
+        this.origin = request -> answer(request, 200, "Vary", NetworkDetails.DNS_START, "Cache-Control", "max-age=60");
+
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(false));
+        assertThat(this.resource.get().isFromCache(), is(false));
+        assertThat(this.sent, hasSize(2));
+    }
+
+    @Test
+    @DisplayName("A response varying on Cookie is matched only on a Cookie its request carried, never on one the transport may add")
+    void cookieVariantNeedsACookieTheRequestCarried() {
+        this.origin = request -> answer(request, 200, "Vary", "Cookie", "Cache-Control", "max-age=60");
+
+        this.resource.get();
+        Response<byte[]> uncookied = this.resource.get();
+
+        this.negotiated.cookie("session=1");
+        Response<byte[]> sameCookie = this.negotiated.cookie("session=1");
+        Response<byte[]> otherCookie = this.negotiated.cookie("session=2");
+
+        assertThat(uncookied.isFromCache(), is(false));
+        assertThat(sameCookie.isFromCache(), is(true));
+        assertThat(otherCookie.isFromCache(), is(false));
+        assertThat(this.sent, hasSize(4));
     }
 
 }
