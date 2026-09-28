@@ -13,7 +13,7 @@ Open items in `client`. Each stays here until it is closed or accepted.
 >
 > - Affected: `src/main/java/dev/simplified/client/response/Response.java:745` - `CachedImpl.isFresh`,
 >   `:793` - `CachedImpl.mustRevalidate`; `src/main/java/dev/simplified/client/cache/CachingFeignClient.java:148`,
->   `:168` - `serveFromCache`; `src/main/java/dev/simplified/client/fetch/UrlFetcher.java:254`, `:308` - `fetch`
+>   `:168` - `serveFromCache`; `src/main/java/dev/simplified/client/fetch/UrlFetcher.java:309`, `:364` - `fetch`
 > - Type: **BUG**
 > - Status: **OPEN**
 
@@ -126,7 +126,7 @@ Open items in `client`. Each stays here until it is closed or accepted.
 > `withSharedCache`.
 >
 > - Affected: `src/main/java/dev/simplified/client/factory/ApacheClientFactory.java:152` - `configure`;
->   `src/main/java/dev/simplified/client/fetch/UrlFetcher.java:252` - `fetch`;
->   `src/main/java/dev/simplified/client/fetch/UrlFetcherConfig.java:245` - `withSharedCache`
+>   `src/main/java/dev/simplified/client/fetch/UrlFetcher.java:307` - `fetch`;
+>   `src/main/java/dev/simplified/client/fetch/UrlFetcherConfig.java:248` - `withSharedCache`
 > - Type: **RISK**
 > - Status: **OPEN**

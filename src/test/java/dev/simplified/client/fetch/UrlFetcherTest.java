@@ -59,6 +59,11 @@ class UrlFetcherTest {
     private final AtomicInteger revalidatedHits = new AtomicInteger();
 
     /**
+     * The requests {@code /big-fresh} has answered.
+     */
+    private final AtomicInteger bigFreshHits = new AtomicInteger();
+
+    /**
      * The requests {@code /missing} has answered.
      */
     private final AtomicInteger missingHits = new AtomicInteger();
@@ -125,6 +130,17 @@ class UrlFetcherTest {
             byte[] body = new byte[64 * 1024];
             java.util.Arrays.fill(body, (byte) 'a');
             exchange.getResponseHeaders().add("Content-Type", "text/plain");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/big-fresh", exchange -> {
+            this.bigFreshHits.incrementAndGet();
+            byte[] body = new byte[64 * 1024];
+            java.util.Arrays.fill(body, (byte) 'b');
+            exchange.getResponseHeaders().add("Content-Type", "text/plain");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
             exchange.sendResponseHeaders(200, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
@@ -320,6 +336,73 @@ class UrlFetcherTest {
             return;
         }
         throw new AssertionError("Expected BodyCapExceeded for oversized body");
+    }
+
+    @Test
+    @DisplayName("A per-request cap below the configured one refuses a body the configured cap admits")
+    void perRequestCapBelowTheConfiguredRefuses() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        UrlFetchException.BodyCapExceeded raised = assertThrows(
+            UrlFetchException.BodyCapExceeded.class,
+            () -> fetcher.bytes(this.baseUri.resolve("/big"), 1024)
+        );
+
+        assertThat(raised.getMaxBytes(), is(1024L));
+    }
+
+    @Test
+    @DisplayName("A per-request cap above the configured one admits a body the configured cap refuses")
+    void perRequestCapAboveTheConfiguredAdmits() {
+        UrlFetcher fetcher = buildFetcher(1024);
+
+        Response<String> result = fetcher.get(this.baseUri.resolve("/big"), 128 * 1024);
+
+        assertThat(result.getBody().length(), is(64 * 1024));
+    }
+
+    @Test
+    @DisplayName("A negative per-request cap is refused")
+    void negativePerRequestCapIsRefused() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        assertThrows(IllegalArgumentException.class, () -> fetcher.get(this.baseUri.resolve("/hello"), -1));
+    }
+
+    @Test
+    @DisplayName("A fresh cached body larger than the request's cap raises without a request, and stays cached")
+    void freshCachedBodyOverTheCapRaises() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/big-fresh");
+
+        fetcher.bytes(uri);
+        UrlFetchException.BodyCapExceeded raised = assertThrows(
+            UrlFetchException.BodyCapExceeded.class,
+            () -> fetcher.bytes(uri, 1024)
+        );
+        Response<byte[]> replay = fetcher.bytes(uri);
+
+        assertThat(raised.isFromCache(), is(true));
+        assertThat(raised.getMaxBytes(), is(1024L));
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(replay.getBody().length, is(64 * 1024));
+        assertThat(this.bigFreshHits.get(), is(1));
+    }
+
+    @Test
+    @DisplayName("A body replayed on a 304 is held to the request's cap")
+    void notModifiedReplayOverTheCapRaises() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/revalidated");
+
+        fetcher.get(uri);
+        UrlFetchException.BodyCapExceeded raised = assertThrows(
+            UrlFetchException.BodyCapExceeded.class,
+            () -> fetcher.get(uri, 4)
+        );
+
+        assertThat(raised.isFromCache(), is(true));
+        assertThat(this.revalidatedHits.get(), is(2));
     }
 
     @Test

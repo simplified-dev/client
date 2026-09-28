@@ -69,7 +69,10 @@ public final class UrlFetcherConfig {
     private final @NotNull Timings timings;
 
     /**
-     * The maximum response body size in bytes; reads beyond this cap raise {@link UrlFetchException.BodyCapExceeded}.
+     * The maximum response body size in bytes for a fetch that names no cap of its own; a body
+     * beyond it raises {@link UrlFetchException.BodyCapExceeded}. A fetch through
+     * {@link UrlFetcher#get(URI, long)}, {@link UrlFetcher#get(URI, Class, long)} or
+     * {@link UrlFetcher#bytes(URI, long)} is held to the cap it names instead.
      */
     private final long maxBodyBytes;
 
@@ -204,7 +207,7 @@ public final class UrlFetcherConfig {
         }
 
         /**
-         * Sets the maximum response body size in bytes.
+         * Sets the maximum response body size in bytes for a fetch that names no cap of its own.
          *
          * @param maxBodyBytes the cap in bytes
          * @return this builder

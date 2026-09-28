@@ -20,7 +20,7 @@ import java.util.Map;
 
 /**
  * Thrown when a {@link UrlFetcher} call cannot complete - either because the local rate-limit
- * budget rejected the request, the response body exceeded the configured cap, the transport
+ * budget rejected the request, the response body exceeded the fetch's cap, the transport
  * failed, or the origin answered with an {@linkplain HttpState#isError() error} status.
  * <p>
  * Each cause has its own type, so a caller tells them apart by the type it catches:
@@ -271,14 +271,14 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
-     * Thrown when a fetched response body would exceed the configured size cap before the
-     * stream was fully drained.
+     * Thrown when a response body is larger than the fetch's size cap - one read off the wire,
+     * which stops reading at the cap, or one the response cache would replay.
      */
     @Getter
     public static final class BodyCapExceeded extends UrlFetchException {
 
         /**
-         * The configured maximum body size in bytes.
+         * The maximum body size in bytes the fetch was held to.
          */
         private final long maxBytes;
 
@@ -287,8 +287,9 @@ public class UrlFetchException extends ApiException {
          *
          * @param url the URL that was being fetched
          * @param details the network timing snapshot at the moment the cap was hit
-         * @param responseHeaders the raw response headers received before the cap was hit
-         * @param maxBytes the configured maximum body size in bytes
+         * @param responseHeaders the response headers received before the cap was hit, or the
+         *                        headers of the cache replay the cap refused
+         * @param maxBytes the maximum body size in bytes the fetch was held to
          */
         public BodyCapExceeded(
             @NotNull URI url,
