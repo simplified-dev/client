@@ -77,10 +77,16 @@ import java.util.TreeMap;
  *   <li>Read the response body capped at {@link UrlFetcherConfig#getMaxBodyBytes()};
  *       raise {@link UrlFetchException.BodyCapExceeded} if the cap is hit.</li>
  *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>
- *   <li>Raise {@link UrlFetchException} for an {@linkplain Response#isError() error} status,
- *       which is never offered to the cache; otherwise offer the response to the cache for
+ *   <li>Raise for an {@linkplain Response#isError() error} status, which is never offered to
+ *       the cache: {@link UrlFetchException.ClientError} for a {@code 4xx}, a
+ *       {@link UrlFetchException} for any other; otherwise offer the response to the cache for
  *       storage and return it.</li>
  * </ol>
+ * <p>
+ * A {@code 4xx} answering a conditional request raises as well: only a {@code 5xx} is replaced
+ * by a {@code stale-if-error} replay. A cache replay whose status is an error raises the
+ * exception the live answer would have; this fetcher never stores one, so such an entry comes
+ * only from another writer to a {@linkplain UrlFetcherConfig#getSharedCache() shared cache}.
  *
  * @see UrlFetcherConfig
  * @see UrlFetchException
@@ -319,14 +325,7 @@ public final class UrlFetcher {
             this.responseCache.recordLastResponse(response);
 
             if (response.isError())
-                throw new UrlFetchException(
-                    new ErrorContext(status, HttpMethod.GET, url.toString(), headers, Collections.emptyMap(), body),
-                    new NetworkDetails(context),
-                    "Origin returned %d %s for URL '%s'",
-                    status.getCode(),
-                    status.getMessage(),
-                    url
-                );
+                throw statusFailure(request, status, headers, body, new NetworkDetails(context));
 
             this.responseCache.store(response, body, requestHeaders);
             return response;
@@ -381,10 +380,39 @@ public final class UrlFetcher {
             entry::body
         );
         this.responseCache.recordLastResponse(response);
+
+        if (response.isError())
+            throw statusFailure(request, cached.getStatus(), headers, entry.body(), NetworkDetails.EMPTY);
+
         return response;
     }
 
     // ===== Helpers =====
+
+    /**
+     * Builds the exception a fetch raises for an error status, whether the origin answered it or
+     * the cache replayed it.
+     *
+     * @param request the request the status answers
+     * @param status the error status
+     * @param headers the response headers
+     * @param body the response body
+     * @param details the network timing snapshot of the exchange
+     * @return a {@link UrlFetchException.ClientError} for a client error status, otherwise a
+     *         {@link UrlFetchException}
+     */
+    private static @NotNull UrlFetchException statusFailure(
+        @NotNull Request request,
+        @NotNull HttpStatus status,
+        @NotNull Map<String, Collection<String>> headers,
+        byte @NotNull [] body,
+        @NotNull NetworkDetails details
+    ) {
+        return UrlFetchException.ofStatus(
+            new ErrorContext(status, request.getMethod(), request.getUrl(), headers, Collections.emptyMap(), body),
+            details
+        );
+    }
 
     private static byte @NotNull [] readBody(
         @NotNull CloseableHttpResponse apacheResponse,

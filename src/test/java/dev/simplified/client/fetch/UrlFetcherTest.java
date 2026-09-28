@@ -3,8 +3,14 @@ package dev.simplified.client.fetch;
 import com.google.gson.Gson;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
+import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.UrlFetchException;
+import dev.simplified.client.request.HttpMethod;
+import dev.simplified.client.request.Request;
+import dev.simplified.client.response.HttpStatus;
+import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -15,7 +21,9 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -25,7 +33,9 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class UrlFetcherTest {
@@ -47,6 +57,16 @@ class UrlFetcherTest {
      * The requests {@code /revalidated} has answered.
      */
     private final AtomicInteger revalidatedHits = new AtomicInteger();
+
+    /**
+     * The requests {@code /missing} has answered.
+     */
+    private final AtomicInteger missingHits = new AtomicInteger();
+
+    /**
+     * The requests {@code /retired} has answered.
+     */
+    private final AtomicInteger retiredHits = new AtomicInteger();
 
     /**
      * The {@code X-Variant} values each request {@code /negotiated} answered carried, in the
@@ -132,6 +152,32 @@ class UrlFetcherTest {
             byte[] body = "down".getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
             exchange.sendResponseHeaders(503, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/missing", exchange -> {
+            this.missingHits.incrementAndGet();
+            byte[] body = "gone".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(404, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/retired", exchange -> {
+            this.retiredHits.incrementAndGet();
+            exchange.getResponseHeaders().add("ETag", "\"v1\"");
+
+            if (exchange.getRequestHeaders().containsKey("If-None-Match")) {
+                exchange.sendResponseHeaders(410, -1);
+                exchange.close();
+                return;
+            }
+
+            byte[] body = "retiring".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=0, stale-if-error=60");
+            exchange.sendResponseHeaders(200, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
             }
@@ -229,6 +275,31 @@ class UrlFetcherTest {
         );
     }
 
+    /**
+     * Stores a fresh {@code GET} response for {@code uri} in {@code cache} the way a writer
+     * other than the fetcher would, with {@code max-age=60} and no {@code Vary}.
+     *
+     * @param cache the cache to store into
+     * @param uri the URL the response answers
+     * @param status the response's status
+     * @param body the response's body
+     */
+    private static void storeDirectly(ResponseCache cache, URI uri, HttpStatus status, byte[] body) {
+        HttpClientContext context = HttpClientContext.create();
+        context.setAttribute(NetworkDetails.REQUEST_START, Instant.now());
+        context.setAttribute(NetworkDetails.RESPONSE_RECEIVED, Instant.now());
+        NetworkDetails details = new NetworkDetails(context);
+
+        Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
+            status,
+            new Request.Impl(HttpMethod.GET, uri.toString()),
+            () -> details,
+            Map.of("Cache-Control", List.of("max-age=60")),
+            () -> body
+        );
+        cache.store(response, body, Map.of());
+    }
+
     @Test
     @DisplayName("Fetches a small body and decodes by Content-Type charset")
     void fetchesSmallBody() {
@@ -284,6 +355,71 @@ class UrlFetcherTest {
         assertThrows(UrlFetchException.class, () -> fetcher.bytes(this.baseUri.resolve("/unavailable")));
         assertThrows(UrlFetchException.class, () -> fetcher.bytes(this.baseUri.resolve("/unavailable")));
         assertThat(this.unavailableHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 4xx raises ClientError carrying the origin's status and body")
+    void clientErrorStatusRaisesClientError() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> fetcher.get(this.baseUri.resolve("/missing"))
+        );
+
+        assertThat(raised.getStatus(), is(HttpStatus.NOT_FOUND));
+        assertThat(new String(raised.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("gone")));
+        assertThat(raised.getMessage(), containsString("404"));
+    }
+
+    @Test
+    @DisplayName("A 4xx is never stored, so each fetch of it reaches the origin")
+    void clientErrorStatusIsNeverStored() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        assertThrows(UrlFetchException.ClientError.class, () -> fetcher.bytes(this.baseUri.resolve("/missing")));
+        assertThrows(UrlFetchException.ClientError.class, () -> fetcher.bytes(this.baseUri.resolve("/missing")));
+        assertThat(this.missingHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 5xx raises a UrlFetchException that is not a ClientError")
+    void serverErrorStatusIsNotAClientError() {
+        UrlFetchException raised = assertThrows(
+            UrlFetchException.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(this.baseUri.resolve("/bad"))
+        );
+
+        assertThat(raised, is(not(instanceOf(UrlFetchException.ClientError.class))));
+        assertThat(raised.getStatus(), is(HttpStatus.SERVICE_UNAVAILABLE));
+    }
+
+    @Test
+    @DisplayName("A 4xx answering a revalidation raises rather than replaying the stale entry")
+    void clientErrorOnRevalidationRaises() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/retired");
+
+        Response<String> live = fetcher.get(uri);
+        UrlFetchException.ClientError raised = assertThrows(UrlFetchException.ClientError.class, () -> fetcher.get(uri));
+
+        assertThat(live.getBody(), is(equalTo("retiring")));
+        assertThat(raised.getStatus(), is(HttpStatus.GONE));
+        assertThat(this.retiredHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 4xx another writer stored in a shared cache raises ClientError on replay without reaching the origin")
+    void cachedClientErrorRaisesOnReplay() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/missing");
+        storeDirectly(fetcher.getResponseCache(), uri, HttpStatus.NOT_FOUND, "stored".getBytes(StandardCharsets.UTF_8));
+
+        UrlFetchException.ClientError raised = assertThrows(UrlFetchException.ClientError.class, () -> fetcher.get(uri));
+
+        assertThat(raised.isFromCache(), is(true));
+        assertThat(new String(raised.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("stored")));
+        assertThat(this.missingHits.get(), is(0));
     }
 
     @Test

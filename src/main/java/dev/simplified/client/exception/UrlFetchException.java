@@ -5,6 +5,7 @@ import dev.simplified.client.fetch.UrlFetcher;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.HttpMethod;
+import dev.simplified.client.response.HttpState;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import org.apache.hc.core5.http.protocol.HttpContext;
@@ -19,8 +20,23 @@ import java.util.Map;
 
 /**
  * Thrown when a {@link UrlFetcher} call cannot complete - either because the local rate-limit
- * budget rejected the request, the response body exceeded the configured cap, or the origin
- * returned a non-success status.
+ * budget rejected the request, the response body exceeded the configured cap, the transport
+ * failed, or the origin answered with an {@linkplain HttpState#isError() error} status.
+ * <p>
+ * Each cause has its own type, so a caller tells them apart by the type it catches:
+ * <ul>
+ *   <li>{@link ClientError} - the origin answered with a status {@link HttpState#CLIENT_ERROR}
+ *       classifies, {@code 400} to {@code 451}</li>
+ *   <li>{@code UrlFetchException} itself - the origin answered with any other error status: a
+ *       {@code 5xx}, or a vendor-specific code such as Nginx's {@code 444} and
+ *       {@code 494-499}</li>
+ *   <li>{@link Transport} - no response arrived</li>
+ *   <li>{@link BodyCapExceeded} - the body was larger than the fetch's cap</li>
+ *   <li>{@link RateLimited} - the local budget refused the request before it was sent</li>
+ * </ul>
+ * {@link #getStatus()} does not separate them on its own: a {@link RateLimited} carries a
+ * synthetic {@code 429} and a {@link Transport} or {@link BodyCapExceeded} a synthetic
+ * {@link HttpStatus#IO_ERROR}.
  * <p>
  * Extends {@link ApiException} so URL-fetch failures participate in the same exception family
  * as contract-driven API errors: {@link #getStatus()}, {@link #getHeaders()},
@@ -38,6 +54,12 @@ public class UrlFetchException extends ApiException {
      * The short name identifying URL-fetch errors in logs and error tracking.
      */
     public static final @NotNull String NAME = "UrlFetch";
+
+    /**
+     * The message format of an exception raised for an origin's error status, taking the
+     * status code, the status message and the URL.
+     */
+    private static final @NotNull String STATUS_MESSAGE = "Origin returned %d %s for URL '%s'";
 
     /**
      * Constructs a new {@code UrlFetchException} with the given context and pre-formatted message.
@@ -153,6 +175,61 @@ public class UrlFetchException extends ApiException {
             Collections.emptyMap(),
             new byte[0]
         );
+    }
+
+    /**
+     * Builds the exception a fetch raises when the origin answers with an error status - a
+     * {@link ClientError} for a status {@link HttpState#CLIENT_ERROR} classifies, a
+     * {@code UrlFetchException} for any other.
+     *
+     * @param context the HTTP context bundle carrying the error status, headers, body, and
+     *                request metadata
+     * @param details the network timing snapshot of the exchange
+     * @return the exception to raise
+     */
+    public static @NotNull UrlFetchException ofStatus(@NotNull ErrorContext context, @NotNull NetworkDetails details) {
+        if (context.status().getState() == HttpState.CLIENT_ERROR)
+            return new ClientError(context, details);
+
+        return new UrlFetchException(
+            context,
+            details,
+            STATUS_MESSAGE,
+            context.status().getCode(),
+            context.status().getMessage(),
+            context.requestUrl()
+        );
+    }
+
+    /**
+     * Thrown when the origin answers a fetch with a status {@link HttpState#CLIENT_ERROR}
+     * classifies, {@code 400} to {@code 451}.
+     * <p>
+     * {@link #getStatus()} is the status the origin sent, and {@link #getBody()} and
+     * {@link #getHeaders()} the body and headers it sent with it. A fetch answered from the
+     * response cache with such a status raises it as well, with the cached headers.
+     */
+    public static final class ClientError extends UrlFetchException {
+
+        /**
+         * Constructs a new {@code ClientError} with the context and network details of the
+         * exchange the origin answered.
+         *
+         * @param context the HTTP context bundle carrying the client error status, headers, body,
+         *                and request metadata
+         * @param details the network timing snapshot of the exchange
+         */
+        public ClientError(@NotNull ErrorContext context, @NotNull NetworkDetails details) {
+            super(
+                context,
+                details,
+                STATUS_MESSAGE,
+                context.status().getCode(),
+                context.status().getMessage(),
+                context.requestUrl()
+            );
+        }
+
     }
 
     /**

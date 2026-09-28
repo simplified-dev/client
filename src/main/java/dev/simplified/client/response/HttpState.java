@@ -51,7 +51,7 @@ public enum HttpState {
     /**
      * Client error responses ({@code 400-451}).
      */
-    CLIENT_ERROR(400, 451),
+    CLIENT_ERROR(400, 451, true),
 
     /**
      * General server error responses ({@code 500-599}), used as a catch-all when no more specific server-side state matches.
