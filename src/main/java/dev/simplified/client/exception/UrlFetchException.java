@@ -31,7 +31,8 @@ import java.util.Map;
  *       {@code 5xx}, or a vendor-specific code such as Nginx's {@code 444} and
  *       {@code 494-499}</li>
  *   <li>{@link Transport} - no response arrived</li>
- *   <li>{@link BodyCapExceeded} - the body was larger than the fetch's cap</li>
+ *   <li>{@link BodyCapExceeded} - the body of a response that is not an error was larger than
+ *       the fetch's cap; an error status raises its own type whatever the size of its body</li>
  *   <li>{@link RateLimited} - the local budget refused the request before it was sent</li>
  * </ul>
  * {@link #getStatus()} does not separate them on its own: a {@link RateLimited} carries a
@@ -205,9 +206,10 @@ public class UrlFetchException extends ApiException {
      * Thrown when the origin answers a fetch with a status {@link HttpState#CLIENT_ERROR}
      * classifies, {@code 400} to {@code 451}.
      * <p>
-     * {@link #getStatus()} is the status the origin sent, and {@link #getBody()} and
-     * {@link #getHeaders()} the body and headers it sent with it. A fetch answered from the
-     * response cache with such a status raises it as well, with the cached headers.
+     * {@link #getStatus()} is the status the origin sent, {@link #getBody()} the body it sent
+     * with it, cut at the fetch's body cap, and {@link #getHeaders()} its headers. A fetch
+     * answered from the response cache with such a status raises it as well, with the cached
+     * headers.
      */
     public static final class ClientError extends UrlFetchException {
 
@@ -272,7 +274,9 @@ public class UrlFetchException extends ApiException {
 
     /**
      * Thrown when a response body is larger than the fetch's size cap - one read off the wire,
-     * which stops reading at the cap, or one the response cache would replay.
+     * which stops reading at the cap, or one the response cache would replay. A response with an
+     * error status raises the exception for its status instead, carrying its body cut at the
+     * cap.
      */
     @Getter
     public static final class BodyCapExceeded extends UrlFetchException {

@@ -37,6 +37,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -75,7 +76,8 @@ import java.util.TreeMap;
  *       instant the response arrived on the request's context so the response's
  *       {@link NetworkDetails} carry the whole round trip.</li>
  *   <li>Read the response body capped at the fetch's cap; raise
- *       {@link UrlFetchException.BodyCapExceeded} if the cap is hit.</li>
+ *       {@link UrlFetchException.BodyCapExceeded} if the cap is hit, except under an error
+ *       status, whose body is cut at the cap so that the status is what the fetch raises.</li>
  *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>
  *   <li>Raise for an {@linkplain Response#isError() error} status, which is never offered to
  *       the cache: {@link UrlFetchException.ClientError} for a {@code 4xx}, a
@@ -94,7 +96,9 @@ import java.util.TreeMap;
  * on a fresh hit, a {@code 304 Not Modified} or a {@code stale-if-error} replacement. A cached
  * body larger than the cap raises {@link UrlFetchException.BodyCapExceeded} with the replay's
  * headers, and a fresh hit raises it without a request being sent. The entry stays cached, so a
- * fetch with a larger cap is still answered from it.
+ * fetch with a larger cap is still answered from it. An error status raises its own exception
+ * whatever the size of its body, which that exception carries cut at the cap, so a {@code 404}
+ * page larger than the cap still raises {@link UrlFetchException.ClientError}.
  *
  * @see UrlFetcherConfig
  * @see UrlFetchException
@@ -366,7 +370,7 @@ public final class UrlFetcher {
                 return this.serveFromCache(url, request, revalidating, true, maxBodyBytes);
             }
 
-            byte[] body = readBody(apacheResponse, url, context, maxBodyBytes);
+            byte[] body = readBody(apacheResponse, url, context, maxBodyBytes, isErrorStatus(statusCode));
             HttpStatus status = HttpStatus.of(statusCode);
             Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
 
@@ -424,9 +428,10 @@ public final class UrlFetcher {
      *                    {@code stale-if-error} window
      * @param maxBodyBytes the largest body, in bytes, the fetch accepts
      * @return the replayed response
-     * @throws UrlFetchException.BodyCapExceeded if the cached body is larger than
-     *                                           {@code maxBodyBytes}
-     * @throws UrlFetchException if the cached status is an error
+     * @throws UrlFetchException.BodyCapExceeded if the cached status is not an error and the
+     *                                           cached body is larger than {@code maxBodyBytes}
+     * @throws UrlFetchException if the cached status is an error, carrying the body cut at
+     *                           {@code maxBodyBytes}
      */
     private @NotNull Response.DirectImpl<byte[]> serveFromCache(
         @NotNull URI url,
@@ -447,7 +452,9 @@ public final class UrlFetcher {
         if (servedStale)
             headers.put(ResponseCache.CACHE_STALE_HEADER, List.of("true"));
 
-        if (entry.body().length > maxBodyBytes)
+        boolean error = cached.getStatus().getState().isError();
+
+        if (!error && entry.body().length > maxBodyBytes)
             throw new UrlFetchException.BodyCapExceeded(url, NetworkDetails.EMPTY, headers, maxBodyBytes);
 
         Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
@@ -459,8 +466,8 @@ public final class UrlFetcher {
         );
         this.responseCache.recordLastResponse(response);
 
-        if (response.isError())
-            throw statusFailure(request, cached.getStatus(), headers, entry.body(), NetworkDetails.EMPTY);
+        if (error)
+            throw statusFailure(request, cached.getStatus(), headers, cutAt(entry.body(), maxBodyBytes), NetworkDetails.EMPTY);
 
         return response;
     }
@@ -532,11 +539,52 @@ public final class UrlFetcher {
         );
     }
 
+    /**
+     * Tells whether a status code the origin answered is an {@linkplain HttpState#isError() error},
+     * answering {@code false} for a code {@link HttpStatus} has no constant for.
+     *
+     * @param statusCode the status code
+     * @return {@code true} when the code's state is an error
+     */
+    private static boolean isErrorStatus(int statusCode) {
+        try {
+            return HttpStatus.of(statusCode).getState().isError();
+        } catch (IllegalArgumentException ex) {
+            return false;
+        }
+    }
+
+    /**
+     * Cuts a body at a cap.
+     *
+     * @param body the body
+     * @param maxBytes the cap in bytes
+     * @return {@code body} when it fits the cap, otherwise its first {@code maxBytes} bytes
+     */
+    private static byte @NotNull [] cutAt(byte @NotNull [] body, long maxBytes) {
+        return body.length <= maxBytes ? body : Arrays.copyOf(body, (int) maxBytes);
+    }
+
+    /**
+     * Reads a response's body, holding it to a cap.
+     *
+     * @param apacheResponse the response whose body is read
+     * @param url the URL fetched
+     * @param context the request's context, for the network details of a refusal
+     * @param maxBytes the largest body, in bytes, the fetch accepts
+     * @param cutAtCap whether a body past the cap is cut at it rather than refused, as the body
+     *                 of an error status is
+     * @return the body, empty when the response carries none
+     * @throws UrlFetchException.BodyCapExceeded if the body is larger than {@code maxBytes} and
+     *                                           {@code cutAtCap} is not set
+     * @throws IOException if reading the body fails
+     */
     private static byte @NotNull [] readBody(
         @NotNull CloseableHttpResponse apacheResponse,
         @NotNull URI url,
         @NotNull HttpClientContext context,
-        long maxBytes
+        long maxBytes,
+        boolean cutAtCap
     ) throws IOException {
         HttpEntity entity = apacheResponse.getEntity();
         if (entity == null)
@@ -553,6 +601,11 @@ public final class UrlFetcher {
             while ((read = in.read(buffer)) != -1) {
                 total += read;
                 if (total > maxBytes) {
+                    if (cutAtCap) {
+                        out.write(buffer, 0, (int) (read - (total - maxBytes)));
+                        break;
+                    }
+
                     Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
                     NetworkDetails details = new NetworkDetails(context);
                     throw new UrlFetchException.BodyCapExceeded(url, details, headers, maxBytes);

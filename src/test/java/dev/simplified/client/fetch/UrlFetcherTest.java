@@ -181,6 +181,22 @@ class UrlFetcherTest {
                 os.write(body);
             }
         });
+        this.server.createContext("/missing-big", exchange -> {
+            byte[] body = new byte[64 * 1024];
+            java.util.Arrays.fill(body, (byte) 'm');
+            exchange.sendResponseHeaders(404, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/bad-big", exchange -> {
+            byte[] body = new byte[64 * 1024];
+            java.util.Arrays.fill(body, (byte) 'b');
+            exchange.sendResponseHeaders(503, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
         this.server.createContext("/retired", exchange -> {
             this.retiredHits.incrementAndGet();
             exchange.getResponseHeaders().add("ETag", "\"v1\"");
@@ -475,6 +491,49 @@ class UrlFetcherTest {
 
         assertThat(raised, is(not(instanceOf(UrlFetchException.ClientError.class))));
         assertThat(raised.getStatus(), is(HttpStatus.SERVICE_UNAVAILABLE));
+    }
+
+    @Test
+    @DisplayName("A 4xx whose body is larger than the cap raises ClientError rather than BodyCapExceeded")
+    void clientErrorOverTheCapRaisesClientError() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        assertThrows(UrlFetchException.ClientError.class, () -> fetcher.get(this.baseUri.resolve("/missing-big"), 1024));
+    }
+
+    @Test
+    @DisplayName("A 4xx body larger than the cap is cut at the cap")
+    void clientErrorBodyIsCutAtTheCap() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> fetcher.bytes(this.baseUri.resolve("/missing-big"), 1024)
+        );
+
+        assertThat(raised.getBody().orElseThrow().length, is(1024));
+    }
+
+    @Test
+    @DisplayName("A 5xx whose body is larger than the cap raises its status rather than BodyCapExceeded")
+    void serverErrorOverTheCapRaisesItsStatus() {
+        UrlFetcher fetcher = buildFetcher(1024);
+
+        UrlFetchException raised = assertThrows(UrlFetchException.class, () -> fetcher.bytes(this.baseUri.resolve("/bad-big")));
+
+        assertThat(raised.getStatus(), is(HttpStatus.SERVICE_UNAVAILABLE));
+    }
+
+    @Test
+    @DisplayName("A cached 4xx whose body is larger than the cap raises ClientError with the body cut at the cap")
+    void cachedClientErrorOverTheCapRaisesClientError() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/missing");
+        storeDirectly(fetcher.getResponseCache(), uri, HttpStatus.NOT_FOUND, new byte[4096]);
+
+        UrlFetchException.ClientError raised = assertThrows(UrlFetchException.ClientError.class, () -> fetcher.bytes(uri, 1024));
+
+        assertThat(raised.getBody().orElseThrow().length, is(1024));
     }
 
     @Test
