@@ -20,7 +20,8 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * Non-instantiable utility class for parsing HTTP date header values into {@link Instant}.
+ * Non-instantiable utility class for parsing HTTP date header values into {@link Instant}, and
+ * formatting an {@link Instant} as one.
  * <p>
  * Per <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.1">RFC 7231
  * Section 7.1.1.1</a>, HTTP dates appear in three historical formats that a compliant
@@ -42,7 +43,8 @@ import java.util.Optional;
  * lock-free. This is the canonical HTTP-date parser for the client library and is used by
  * {@link RetryAfterParser} for the {@code Retry-After} HTTP-date branch and by
  * {@link CacheControl} / {@code Response.Cached} for {@code Date}, {@code Expires}, and
- * {@code Last-Modified} header resolution.
+ * {@code Last-Modified} header resolution. {@link #format(Instant)} generates the IMF-fixdate
+ * form, the only one a sender generates.
  *
  * @see <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.1">RFC 7231 - Date/Time Formats</a>
  * @see RetryAfterParser
@@ -82,6 +84,25 @@ public final class HttpDates {
     private static final @NotNull DateTimeFormatter ASCTIME = DateTimeFormatter
         .ofPattern("MMM d HH:mm:ss yyyy", Locale.US)
         .withZone(ZoneOffset.UTC);
+
+    /**
+     * Fixed-length IMF-fixdate with its day-of-week prefix, the form an HTTP date is generated
+     * in (e.g. {@code Sun, 06 Nov 1994 08:49:37 GMT}).
+     */
+    private static final @NotNull DateTimeFormatter IMF_FIXDATE_GENERATED = DateTimeFormatter
+        .ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+        .withZone(ZoneOffset.UTC);
+
+    /**
+     * Formats an instant as an HTTP date in the IMF-fixdate form, dropping any fraction of a
+     * second, which {@link #parse(String)} reads back as the same whole second.
+     *
+     * @param instant the instant to format
+     * @return the IMF-fixdate form of {@code instant}, e.g. {@code Sun, 06 Nov 1994 08:49:37 GMT}
+     */
+    public static @NotNull String format(@NotNull Instant instant) {
+        return IMF_FIXDATE_GENERATED.format(instant);
+    }
 
     /**
      * Parses an HTTP date header value from a collection of header values.

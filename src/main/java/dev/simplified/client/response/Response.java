@@ -737,7 +737,8 @@ public interface Response<T> {
          * like Cloudflare), the server-reported {@code Date}, and the local
          * request/response timestamps, selecting the conservative maximum of apparent and
          * corrected age as the initial age. A view refreshed by a {@code 304 Not Modified}
-         * reports that exchange's round trip, so its age is counted from the revalidation.
+         * reports that exchange's round trip and carries the 304's {@code Date}, or the instant
+         * the 304 was received when it sent none, so its age is counted from the revalidation.
          *
          * @param now the reference instant for the age computation
          * @return the response's current age as a {@link Duration}

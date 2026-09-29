@@ -10,6 +10,7 @@ import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import dev.simplified.client.util.HttpDates;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
@@ -164,7 +165,8 @@ public final class ResponseCache {
      * {@code 304 Not Modified} revalidation, its values naming the headers the 304 carried.
      * <p>
      * The replay carries the stored headers overlaid with the 304's, so each named header holds
-     * the value the server sent with the 304 and every other header is replayed from the cache.
+     * the value the server sent with the 304 and every other header is replayed from the cache,
+     * but for a {@code Date} the 304 did not carry, which holds the instant the 304 was received.
      * Named with {@link NetworkDetails#INTERNAL_HEADER_PREFIX} as an internal header.
      */
     public static final @NotNull String REVALIDATED_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Revalidated";
@@ -927,6 +929,13 @@ public final class ResponseCache {
      * §4.3.4</a>: the merged view reports the 304 exchange's network details, and the stored
      * {@code Age} is kept only when the 304 carries its own, so the refreshed entry's
      * {@linkplain Response.CachedImpl#currentAge(Instant) age} is counted from the revalidation.
+     * The stored {@code Date} is replaced as well: by the 304's own, or, when the 304 carries
+     * none, by the instant the 304 was received, formatted as an HTTP date, as
+     * <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.2">RFC 7231
+     * §7.1.1.2</a> asks of a cache storing a response that has no {@code Date}. The apparent age
+     * is therefore measured from the revalidation too, never from the response first stored. The
+     * stored {@code Date} is kept only when the 304 carries none and the exchange records no
+     * instant it was received.
      * <p>
      * {@link CachingFeignClient} answers the revalidation from the same merge, so the replay
      * matches the refreshed entry.
@@ -948,6 +957,11 @@ public final class ResponseCache {
         TreeMap<String, ConcurrentList<String>> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         merged.putAll(existingResponse.getHeaders());
         merged.remove("Age");
+
+        Instant received = revalidation.getRoundTrip().completedAt();
+
+        if (!received.equals(Instant.EPOCH))
+            merged.put("Date", Concurrent.newUnmodifiableList(HttpDates.format(received)));
 
         for (Map.Entry<String, ? extends Collection<String>> entry : new304Headers.entrySet()) {
             Collection<String> values = entry.getValue();

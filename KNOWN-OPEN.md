@@ -36,18 +36,6 @@ Open items in `client`. Each stays here until it is closed or accepted.
 > - Type: **RISK**
 > - Status: **OPEN**
 
-> #### A 304 without `Date` ages the refreshed entry from the stored `Date`
-> `mergeHeaders` keeps the stored `Date` unless the 304 sends one, and `currentAge` takes the
-> apparent age as the refreshed round trip's completion minus that `Date`. A 304 with no `Date`
-> therefore counts the entry's age from the original response, so an entry revalidated after its
-> first `max-age` is stale again as soon as it is refreshed. It needs an origin that breaks RFC 7232
-> section 4.1; every origin probed sends `Date`.
->
-> - Affected: `src/main/java/dev/simplified/client/cache/ResponseCache.java:655` - `mergeHeaders`;
->   `src/main/java/dev/simplified/client/response/Response.java:726` - `CachedImpl.currentAge`
-> - Type: **RISK**
-> - Status: **OPEN**
-
 > #### Internal headers go out on the wire, and transport timings never reach a Feign response
 > `ApacheClientFactory`'s request interceptor stamps `X-Internal-Request-Start` and the DNS, TCP and
 > TLS markers on the outbound request, and `InternalRequestInterceptor` adds

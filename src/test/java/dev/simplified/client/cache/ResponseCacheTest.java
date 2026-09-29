@@ -5,6 +5,7 @@ import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import dev.simplified.client.util.HttpDates;
 import feign.Feign;
 import feign.Headers;
 import feign.Param;
@@ -18,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -411,6 +413,39 @@ class ResponseCacheTest {
         assertThat(revalidated.isFromCache(), is(true));
         assertThat(replay.isFromCache(), is(true));
         assertThat(this.lookup().orElseThrow().response().getHeaders().containsKey("Age"), is(false));
+    }
+
+    @Test
+    @DisplayName("A 304 carrying no Date dates the refreshed entry when it was received, so the request after it is a fresh hit")
+    void notModifiedWithoutDateIsDatedWhenReceived() {
+        Instant stored = Instant.now().minusSeconds(100);
+        this.storeDirectly(receivedAt(stored, "Cache-Control", "max-age=60", "Date", HTTP_DATE.format(stored), "ETag", "\"v1\""));
+
+        this.origin = request -> answer(request, 304, "Cache-Control", "max-age=60", "ETag", "\"v1\"");
+        Instant sent = Instant.now();
+        Response<byte[]> revalidated = this.resource.get();
+        Response<byte[]> replay = this.resource.get();
+        Instant dated = HttpDates.parseFromHeaders(this.lookup().orElseThrow().response().getHeaders(), "Date").orElseThrow();
+
+        assertThat(this.sent, hasSize(1));
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(revalidated.getHeaders().get("Age"), contains("0"));
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(dated.isBefore(sent.truncatedTo(ChronoUnit.SECONDS)), is(false));
+    }
+
+    @Test
+    @DisplayName("A 304 carrying its own Date dates the refreshed entry by it")
+    void notModifiedWithDateKeepsIt() {
+        Instant stored = Instant.now().minusSeconds(100);
+        String revalidatedAt = HTTP_DATE.format(stored.plusSeconds(90));
+        this.storeDirectly(receivedAt(stored, "Cache-Control", "max-age=60", "Date", HTTP_DATE.format(stored), "ETag", "\"v1\""));
+
+        this.origin = request -> answer(request, 304, "Cache-Control", "max-age=60", "Date", revalidatedAt, "ETag", "\"v1\"");
+        Response<byte[]> revalidated = this.resource.get();
+
+        assertThat(revalidated.getHeaders().get("Date"), contains(revalidatedAt));
+        assertThat(this.lookup().orElseThrow().response().getHeaders().get("Date"), contains(revalidatedAt));
     }
 
     @Test
