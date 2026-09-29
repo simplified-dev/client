@@ -11,6 +11,7 @@ import org.jetbrains.annotations.NotNull;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
@@ -20,6 +21,7 @@ import java.util.Collections;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.TreeMap;
 
 /**
@@ -42,7 +44,8 @@ import java.util.TreeMap;
  * {@code dev.simplified.collection.atomic.AtomicMap#equals(Object)} delegate.
  * <p>
  * {@link #fingerprint(String)} computes the stand-in a key holds for a value configured on a
- * client, so a key never holds the value itself.
+ * client, and {@link #queryFingerprints(Map)} the stand-in a {@code UrlKey} holds for a client's
+ * static query parameters, so a key never holds a configured value itself.
  *
  * @see ResponseCache
  */
@@ -74,6 +77,40 @@ public final class CacheKey {
         } catch (GeneralSecurityException ex) {
             throw new IllegalStateException(ex);
         }
+    }
+
+    /**
+     * Renders the stand-in a cache key holds for a client's static query parameters: each
+     * parameter's URL-encoded name and the {@linkplain #fingerprint(String) fingerprint} of its
+     * value, joined as a query string in the order of their names.
+     * <p>
+     * A client appends it, with {@link #withQuery(String, String)}, to the URL it keys each request
+     * by, while its transport appends the parameters themselves to the request it sends, so
+     * requests sent with different static queries are keyed apart, requests sent with the same
+     * ones alike, and no key holds a static query's value.
+     *
+     * @param queries the static query parameters
+     * @return the stand-in query string, empty when there are no parameters
+     */
+    public static @NotNull String queryFingerprints(@NotNull Map<String, String> queries) {
+        StringJoiner joined = new StringJoiner("&");
+        new TreeMap<>(queries).forEach((name, value) -> joined.add(URLEncoder.encode(name, StandardCharsets.UTF_8) + "=" + fingerprint(value)));
+        return joined.toString();
+    }
+
+    /**
+     * Appends a query string to a URL, after the URL's own query when it has one.
+     *
+     * @param url the URL
+     * @param query the query string to append, without a leading {@code ?} or {@code &}
+     * @return {@code url} when {@code query} is empty, otherwise {@code url} followed by
+     *         {@code ?}, or {@code &} when it has a query, and {@code query}
+     */
+    public static @NotNull String withQuery(@NotNull String url, @NotNull String query) {
+        if (query.isEmpty())
+            return url;
+
+        return url + (url.indexOf('?') < 0 ? "?" : "&") + query;
     }
 
     /**

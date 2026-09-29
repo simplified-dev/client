@@ -100,7 +100,9 @@ public final class ClientConfig<C extends Contract> {
     private final @NotNull ClientErrorDecoder errorDecoder;
 
     /**
-     * The static query parameters appended to every outbound HTTP request.
+     * The static query parameters appended to every outbound HTTP request. The transport appends
+     * them to the request it sends; the request Feign builds, and the URL the response cache keys
+     * it by, end with their {@linkplain CacheKey#queryFingerprints(Map) stand-in} instead.
      */
     private final @NotNull ConcurrentMap<String, String> queries;
 
@@ -337,6 +339,11 @@ public final class ClientConfig<C extends Contract> {
 
         /**
          * Adds a single static query parameter.
+         * <p>
+         * The transport appends the parameter to each request it sends. The response cache keys a
+         * request by the parameter too, through a
+         * {@linkplain CacheKey#queryFingerprints(Map) stand-in} for its value, so the request
+         * Feign builds carries no value of it.
          *
          * @param name the query parameter name
          * @param value the query parameter value

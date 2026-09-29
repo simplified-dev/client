@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -1119,6 +1120,52 @@ class UrlFetcherTest {
         assertThat(other.isFromCache(), is(false));
         assertThat(otherReplay.isFromCache(), is(true));
         assertThat(otherReplay.getBody(), is(equalTo("agent-probe/1")));
+    }
+
+    @Test
+    @DisplayName("Fetchers sharing a cache with different static queries each reach the origin, and each is answered from the cache only with its own")
+    void staticQueriesKeyTheCache() {
+        List<String> received = new CopyOnWriteArrayList<>();
+        this.server.createContext("/static-query", exchange -> {
+            String query = Objects.toString(exchange.getRequestURI().getRawQuery(), "");
+            received.add(query);
+            byte[] body = query.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(200, body.length == 0 ? -1 : body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+
+        URI uri = this.baseUri.resolve("/static-query");
+        UrlFetcher first = UrlFetcher.create(UrlFetcherConfig.builder(new Gson()).withQuery("key", "first-secret").build());
+        UrlFetcher second = UrlFetcher.create(
+            UrlFetcherConfig.builder(new Gson())
+                .withQuery("key", "second-secret")
+                .withSharedCache(first.getResponseCache())
+                .build()
+        );
+        UrlFetcher none = UrlFetcher.create(UrlFetcherConfig.builder(new Gson()).withSharedCache(first.getResponseCache()).build());
+
+        Response<String> noneLive = none.get(uri);
+        Response<String> firstLive = first.get(uri);
+        Response<String> secondLive = second.get(uri);
+        Response<String> noneReplay = none.get(uri);
+        Response<String> firstReplay = first.get(uri);
+        Response<String> secondReplay = second.get(uri);
+
+        assertThat(received, contains("", "key=first-secret", "key=second-secret"));
+        assertThat(noneLive.isFromCache(), is(false));
+        assertThat(firstLive.isFromCache(), is(false));
+        assertThat(secondLive.isFromCache(), is(false));
+        assertThat(firstReplay.isFromCache(), is(true));
+        assertThat(firstReplay.getBody(), is(equalTo("key=first-secret")));
+        assertThat(secondReplay.isFromCache(), is(true));
+        assertThat(secondReplay.getBody(), is(equalTo("key=second-secret")));
+        assertThat(noneReplay.isFromCache(), is(true));
+        assertThat(noneReplay.getBody(), is(equalTo("")));
+        assertThat(firstReplay.getRequest().getUrl(), not(containsString("first-secret")));
     }
 
     @Test

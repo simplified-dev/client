@@ -72,6 +72,13 @@ import java.util.function.Supplier;
  * to {@linkplain ResponseCache#store store} the answer under. A response's {@code Vary} is so
  * matched against the values the origin received, and the cache holds none of them.
  * <p>
+ * The client's static query parameters are appended by the transport, below this class, to the
+ * request it sends. The request Feign builds ends its URL with their
+ * {@linkplain CacheKey#queryFingerprints(Map) stand-in} instead, so the cache keys each request,
+ * lookup and store alike, by the static queries it is sent with, without holding their values.
+ * This class removes the stand-in from the request it sends, and invalidates a URL a mutation
+ * names both with and without it.
+ * <p>
  * Every response the delegate returns carries its round trip: any
  * {@linkplain NetworkDetails#isInternalHeader(String) internal header} in it is dropped but the
  * {@linkplain NetworkDetails#CONNECTION_HEADERS connection markers} the transport recorded, and
@@ -130,6 +137,13 @@ public final class CachingFeignClient implements Client {
     private final @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders;
 
     /**
+     * The stand-in for the client's static query parameters that ends the URL of each request
+     * Feign builds, {@linkplain CacheKey#queryFingerprints(Map) their fingerprints}, or an empty
+     * string for a client without any.
+     */
+    private final @NotNull String queryFingerprints;
+
+    /**
      * Constructs a new {@code CachingFeignClient} that sends each request with its own headers
      * alone.
      *
@@ -138,13 +152,14 @@ public final class CachingFeignClient implements Client {
      * @param responseCache the response cache to look up, revalidate and invalidate
      */
     public CachingFeignClient(@NotNull Client delegate, @NotNull ResponseCache responseCache) {
-        this(delegate, responseCache, Map.of(), Map.of());
+        this(delegate, responseCache, Map.of(), Map.of(), Map.of());
     }
 
     /**
      * Constructs a new {@code CachingFeignClient} that sends each request with the given static
      * headers and the present value of each dynamic header after its own, keying the cache by
-     * their fingerprints.
+     * their fingerprints, and that removes the stand-in for the given static query parameters
+     * from the URL of each request it sends.
      *
      * @param delegate the underlying Feign client requests the cache does not answer are sent
      *                 through
@@ -152,17 +167,22 @@ public final class CachingFeignClient implements Client {
      * @param headers the static headers each request is sent with
      * @param dynamicHeaders the dynamic headers each request is sent with when their supplier
      *                       yields a value, each supplier read once per request
+     * @param queries the static query parameters the transport appends to each request, whose
+     *                {@linkplain CacheKey#queryFingerprints(Map) stand-in} ends the URL of each
+     *                request handed to this client
      */
     public CachingFeignClient(
         @NotNull Client delegate,
         @NotNull ResponseCache responseCache,
         @NotNull Map<String, String> headers,
-        @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders
+        @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders,
+        @NotNull Map<String, String> queries
     ) {
         this.delegate = delegate;
         this.responseCache = responseCache;
         this.headers = headers;
         this.dynamicHeaders = dynamicHeaders;
+        this.queryFingerprints = CacheKey.queryFingerprints(queries);
     }
 
     @Override
@@ -222,13 +242,15 @@ public final class CachingFeignClient implements Client {
 
     /**
      * Resolves the configured headers for one request, reading each dynamic header's supplier
-     * once.
+     * once, and removes the stand-in for the static query parameters from the URL it is sent to.
      *
      * @param request the request as Feign built it
      * @return the request as it is sent and as the cache keys it
      */
     private @NotNull Outgoing outgoing(@NotNull Request request) {
-        if (this.headers.isEmpty() && this.dynamicHeaders.isEmpty())
+        String url = this.withoutQueryFingerprints(request.url());
+
+        if (this.headers.isEmpty() && this.dynamicHeaders.isEmpty() && url.equals(request.url()))
             return new Outgoing(request, request, request.headers(), List.of());
 
         Map<String, Collection<String>> sent = copyOf(request.headers());
@@ -246,7 +268,7 @@ public final class CachingFeignClient implements Client {
 
         Request wire = Request.create(
             request.httpMethod(),
-            request.url(),
+            url,
             sent,
             request.body(),
             request.charset(),
@@ -254,6 +276,21 @@ public final class CachingFeignClient implements Client {
         );
 
         return new Outgoing(request, wire, keyed, List.copyOf(fingerprints));
+    }
+
+    /**
+     * Removes the stand-in for the static query parameters from the end of a URL.
+     *
+     * @param url the URL
+     * @return {@code url} without the stand-in, or {@code url} when it does not end with it
+     */
+    private @NotNull String withoutQueryFingerprints(@NotNull String url) {
+        if (this.queryFingerprints.isEmpty() || url.length() <= this.queryFingerprints.length() || !url.endsWith(this.queryFingerprints))
+            return url;
+
+        int separator = url.length() - this.queryFingerprints.length() - 1;
+        char before = url.charAt(separator);
+        return before == '?' || before == '&' ? url.substring(0, separator) : url;
     }
 
     // ===== Cache-hit paths =====
@@ -451,12 +488,28 @@ public final class CachingFeignClient implements Client {
      *
      * @param request the mutating request
      * @param response the mutating response
+     * @see #invalidateKeys(String)
      */
     private void invalidateAfterMutation(@NotNull Request request, @NotNull feign.Response response) {
-        this.responseCache.invalidate(request.url());
+        this.invalidateKeys(request.url());
 
-        extractFirstHeader(response.headers(), "Location").ifPresent(this.responseCache::invalidate);
-        extractFirstHeader(response.headers(), "Content-Location").ifPresent(this.responseCache::invalidate);
+        extractFirstHeader(response.headers(), "Location").ifPresent(this::invalidateKeys);
+        extractFirstHeader(response.headers(), "Content-Location").ifPresent(this::invalidateKeys);
+    }
+
+    /**
+     * Invalidates the cached entries for a URL under both keys a request for it can have: without
+     * the stand-in for the static query parameters, as a request that carries none is keyed, and
+     * with it, as this client keys its own requests.
+     *
+     * @param url the URL to invalidate, with or without the stand-in
+     */
+    private void invalidateKeys(@NotNull String url) {
+        String plain = this.withoutQueryFingerprints(url);
+        this.responseCache.invalidate(plain);
+
+        if (!this.queryFingerprints.isEmpty())
+            this.responseCache.invalidate(CacheKey.withQuery(plain, this.queryFingerprints));
     }
 
     // ===== Header helpers =====

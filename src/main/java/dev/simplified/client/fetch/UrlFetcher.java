@@ -63,7 +63,9 @@ import java.util.TreeMap;
  *       stores its response and refreshes that response's variant by them, so a response's
  *       {@code Vary} is matched against the values the origin received.</li>
  *   <li>Resolve a rate-limit bucket id via {@link UrlFetcherConfig#getBucketResolver()}.</li>
- *   <li>Look up the URL and the request's headers in the {@link ResponseCache}; on a hit that
+ *   <li>Look up the URL, ended with the {@linkplain CacheKey#queryFingerprints(Map) stand-in} for
+ *       the static query parameters, and the request's headers in the {@link ResponseCache},
+ *       which stores the response under the same URL; on a hit that
  *       {@linkplain Response.CachedImpl#canServeWithoutRevalidation(Instant) may be served
  *       without revalidation} - fresh, and carrying no {@code no-cache} - serve a synthesized
  *       {@link Response.DirectImpl} immediately. On any other hit with an
@@ -77,9 +79,10 @@ import java.util.TreeMap;
  *       which {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) refuse a stale
  *       replay}, so the {@code 5xx} raises.</li>
  *   <li>Check the local rate limit; raise {@link UrlFetchException.RateLimited} if exhausted.</li>
- *   <li>Track the request and dispatch through the shared Apache transport, recording the
- *       instant the response arrived on the request's context so the response's
- *       {@link NetworkDetails} carry the whole round trip.</li>
+ *   <li>Track the request and dispatch through the shared Apache transport, which appends the
+ *       static query parameters themselves, recording the instant the response arrived on the
+ *       request's context so the response's {@link NetworkDetails} carry the whole round
+ *       trip.</li>
  *   <li>Read the response body capped at the fetch's cap; raise
  *       {@link UrlFetchException.BodyCapExceeded} if the cap is hit, except under an error
  *       status or a code {@link HttpStatus} has no constant for, whose body is cut at the cap
@@ -142,6 +145,12 @@ public final class UrlFetcher {
     @Getter
     private final @NotNull RateLimitManager rateLimitManager;
 
+    /**
+     * The stand-in for the static query parameters that ends the URL each request is keyed by in
+     * the cache, or an empty string for a fetcher without any.
+     */
+    private final @NotNull String queryFingerprints;
+
     private UrlFetcher(@NotNull UrlFetcherConfig options) {
         this.options = options;
         this.responseCache = options.getSharedCache().orElseGet(() -> new ResponseCache(
@@ -150,6 +159,7 @@ public final class UrlFetcher {
             options.getTimings().cacheStaleRetention()
         ));
         this.rateLimitManager = options.getSharedRateLimits().orElseGet(RateLimitManager::new);
+        this.queryFingerprints = CacheKey.queryFingerprints(options.getQueries());
         this.http = ApacheClientFactory.configure(
             options.getTimings(),
             options.getQueries(),
@@ -316,13 +326,13 @@ public final class UrlFetcher {
     // ===== Core fetch path =====
 
     private @NotNull Response.DirectImpl<byte[]> fetch(@NotNull URI url, long maxBodyBytes) {
-        Request request = new Request.Impl(HttpMethod.GET, url.toString());
+        Request request = new Request.Impl(HttpMethod.GET, CacheKey.withQuery(url.toString(), this.queryFingerprints));
         Map<String, Collection<String>> requestHeaders = this.requestHeaders();
         String bucketId = this.options.getBucketResolver().apply(url);
         RateLimit policy = this.options.getDefaultRateLimit();
         long now = System.currentTimeMillis();
 
-        Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, url.toString(), requestHeaders);
+        Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, request.getUrl(), requestHeaders);
 
         if (hit.isPresent() && hit.get().response().canServeWithoutRevalidation(Instant.now()))
             return this.serveFromCache(url, request, hit.get(), false, maxBodyBytes);

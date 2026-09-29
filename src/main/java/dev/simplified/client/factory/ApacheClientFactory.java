@@ -2,6 +2,7 @@ package dev.simplified.client.factory;
 
 import dev.simplified.annotations.UtilityClass;
 import dev.simplified.client.Client;
+import dev.simplified.client.cache.CacheKey;
 import dev.simplified.client.request.Timings;
 import dev.simplified.client.response.NetworkDetails;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
@@ -52,7 +53,9 @@ import java.util.concurrent.locks.ReentrantLock;
  *   <li>A request interceptor that records the request-start timestamp on the
  *       {@link HttpContext}, removes every {@linkplain NetworkDetails#isInternalHeader(String)
  *       internal header} from the outbound request, so none reaches the origin, and appends the
- *       configured static queries to the request URL.</li>
+ *       configured static queries to the request URL. A caller's response cache keys each
+ *       request by a URL ending with the queries'
+ *       {@linkplain CacheKey#queryFingerprints(Map) stand-in} in their place.</li>
  *   <li>A response interceptor that removes every internal header the origin sent and records
  *       the {@linkplain NetworkDetails#CONNECTION_HEADERS connection markers} the context holds
  *       on the response in their place, so a caller that sees only the response - a Feign

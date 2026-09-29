@@ -3,6 +3,7 @@ package dev.simplified.client;
 import com.google.gson.Gson;
 import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
+import dev.simplified.client.cache.CacheKey;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.decoder.ClientErrorDecoder;
@@ -31,12 +32,15 @@ import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.gson.GsonSettings;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
+import feign.RequestTemplate;
+import feign.Target;
 import feign.codec.DecodeException;
 import feign.hc5.ApacheHttp5Client;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -335,7 +339,10 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * transparently below Feign; a request the cache answers never reaches the rate limit. The
      * {@link CachingFeignClient} also adds the configured static and dynamic headers to each
      * request it sends, keying the cache by their fingerprints, so the request Feign builds - the
-     * one Feign logs and an {@link ErrorContext} records - carries none of their values. The
+     * one Feign logs and an {@link ErrorContext} records - carries none of their values. Its
+     * {@link StaticQueryTarget target} ends the URL of each request Feign builds with the
+     * stand-in for the configured static queries, which the transport appends to the request it
+     * sends, so the cache keys a request by them without holding their values. The
      * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
      * {@linkplain ClientConfig#getDecoderFactory() decoder factory} from the options are
      * each invoked once with the configured {@link Gson Gson}.
@@ -360,7 +367,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             rateLimitedClient,
             this.responseCache,
             this.options.getHeaders(),
-            this.options.getDynamicHeaders()
+            this.options.getDynamicHeaders(),
+            this.options.getQueries()
         );
         InternalErrorDecoder errorDecoder = new InternalErrorDecoder(
             this.options.getErrorDecoder(),
@@ -394,7 +402,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             ))
             .doNotCloseAfterDecode()
             .decodeVoid()
-            .target(this.options.getTarget(), "https://placeholder");
+            .target(new StaticQueryTarget<>(this.options));
     }
 
     /**
@@ -437,6 +445,58 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                 }
             }
         );
+    }
+
+    /**
+     * Feign target that ends the URL of each request it builds with the stand-in for the client's
+     * static query parameters.
+     * <p>
+     * The stand-in is {@link CacheKey#queryFingerprints(Map)}: each static query's name with the
+     * fingerprint of its value. The request Feign builds, logs and hands the decoder therefore
+     * carries the static queries it is sent with, so {@link ResponseCache} looks it up and stores
+     * its answer under a URL they are part of, without holding their values.
+     * {@link CachingFeignClient} removes the stand-in from the request it sends, and the transport
+     * appends the static queries themselves.
+     *
+     * @param <C> the contract interface type
+     */
+    private static final class StaticQueryTarget<C extends Contract> extends Target.HardCodedTarget<C> {
+
+        /**
+         * The stand-in for the static query parameters, or an empty string for a client without
+         * any.
+         */
+        private final @NotNull String queryFingerprints;
+
+        /**
+         * Constructs a target for the contract of the given options, standing in for their static
+         * query parameters.
+         *
+         * @param options the client's configuration
+         */
+        StaticQueryTarget(@NotNull ClientConfig<C> options) {
+            super(options.getTarget(), "https://placeholder");
+            this.queryFingerprints = CacheKey.queryFingerprints(options.getQueries());
+        }
+
+        /** {@inheritDoc} */
+        @Override
+        public feign.Request apply(RequestTemplate input) {
+            feign.Request request = super.apply(input);
+
+            if (this.queryFingerprints.isEmpty())
+                return request;
+
+            return feign.Request.create(
+                request.httpMethod(),
+                CacheKey.withQuery(request.url(), this.queryFingerprints),
+                request.headers(),
+                request.body(),
+                request.charset(),
+                request.requestTemplate()
+            );
+        }
+
     }
 
 }
