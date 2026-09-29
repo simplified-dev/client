@@ -2,17 +2,6 @@
 
 Open items in `client`. Each stays here until it is closed or accepted.
 
-> #### An undecodable 2xx is cached and fails every replay
-> `InternalResponseDecoder` offers a buffered response to `ResponseCache.store` before its body is
-> decoded, and decoding is deferred to the first `getBody()`. A 2xx whose body does not decode is
-> therefore stored, and every replay within its `max-age` decodes the same bytes again and throws
-> `ApiDecodeException`, so one malformed answer keeps failing until the entry expires rather than
-> once.
->
-> - Affected: `src/main/java/dev/simplified/client/decoder/InternalResponseDecoder.java:163` - `decode`
-> - Type: **RISK**
-> - Status: **OPEN**
-
 > #### A fresh cache hit is counted against the client-side rate limit
 > `InternalRequestInterceptor` is a Feign request interceptor, so it runs before
 > `CachingFeignClient` decides whether the cache answers. It checks the route's bucket and tracks

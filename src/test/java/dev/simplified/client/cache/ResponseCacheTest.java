@@ -858,6 +858,34 @@ class ResponseCacheTest {
     }
 
     @Test
+    @DisplayName("discard removes the variant that would replay the given body to the request, and keeps one holding other bytes or answering another request")
+    void discardRemovesOnlyTheVariantReplayingTheBody() {
+        this.origin = request -> answer(
+            request,
+            200,
+            header(request, "Accept").getBytes(StandardCharsets.UTF_8),
+            "Vary", "Accept",
+            "Cache-Control", "max-age=60"
+        );
+
+        this.negotiated.accept("a");
+        this.negotiated.accept("b");
+
+        this.cache.discard(HttpMethod.GET, URL, headers("Accept", "a"), "b".getBytes(StandardCharsets.UTF_8));
+        this.cache.discard(HttpMethod.GET, URL, headers("Accept", "b"), "a".getBytes(StandardCharsets.UTF_8));
+        Response<byte[]> keptA = this.negotiated.accept("a");
+
+        this.cache.discard(HttpMethod.GET, URL, headers("Accept", "a"), "a".getBytes(StandardCharsets.UTF_8));
+        Response<byte[]> discardedA = this.negotiated.accept("a");
+        Response<byte[]> keptB = this.negotiated.accept("b");
+
+        assertThat(keptA.isFromCache(), is(true));
+        assertThat(discardedA.isFromCache(), is(false));
+        assertThat(keptB.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(3));
+    }
+
+    @Test
     @DisplayName("A 304 refreshes the variant it revalidates and leaves the URL's other variant as stored")
     void notModifiedRefreshesTheVariantRevalidated() {
         this.origin = ResponseCacheTest::negotiatedAnswer;

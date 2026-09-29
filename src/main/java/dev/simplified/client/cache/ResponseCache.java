@@ -19,6 +19,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -80,6 +81,9 @@ import java.util.function.Function;
  *       (and any {@code Location} / {@code Content-Location} redirects) per
  *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.4">RFC 7234 §4.4</a>,
  *       and {@link #invalidateAll()} drops every entry</li>
+ *   <li><b>Undecodable bodies</b> - {@link #discard} removes the variants that would answer a
+ *       request with a body that did not decode, so a replay of it fails once rather than
+ *       until the entry expires</li>
  * </ul>
  * <p>
  * An invalidation also holds against answers still in flight: {@link #store} keeps a response,
@@ -391,7 +395,7 @@ public final class ResponseCache {
 
         return variants.entrySet()
             .stream()
-            .filter(variant -> CacheKey.VaryFingerprint.of(variant.getValue().response().varyHeaderNames(), requestHeaders).equals(variant.getKey()))
+            .filter(variant -> answers(variant, requestHeaders))
             .max(RECENCY)
             .map(Map.Entry::getValue);
     }
@@ -563,6 +567,44 @@ public final class ResponseCache {
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Removes every cached variant that would answer the given request with the given body.
+     * <p>
+     * Called by {@link InternalResponseDecoder} when a body it buffered, read off the wire or
+     * replayed from this cache, does not decode: the bytes decode no better on the next replay,
+     * so the variant is removed and the next request for it reaches the origin. A variant is
+     * removed when {@link #lookup} would match it to a request carrying {@code requestHeaders}
+     * and its stored body holds the same bytes as {@code body}; a variant holding other bytes -
+     * one a later answer stored in its place - is kept. Records no invalidation, so an answer
+     * already in flight is stored as usual.
+     *
+     * @param method the HTTP method of the request
+     * @param url the raw URL of the request (will be canonicalized internally)
+     * @param requestHeaders the request's headers as it left the client
+     * @param body the body bytes that did not decode
+     */
+    public void discard(
+        @NotNull HttpMethod method,
+        @NotNull String url,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders,
+        byte @NotNull [] body
+    ) {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(method, url);
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> current = this.cache.asMap().get(key);
+
+        if (current == null || current.entrySet().stream().noneMatch(variant -> replays(variant, requestHeaders, body)))
+            return;
+
+        this.cache.asMap().computeIfPresent(key, (k, variants) -> {
+            java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> bucket = new ConcurrentHashMap<>(variants);
+
+            if (!bucket.entrySet().removeIf(variant -> replays(variant, requestHeaders, body)))
+                return variants;
+
+            return bucket.isEmpty() ? null : bucket;
+        });
     }
 
     /**
@@ -800,6 +842,38 @@ public final class ResponseCache {
         java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> bucket = new ConcurrentHashMap<>(variants);
         bucket.remove(fingerprint);
         return bucket.isEmpty() ? null : bucket;
+    }
+
+    /**
+     * Tests whether a variant may answer a request: the request's values of the headers the
+     * variant's {@code Vary} names equal the fingerprint the variant is held under.
+     *
+     * @param variant the variant and the fingerprint it is held under
+     * @param requestHeaders the request's headers as it leaves the client
+     * @return {@code true} if the variant may answer the request
+     */
+    private static boolean answers(
+        @NotNull Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>> variant,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders
+    ) {
+        return CacheKey.VaryFingerprint.of(variant.getValue().response().varyHeaderNames(), requestHeaders).equals(variant.getKey());
+    }
+
+    /**
+     * Tests whether a variant would answer a request with the given body: it
+     * {@linkplain #answers may answer the request} and its stored body holds the same bytes.
+     *
+     * @param variant the variant and the fingerprint it is held under
+     * @param requestHeaders the request's headers as it leaves the client
+     * @param body the body bytes
+     * @return {@code true} if the variant would replay {@code body} to the request
+     */
+    private static boolean replays(
+        @NotNull Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>> variant,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders,
+        byte @NotNull [] body
+    ) {
+        return answers(variant, requestHeaders) && Arrays.equals(variant.getValue().body(), body);
     }
 
     /**
