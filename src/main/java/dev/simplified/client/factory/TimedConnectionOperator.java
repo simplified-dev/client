@@ -19,7 +19,6 @@ import org.jetbrains.annotations.Nullable;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
-import java.time.Instant;
 
 /**
  * Decorating {@link DefaultHttpClientConnectionOperator} that captures DNS resolution and
@@ -40,8 +39,10 @@ import java.time.Instant;
  * <p>
  * The TLS handshake is timed separately via {@link TimedTlsSocketStrategy}. The default operator
  * performs it inside {@code connect()}, after the TCP handshake, so the connection window ends
- * where the handshake {@link TimedTlsSocketStrategy} recorded for the connection starts. The
- * window is recorded whether or not the connection succeeds.
+ * where the handshake {@link TimedTlsSocketStrategy} recorded for the connection starts. Both are
+ * derived from one {@link ClockAnchor} this operator shares through the context, so the window
+ * never ends after the handshake starts. The window is recorded whether or not the connection
+ * succeeds.
  * <p>
  * Attributes written into the context use keys from {@link NetworkDetails}:
  * <ul>
@@ -86,41 +87,24 @@ public final class TimedConnectionOperator extends DefaultHttpClientConnectionOp
         @Nullable Object attachment,
         @NotNull HttpContext context
     ) throws IOException {
-        // Anchor a single wall-clock Instant against a monotonic nanoTime baseline so that
-        // the stopwatch boundaries can be derived from nanoTime deltas (single non-allocating
-        // native call) instead of paying for Instant.now() syscalls per sample.
-        Instant anchorInstant = Instant.now();
-        long anchorNanos = System.nanoTime();
+        // One anchor for the whole connection, shared with the TLS strategy through the context,
+        // so the connection window and the handshake are derived in the same clock domain.
+        ClockAnchor anchor = ClockAnchor.now();
+        context.setAttribute(ClockAnchor.ATTRIBUTE, anchor);
+        context.removeAttribute(ClockAnchor.TLS_START_NANOS);
         long startNanos = System.nanoTime();
         try {
             super.connect(conn, endpointHost, endpointName, unixDomainSocket, localAddress, connectTimeout, socketConfig, attachment, context);
         } finally {
             long endNanos = System.nanoTime();
-            Instant start = instantAt(anchorInstant, anchorNanos, startNanos);
-            Instant end = instantAt(anchorInstant, anchorNanos, endNanos);
 
-            if (context.getAttribute(NetworkDetails.TLS_HANDSHAKE_START) instanceof Instant tlsStart && !tlsStart.isBefore(start) && tlsStart.isBefore(end))
-                end = tlsStart;
+            if (context.removeAttribute(ClockAnchor.TLS_START_NANOS) instanceof Long tlsStartNanos && tlsStartNanos >= startNanos && tlsStartNanos < endNanos)
+                endNanos = tlsStartNanos;
 
-            context.setAttribute(NetworkDetails.TCP_CONNECT_START, start);
-            context.setAttribute(NetworkDetails.TCP_CONNECT_END, end);
+            context.removeAttribute(ClockAnchor.ATTRIBUTE);
+            context.setAttribute(NetworkDetails.TCP_CONNECT_START, anchor.at(startNanos));
+            context.setAttribute(NetworkDetails.TCP_CONNECT_END, anchor.at(endNanos));
         }
-    }
-
-    /**
-     * Derives an {@link Instant} for the given monotonic-clock sample by offsetting the
-     * anchor instant by the elapsed nanoseconds between the anchor and sample readings.
-     * Because {@link System#nanoTime()} is monotonic, the resulting timestamps preserve
-     * accurate elapsed-time semantics across NTP adjustments that would perturb
-     * {@link Instant#now()}.
-     *
-     * @param anchorInstant the wall-clock anchor sampled at the start of the measurement window
-     * @param anchorNanos the monotonic-clock reading captured alongside {@code anchorInstant}
-     * @param sampleNanos the monotonic-clock reading at the moment to derive an instant for
-     * @return the wall-clock instant corresponding to {@code sampleNanos}
-     */
-    private static @NotNull Instant instantAt(@NotNull Instant anchorInstant, long anchorNanos, long sampleNanos) {
-        return anchorInstant.plusNanos(sampleNanos - anchorNanos);
     }
 
 }
