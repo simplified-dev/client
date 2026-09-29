@@ -278,6 +278,8 @@ public interface Response<T> {
          *               this envelope; its body need not be readable
          * @param bodyDecoder the supplier that materializes the typed body on first access,
          *                    typically closing over previously-buffered body bytes
+         * @throws IllegalArgumentException if {@link HttpStatus} has no constant for the status
+         *         code of {@code anchor}
          */
         public Impl(@NotNull feign.Response anchor, @NotNull Supplier<T> bodyDecoder) {
             this.anchor = anchor;
@@ -367,6 +369,8 @@ public interface Response<T> {
          *
          * @param anchor the Feign response carrying the live stream and metadata headers
          * @param body the already-resolved streaming body (caller owns the lifecycle)
+         * @throws IllegalArgumentException if {@link HttpStatus} has no constant for the status
+         *         code of {@code anchor}
          */
         public StreamingImpl(@NotNull feign.Response anchor, @NotNull T body) {
             this.anchor = anchor;

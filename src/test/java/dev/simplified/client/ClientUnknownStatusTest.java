@@ -148,6 +148,20 @@ class ClientUnknownStatusTest {
     }
 
     @Test
+    @DisplayName("A 2xx HttpStatus has no constant for is not decoded but reaches the error decoder, for every return type")
+    void unknownSuccessReachesTheErrorDecoder() {
+        OriginException raw = this.raise(218, () -> this.client.getContract().raw());
+        OriginException typed = this.raise(218, () -> this.client.getContract().typed());
+        OriginException stream = this.raise(218, () -> this.client.getContract().stream());
+
+        assertThat(raw.getStatusCode(), is(218));
+        assertThat(raw.getStatus(), is(HttpStatus.UNKNOWN_ERROR));
+        assertThat(new String(raw.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo(BODY)));
+        assertThat(typed.getStatusCode(), is(218));
+        assertThat(stream.getStatusCode(), is(218));
+    }
+
+    @Test
     @DisplayName("The exception raised for a status HttpStatus has no constant for is the client's last response")
     void unknownStatusIsTheLastResponse() {
         OriginException raised = this.raise(460, () -> this.client.getContract().raw());

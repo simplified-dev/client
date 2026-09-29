@@ -8,7 +8,6 @@ import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.InternalErrorDecoder;
 import dev.simplified.client.decoder.InternalResponseDecoder;
-import dev.simplified.client.exception.ApiDecodeException;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.RetryableApiException;
 import dev.simplified.client.factory.ApacheClientFactory;
@@ -31,6 +30,7 @@ import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
 import feign.RequestTemplate;
 import feign.Target;
+import feign.codec.DecodeException;
 import feign.hc5.ApacheHttp5Client;
 import org.jetbrains.annotations.NotNull;
 
@@ -348,19 +348,21 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      */
     private @NotNull C build() {
         feign.Client cachingClient = new CachingFeignClient(this.internalClient, this.responseCache);
+        InternalErrorDecoder errorDecoder = new InternalErrorDecoder(
+            this.options.getErrorDecoder(),
+            this.getRouteDiscovery(),
+            this.responseCache
+        );
 
         return Feign.builder()
             .client(cachingClient)
             .encoder(this.options.getEncoderFactory().apply(this.gson))
             .decoder(new InternalResponseDecoder(
                 this.options.getDecoderFactory().apply(this.gson),
-                this.responseCache
+                this.responseCache,
+                errorDecoder
             ))
-            .errorDecoder(new InternalErrorDecoder(
-                this.options.getErrorDecoder(),
-                this.getRouteDiscovery(),
-                this.responseCache
-            ))
+            .errorDecoder(errorDecoder)
             .requestInterceptor(new InternalRequestInterceptor(
                 this.getRateLimitManager(),
                 this.getRouteDiscovery()
@@ -387,7 +389,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * this client internally wraps typed {@link ApiException} instances in
      * {@link RetryableApiException}. This proxy intercepts all method invocations and, if the
      * underlying call throws a {@link RetryableApiException}, extracts and re-throws the original
-     * {@link ApiException} so that callers see the correctly typed exception.
+     * {@link ApiException} so that callers see the correctly typed exception. An
+     * {@link ApiException} the {@link InternalResponseDecoder} raises reaches the proxy wrapped in
+     * Feign's {@link DecodeException}, and is re-thrown unwrapped the same way.
      *
      * @param <T> the contract proxy type
      * @param target the Feign-generated contract proxy to wrap
@@ -408,9 +412,11 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                     if (cause instanceof RetryableApiException retryable)
                         throw retryable.getWrappedException();
 
-                    // Unwrap decode failures wrapped by InvocationContext
-                    if (cause.getCause() instanceof ApiDecodeException decodeEx)
-                        throw decodeEx;
+                    // Unwrap an ApiException the decoder raised, which InvocationContext wraps
+                    // in a DecodeException - a decode failure, or a status HttpStatus has no
+                    // constant for
+                    if (cause instanceof DecodeException && cause.getCause() instanceof ApiException apiEx)
+                        throw apiEx;
 
                     throw cause;
                 }

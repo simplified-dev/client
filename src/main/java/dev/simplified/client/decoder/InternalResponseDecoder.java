@@ -5,14 +5,20 @@ import dev.simplified.client.Client;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiDecodeException;
+import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.ErrorContext;
+import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.util.BodyBuffering;
 import feign.FeignException;
+import feign.MethodMetadata;
+import feign.RequestTemplate;
 import feign.Util;
+import feign.codec.DecodeException;
 import feign.codec.Decoder;
 import feign.codec.DefaultDecoder;
+import feign.codec.ErrorDecoder;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
@@ -72,6 +78,14 @@ import java.util.function.Supplier;
  * unwrapped object can be returned to Feign; decode failures surface as
  * {@link ApiDecodeException} on this synchronous path.
  * <p>
+ * A response whose status code {@link HttpStatus} has no constant for - a {@code 2xx} such as
+ * {@code 218}, since Feign hands every other class to its error decoder - is not decoded. It
+ * is handed to the {@link InternalErrorDecoder}, which raises it as it raises an error status,
+ * so the contract method raises the client's {@link ApiException} carrying the code as
+ * {@link ApiException#getStatusCode()} and {@link HttpStatus#UNKNOWN_ERROR} as
+ * {@link ApiException#getStatus()}. The exception is recorded as the last response, as an
+ * error status's is, and nothing is stored for it.
+ * <p>
  * This decoder requires {@link feign.Feign.Builder#doNotCloseAfterDecode()} to be set
  * on the Feign builder so that {@link InputStream} responses are not prematurely closed
  * by Feign's default post-decode cleanup. For non-streaming types, this decoder closes
@@ -104,10 +118,25 @@ public final class InternalResponseDecoder implements Decoder {
     private final @NotNull ResponseCache responseCache;
 
     /**
+     * The error decoder that raises a response whose status code {@link HttpStatus} has no
+     * constant for, the client's {@link InternalErrorDecoder}.
+     */
+    private final @NotNull ErrorDecoder errorDecoder;
+
+    /**
      * {@inheritDoc}
      */
     @Override
     public Object decode(@NotNull feign.Response feignResponse, @NotNull Type type) throws IOException, FeignException {
+        if (HttpStatus.findByCode(feignResponse.status()).isEmpty()) {
+            Exception raised = this.errorDecoder.decode(methodKey(feignResponse.request()), feignResponse);
+
+            if (raised instanceof RuntimeException unchecked)
+                throw unchecked;
+
+            throw new DecodeException(feignResponse.status(), raised.getMessage(), feignResponse.request(), raised);
+        }
+
         Type bodyType = type;
         boolean shouldWrap = false;
 
@@ -174,6 +203,24 @@ public final class InternalResponseDecoder implements Decoder {
         } finally {
             Util.ensureClosed(feignResponse.body());
         }
+    }
+
+    /**
+     * Names the contract method a request was built from, as Feign names it to an error
+     * decoder.
+     *
+     * @param request the request
+     * @return the Feign config key of the request's contract method, or the request's method and
+     *         URL for a request built without one
+     */
+    private static @NotNull String methodKey(@NotNull feign.Request request) {
+        RequestTemplate template = request.requestTemplate();
+        MethodMetadata endpoint = template != null ? template.methodMetadata() : null;
+
+        if (endpoint != null)
+            return endpoint.configKey();
+
+        return request.httpMethod() + " " + request.url();
     }
 
 }
