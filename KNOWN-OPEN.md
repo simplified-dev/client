@@ -25,16 +25,6 @@ Open items in `client`. Each stays here until it is closed or accepted.
 > - Type: **GAP**
 > - Status: **OPEN**
 
-> #### `invalidate(url)` has no in-flight guard
-> `invalidateAll` records when it emptied the cache, and `store` and `updateOn304` refuse an answer
-> to a request sent before that. `invalidate(url)`, which runs after a successful unsafe-method
-> exchange, records nothing, so a GET to the same URL in flight across the PUT or POST that
-> invalidated it can store its answer from before the mutation for its `max-age`.
->
-> - Affected: `src/main/java/dev/simplified/client/cache/ResponseCache.java:408` - `invalidate`
-> - Type: **RISK**
-> - Status: **OPEN**
-
 > #### Configured credentials sit on the `feign.Request`
 > `Client` adds its configured static and dynamic headers - an `Authorization` or `API-Key` among
 > them - to each request Feign builds, so the cache fingerprints the values the origin receives.

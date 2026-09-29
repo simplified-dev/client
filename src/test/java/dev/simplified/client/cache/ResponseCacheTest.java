@@ -48,6 +48,9 @@ class ResponseCacheTest {
         @RequestLine("GET /resource")
         Response<byte[]> get();
 
+        @RequestLine("PUT /resource")
+        Response<byte[]> put();
+
     }
 
     /**
@@ -342,6 +345,101 @@ class ResponseCacheTest {
         assertThat(revalidated.isFromCache(), is(true));
         assertThat(stored.getHeaders().get("ETag"), contains("\"v2\""));
         assertThat(stored.getHeaders().get("Cache-Control"), contains("max-age=60"));
+    }
+
+    @Test
+    @DisplayName("A GET in flight across a PUT to its URL does not store what it read, and a GET sent after the PUT does")
+    void getInFlightAcrossAMutationIsNotStored() {
+        AtomicReference<Instant> mutated = new AtomicReference<>();
+        this.origin = request -> {
+            if (request.httpMethod() == Request.HttpMethod.PUT)
+                return answer(request, 200);
+
+            if (mutated.get() == null) {
+                this.resource.put();
+                mutated.set(Instant.now());
+            }
+
+            return answer(request, 200, "Cache-Control", "max-age=60");
+        };
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(false));
+
+        // a request stamped in the same clock tick as the invalidation counts as sent before it
+        while (!Instant.now().isAfter(mutated.get()))
+            Thread.onSpinWait();
+
+        this.resource.get();
+        Response<byte[]> replay = this.resource.get();
+
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(3));
+        assertThat(this.sent.get(1).httpMethod(), is(Request.HttpMethod.PUT));
+    }
+
+    @Test
+    @DisplayName("An invalidation of another URL does not refuse an answer in flight across it")
+    void invalidationOfAnotherUrlDoesNotRefuse() {
+        this.origin = request -> {
+            this.cache.invalidate("https://127.0.0.1:0/other");
+            return answer(request, 200, "Cache-Control", "max-age=60");
+        };
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(true));
+    }
+
+    @Test
+    @DisplayName("A 304 to a request sent before invalidate(url) does not refresh the entry stored after it")
+    void revalidationInFlightAcrossAnInvalidationIsRefused() {
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.resource.get();
+
+        this.origin = request -> {
+            this.cache.invalidate(URL);
+            Instant invalidated = Instant.now();
+
+            // a request stamped in the same clock tick as the invalidation counts as sent before it
+            while (!Instant.now().isAfter(invalidated))
+                Thread.onSpinWait();
+
+            this.storeDirectly(receivedNow("Cache-Control", "max-age=60", "ETag", "\"v2\""));
+            return answer(request, 304, "Cache-Control", "max-age=600", "ETag", "\"v1\"");
+        };
+        Response<byte[]> revalidated = this.resource.get();
+        Response.CachedImpl<?> stored = this.lookup().orElseThrow().response();
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(stored.getHeaders().get("ETag"), contains("\"v2\""));
+        assertThat(stored.getHeaders().get("Cache-Control"), contains("max-age=60"));
+    }
+
+    @Test
+    @DisplayName("Invalidations past the record limit fold into one instant that still refuses the answers in flight")
+    void foldedInvalidationsStillRefuseAnswersInFlight() {
+        AtomicReference<Instant> folded = new AtomicReference<>();
+        this.origin = request -> {
+            this.cache.invalidate(URL);
+
+            for (int i = 0; i < ResponseCache.INVALIDATION_RECORD_LIMIT; i++)
+                this.cache.invalidate("https://127.0.0.1:0/other/" + i);
+
+            folded.set(Instant.now());
+            return answer(request, 200, "Cache-Control", "max-age=60");
+        };
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(false));
+
+        // a request stamped in the same clock tick as the fold counts as sent before it
+        while (!Instant.now().isAfter(folded.get()))
+            Thread.onSpinWait();
+
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60");
+        this.resource.get();
+
+        assertThat(this.resource.get().isFromCache(), is(true));
     }
 
     @Test

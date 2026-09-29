@@ -19,6 +19,7 @@ import org.jetbrains.annotations.Nullable;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -76,10 +77,12 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  *       and {@link #invalidateAll()} drops every entry</li>
  * </ul>
  * <p>
- * A drop by {@link #invalidateAll()} also holds against answers still in flight:
- * {@link #store} keeps a response, and {@link #updateOn304} applies a
- * {@code 304 Not Modified}, only when its request was sent after the last drop, so an answer to
- * a request sent before it cannot put the dropped state back.
+ * An invalidation also holds against answers still in flight: {@link #store} keeps a response,
+ * and {@link #updateOn304} applies a {@code 304 Not Modified}, only when its request was sent
+ * after {@link #invalidateAll()} last dropped every entry and after {@link #invalidate(String)}
+ * last invalidated its URL, so an answer to a request sent before either cannot put the
+ * invalidated state back. A {@code GET} in flight across the {@code PUT} or {@code POST} that
+ * invalidated its URL therefore does not store what it read before the mutation.
  * <p>
  * In addition to the cache itself, this facade owns the client's single-slot
  * "last response" observability reference, exposing it via {@link #getLastResponse()}.
@@ -175,6 +178,17 @@ public final class ResponseCache {
     public static final long DEFAULT_STALE_RETENTION_MILLIS = Duration.ofHours(1).toMillis();
 
     /**
+     * The most URLs {@link #invalidatedAt} records before {@link #invalidate(String)} folds them
+     * into {@link #refusedThrough}.
+     * <p>
+     * A fold keeps the guard every record gave, and more: an answer to any request sent before
+     * it is refused, whatever its URL, so the requests in flight at the moment of a fold are
+     * answered but not stored. A fold falls once in this many invalidations of distinct URLs,
+     * which bounds the records a client that mutates many URLs holds.
+     */
+    static final int INVALIDATION_RECORD_LIMIT = 1024;
+
+    /**
      * The Caffeine-backed two-level cache of URL bucket -> Vary variants.
      */
     private final @NotNull Cache<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> cache;
@@ -185,18 +199,27 @@ public final class ResponseCache {
     private final @NotNull AtomicReference<Response<?>> lastResponse = new AtomicReference<>();
 
     /**
-     * Orders {@link #invalidateAll()} against {@link #store} and
-     * {@link #updateOn304}: a drop holds the write lock while it records {@link #emptiedAt} and
-     * empties the cache, and a store or refresh holds the read lock while it compares its
-     * request's start with {@link #emptiedAt} and writes the bucket.
+     * Orders {@link #invalidateAll()} and {@link #invalidate(String)} against {@link #store} and
+     * {@link #updateOn304}: an invalidation holds the write lock while it records when it ran in
+     * {@link #refusedThrough} or {@link #invalidatedAt}, and a store or refresh holds the read
+     * lock while it compares its request's start with both and writes the bucket.
      */
     private final @NotNull ReadWriteLock dropLock = new ReentrantReadWriteLock();
 
     /**
-     * The instant {@link #invalidateAll()} last emptied the cache, or {@link Instant#EPOCH} before
-     * it has; read and written only under {@link #dropLock}.
+     * The instant at or before which an answer to any request is refused - when
+     * {@link #invalidateAll()} last emptied the cache, or {@link #invalidate(String)} last folded
+     * its records into it - or {@link Instant#EPOCH} before either has; read and written only
+     * under {@link #dropLock}.
      */
-    private @NotNull Instant emptiedAt = Instant.EPOCH;
+    private @NotNull Instant refusedThrough = Instant.EPOCH;
+
+    /**
+     * The instant {@link #invalidate(String)} last invalidated each URL, keyed by canonical URL,
+     * holding at most {@link #INVALIDATION_RECORD_LIMIT} URLs; read and written only under
+     * {@link #dropLock}.
+     */
+    private final @NotNull Map<String, Instant> invalidatedAt = new HashMap<>();
 
     /**
      * Constructs a new response cache with the given byte cap and safety fallback, keeping an
@@ -359,7 +382,8 @@ public final class ResponseCache {
     /**
      * Stores a decoded response and its captured body bytes in the cache if it passes the
      * RFC 7234 §3 storage predicate and its request was sent after the last
-     * {@link #invalidateAll()}. No-ops when any rule below rejects the response.
+     * {@link #invalidateAll()} and the last {@link #invalidate(String)} of its URL. No-ops when
+     * any rule below rejects the response.
      * <p>
      * Storage rules:
      * <ul>
@@ -379,8 +403,10 @@ public final class ResponseCache {
      *   <li>response carries the {@link #CACHE_HIT_HEADER} marker (replay from this cache)
      *       -> skip</li>
      *   <li>the start of the response's {@linkplain NetworkDetails#getRoundTrip() round trip}
-     *       is not after the instant {@link #invalidateAll()} last emptied the cache -> skip,
-     *       so an answer to a request in flight across a drop cannot re-enter the cache</li>
+     *       is not after the instant {@link #invalidateAll()} last emptied the cache, or the
+     *       instant {@link #invalidate(String)} last invalidated the response's URL -> skip, so
+     *       an answer to a request in flight across an invalidation cannot re-enter the
+     *       cache</li>
      *   <li>the response carries no request start, which {@link NetworkDetails} reads as
      *       {@link Instant#EPOCH} -> skip: nothing shows its request was sent after the last
      *       drop, and {@link Response.CachedImpl#currentAge(Instant)} measures an entry's age
@@ -432,7 +458,7 @@ public final class ResponseCache {
         lock.lock();
 
         try {
-            if (sent.isAfter(this.emptiedAt))
+            if (this.sentAfterInvalidation(key.url(), sent))
                 this.cache.asMap().compute(key, (k, variants) -> withVariant(variants, fingerprint, entry));
         } finally {
             lock.unlock();
@@ -454,10 +480,25 @@ public final class ResponseCache {
     }
 
     /**
-     * Invalidates every variant stored under the given URL, for every HTTP method.
+     * Invalidates every variant stored under the given URL, for every HTTP method, and records
+     * the instant it did so.
      * <p>
      * Called by {@link CachingFeignClient} after unsafe-method successes for the target
      * URL plus any {@code Location} and {@code Content-Location} redirects, per RFC 7234 §4.4.
+     * <p>
+     * {@link #store} refuses a response for the URL, and {@link #updateOn304} a
+     * {@code 304 Not Modified}, whose request was sent at or before that instant, so an answer to
+     * a request in flight across the invalidation - a {@code GET} sent before the mutation that
+     * invalidated its URL completed - cannot put the state from before the mutation back; a
+     * request whose start falls in the same clock tick as the invalidation counts as sent before
+     * it. The instant is recorded before any variant is removed, so a store or refresh racing
+     * the invalidation either writes before the record, and its entry is removed, or compares
+     * its request's start with the record, and is refused when that request was sent before.
+     * <p>
+     * The instants are recorded per canonical URL, up to {@link #INVALIDATION_RECORD_LIMIT}
+     * URLs. An invalidation of a URL beyond that folds every record into one instant, at or
+     * after each of them, that refuses an answer to any request sent before it; the records
+     * are then dropped.
      *
      * @param url the URL whose cached entries should be removed; may be {@code null} to
      *            make propagation from optional response headers painless at call sites
@@ -467,6 +508,20 @@ public final class ResponseCache {
             return;
 
         String canonical = CacheKey.UrlKey.canonicalizeUrl(url);
+        Lock lock = this.dropLock.writeLock();
+        lock.lock();
+
+        try {
+            Instant now = Instant.now();
+
+            if (this.invalidatedAt.size() >= INVALIDATION_RECORD_LIMIT && !this.invalidatedAt.containsKey(canonical))
+                this.foldInvalidations(now);
+            else
+                this.invalidatedAt.put(canonical, now);
+        } finally {
+            lock.unlock();
+        }
+
         this.cache.asMap().keySet().removeIf(key -> key.url().equals(canonical));
     }
 
@@ -478,14 +533,15 @@ public final class ResponseCache {
      * a request in flight across the drop cannot put the dropped state back; a request whose
      * start falls in the same clock tick as the drop counts as sent before it. A store or refresh
      * racing the drop either writes before it, and its entry is dropped, or compares its
-     * request's start after it, and is refused when that request was sent before.
+     * request's start after it, and is refused when that request was sent before. The instants
+     * {@link #invalidate(String)} recorded per URL are folded into the drop's.
      */
     public void invalidateAll() {
         Lock lock = this.dropLock.writeLock();
         lock.lock();
 
         try {
-            this.emptiedAt = Instant.now();
+            this.foldInvalidations(Instant.now());
             this.cache.invalidateAll();
         } finally {
             lock.unlock();
@@ -512,8 +568,9 @@ public final class ResponseCache {
      * The method is a no-op when no bucket or no variant is found at the given key/fingerprint -
      * the bucket expired, was evicted by weight pressure, or was invalidated or dropped between
      * the lookup and the revalidation - and when the conditional request was sent at or before
-     * the instant {@link #invalidateAll()} last emptied the cache, or carries no request start,
-     * so a revalidation in flight across a drop cannot refresh an entry stored after it.
+     * the instant {@link #invalidateAll()} last emptied the cache or {@link #invalidate(String)}
+     * last invalidated the URL, or carries no request start, so a revalidation in flight across
+     * an invalidation cannot refresh an entry stored after it.
      *
      * @param key the URL bucket of the cached variant
      * @param fingerprint the fingerprint of the revalidated request's headers over the headers the
@@ -540,7 +597,7 @@ public final class ResponseCache {
         lock.lock();
 
         try {
-            if (sent.isAfter(this.emptiedAt)) {
+            if (this.sentAfterInvalidation(key.url(), sent)) {
                 this.cache.asMap().computeIfPresent(key, (k, variants) -> {
                     CacheEntry<?> existing = variants.get(fingerprint);
 
@@ -559,6 +616,42 @@ public final class ResponseCache {
     }
 
     // ===== Internals =====
+
+    /**
+     * Tests whether an answer to a request for the given URL, sent at the given instant, may be
+     * written to the cache: the request was sent after {@link #refusedThrough} and after the
+     * URL's record in {@link #invalidatedAt}, if it has one.
+     * <p>
+     * Called under the read lock of {@link #dropLock}.
+     *
+     * @param url the canonical URL the answer is written under
+     * @param sent the instant the request was sent
+     * @return {@code true} if the request was sent after every invalidation covering {@code url}
+     */
+    private boolean sentAfterInvalidation(@NotNull String url, @NotNull Instant sent) {
+        Instant invalidated = this.invalidatedAt.get(url);
+        return sent.isAfter(this.refusedThrough) && (invalidated == null || sent.isAfter(invalidated));
+    }
+
+    /**
+     * Folds every per-URL invalidation record into {@link #refusedThrough}, which becomes the
+     * latest of itself, {@code now} and each record, and drops the records.
+     * <p>
+     * Called under the write lock of {@link #dropLock}.
+     *
+     * @param now the instant of the invalidation that folds the records
+     */
+    private void foldInvalidations(@NotNull Instant now) {
+        Instant latest = now.isAfter(this.refusedThrough) ? now : this.refusedThrough;
+
+        for (Instant invalidated : this.invalidatedAt.values()) {
+            if (invalidated.isAfter(latest))
+                latest = invalidated;
+        }
+
+        this.refusedThrough = latest;
+        this.invalidatedAt.clear();
+    }
 
     /**
      * Builds the bucket a write puts in the cache: a new map holding the given bucket's variants,
