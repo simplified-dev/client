@@ -16,6 +16,7 @@ import dev.simplified.client.factory.TimedTlsSocketStrategy;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
@@ -63,12 +64,13 @@ import java.util.function.Supplier;
  * conditional revalidation and {@code getLastResponse()} observability, builds a pooling
  * Apache {@link ApacheHttp5Client} with {@link TimedConnectionOperator} and
  * {@link TimedTlsSocketStrategy} for DNS, TCP, and TLS timing instrumentation,
- * wraps the Apache client in a {@link CachingFeignClient} that serves RFC 7234 cache hits
- * transparently, assembles a Feign proxy that wires together encoding, decoding, request
- * and response interceptors, and the configured error decoder, and finally wraps the
- * resulting Feign proxy in a JDK dynamic proxy that unwraps {@link RetryableApiException}
- * so callers see the original typed {@link ApiException} rather than Feign's internal
- * retry wrapper.
+ * wraps the Apache client in a {@link RateLimitingFeignClient} that enforces the client-side
+ * rate limit on each request sent, and that in a {@link CachingFeignClient} that serves
+ * RFC 7234 cache hits transparently, assembles a Feign proxy that wires together encoding,
+ * decoding, request and response interceptors, and the configured error decoder, and finally
+ * wraps the resulting Feign proxy in a JDK dynamic proxy that unwraps
+ * {@link RetryableApiException} so callers see the original typed {@link ApiException} rather
+ * than Feign's internal retry wrapper.
  * <p>
  * To produce a derived client that shares most of an existing client's configuration, call
  * {@link #mutate()} to obtain a {@link ClientConfig.Builder} seeded from the current options,
@@ -137,7 +139,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * Discovers routes for the target contract interface, initializes the rate-limit manager,
      * instantiates the response cache from {@link Timings#maxCacheBytes()},
      * {@link Timings#cacheSafetyFallback()} and {@link Timings#cacheStaleRetention()}, wraps the supplied transport in a
-     * {@link CachingFeignClient}, and assembles the Feign proxy through an exception-unwrapping
+     * {@link RateLimitingFeignClient} and that in a {@link CachingFeignClient}, and assembles
+     * the Feign proxy through an exception-unwrapping
      * dynamic proxy. The constructor fires DNS and HEAD-probe prewarms on virtual threads so
      * the first real request finds a warm pool; prewarm failures never propagate.
      *
@@ -332,8 +335,10 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * Builds a Feign proxy implementing the contract interface {@code C}.
      * <p>
      * The proxy is configured with the internal Apache HTTP client wrapped in a
-     * {@link CachingFeignClient} so that RFC 7234 fresh-hit short-circuiting, conditional
-     * revalidation, and unsafe-method invalidation happen transparently below Feign. Its
+     * {@link RateLimitingFeignClient}, which enforces and counts the client-side rate limit on
+     * each request sent, and that in a {@link CachingFeignClient} so that RFC 7234 fresh-hit
+     * short-circuiting, conditional revalidation, and unsafe-method invalidation happen
+     * transparently below Feign; a request the cache answers never reaches the rate limit. Its
      * {@link ConfiguredHeadersTarget target} adds the configured static and dynamic headers to
      * each request Feign builds, so the cache sees the headers the transport sends. The
      * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
@@ -351,7 +356,12 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * @return a Feign-generated proxy instance of type {@code C}
      */
     private @NotNull C build() {
-        feign.Client cachingClient = new CachingFeignClient(this.internalClient, this.responseCache);
+        feign.Client rateLimitedClient = new RateLimitingFeignClient(
+            this.internalClient,
+            this.getRateLimitManager(),
+            this.getRouteDiscovery()
+        );
+        feign.Client cachingClient = new CachingFeignClient(rateLimitedClient, this.responseCache);
         InternalErrorDecoder errorDecoder = new InternalErrorDecoder(
             this.options.getErrorDecoder(),
             this.getRouteDiscovery(),

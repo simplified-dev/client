@@ -6,6 +6,7 @@ import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.route.RouteDiscovery;
 import feign.InvocationContext;
 import feign.MethodMetadata;
@@ -37,9 +38,10 @@ import java.util.TreeMap;
  *   <li>Delegates to the next interceptor in the chain.</li>
  * </ol>
  * <p>
- * This class is the server-side complement to {@link InternalRequestInterceptor}, which
- * enforces the client-side rate limit before each request. Together they form a closed
- * feedback loop that keeps client-tracked quotas synchronized with server-advertised quotas.
+ * This class is the server-side complement to {@link RateLimitingFeignClient}, which
+ * enforces the client-side rate limit on each request that leaves the client. Together they
+ * form a closed feedback loop that keeps client-tracked quotas synchronized with
+ * server-advertised quotas.
  * <p>
  * HTTP cache semantics (fresh-hit short-circuiting, conditional revalidation, 304 header
  * merge) live in {@link CachingFeignClient CachingFeignClient}, which is the client Feign

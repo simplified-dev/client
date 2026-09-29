@@ -2,18 +2,6 @@
 
 Open items in `client`. Each stays here until it is closed or accepted.
 
-> #### A fresh cache hit is counted against the client-side rate limit
-> `InternalRequestInterceptor` is a Feign request interceptor, so it runs before
-> `CachingFeignClient` decides whether the cache answers. It checks the route's bucket and tracks
-> the request whether or not the request then leaves the process, so a replay spends a slot of the
-> client's own budget and can be refused with `RateLimitException` although nothing would be sent.
-> `UrlFetcher` looks up its cache before it checks and tracks the bucket, so only the Feign path
-> does this.
->
-> - Affected: `src/main/java/dev/simplified/client/interceptor/InternalRequestInterceptor.java:85-88` - `apply`
-> - Type: **GAP**
-> - Status: **OPEN**
-
 > #### Configured credentials sit on the `feign.Request`
 > `Client` adds its configured static and dynamic headers - an `Authorization` or `API-Key` among
 > them - to each request Feign builds, so the cache fingerprints the values the origin receives.

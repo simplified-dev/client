@@ -5,6 +5,7 @@ import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
@@ -74,7 +75,7 @@ class InternalResponseInterceptorTest {
     }
 
     /**
-     * Mirrors {@link InternalRequestInterceptor#apply}: refuses the request if its bucket is
+     * Mirrors {@link RateLimitingFeignClient#execute}: refuses the request if its bucket is
      * exhausted, otherwise counts it.
      */
     private boolean send(long at) {
