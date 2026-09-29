@@ -686,8 +686,9 @@ public interface Response<T> {
          * (<a href="https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.9">RFC 7234
          * §5.2.2.9</a>), and {@link ResponseCache} is a private cache. Heuristic freshness
          * (§4.2.2) is deliberately not implemented; a response with no explicit freshness
-         * information is stale on arrival, and {@link ResponseCache} keeps it only as long as a
-         * {@code stale-if-error} window it carries.
+         * information is stale on arrival, and {@link ResponseCache} keeps it for revalidation
+         * when it carries a validator, and otherwise only as long as a {@code stale-if-error}
+         * window it carries.
          *
          * @return the freshness lifetime, or {@link Duration#ZERO} if no freshness
          *         information is present

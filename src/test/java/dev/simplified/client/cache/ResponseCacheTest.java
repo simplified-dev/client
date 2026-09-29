@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -110,6 +111,34 @@ class ResponseCacheTest {
             .target(contract, "https://127.0.0.1:0");
     }
 
+    /**
+     * Answers a conditional request {@code 304 Not Modified} and any other {@code 200}, both
+     * carrying the given headers.
+     *
+     * @param headerPairs the answer's headers, as alternating names and values
+     * @return the origin
+     */
+    private static Function<Request, feign.Response> revalidating(String... headerPairs) {
+        return request -> answer(request, header(request, ETag.IF_NONE_MATCH_HEADER).isEmpty() ? 200 : 304, headerPairs);
+    }
+
+    /**
+     * Returns the given headers followed by a request start and a response received both set to
+     * now, as a live answer carries them.
+     *
+     * @param headerPairs the headers, as alternating names and values
+     * @return the headers with the round trip added
+     */
+    private static String[] receivedNow(String... headerPairs) {
+        String now = Instant.now().toString();
+        String[] stamped = Arrays.copyOf(headerPairs, headerPairs.length + 4);
+        stamped[headerPairs.length] = NetworkDetails.REQUEST_START;
+        stamped[headerPairs.length + 1] = now;
+        stamped[headerPairs.length + 2] = NetworkDetails.RESPONSE_RECEIVED;
+        stamped[headerPairs.length + 3] = now;
+        return stamped;
+    }
+
     private static Map<String, Collection<String>> headers(String... pairs) {
         Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
@@ -192,7 +221,11 @@ class ResponseCacheTest {
     }
 
     private Optional<CacheEntry<?>> lookup() {
-        return this.cache.lookup(HttpMethod.GET, URL, Map.of());
+        return lookup(this.cache);
+    }
+
+    private static Optional<CacheEntry<?>> lookup(ResponseCache cache) {
+        return cache.lookup(HttpMethod.GET, URL, Map.of());
     }
 
     /**
@@ -202,8 +235,19 @@ class ResponseCacheTest {
      * @param headerPairs the answer's headers, as alternating names and values
      */
     private void storeDirectly(String... headerPairs) {
+        storeDirectly(this.cache, headerPairs);
+    }
+
+    /**
+     * Offers an answer to a {@code GET} of the test resource straight to the given cache, as the
+     * decoder offers a live one.
+     *
+     * @param cache the cache to offer the answer to
+     * @param headerPairs the answer's headers, as alternating names and values
+     */
+    private static void storeDirectly(ResponseCache cache, String... headerPairs) {
         Request request = Request.create(Request.HttpMethod.GET, URL, headers(), null, StandardCharsets.UTF_8, null);
-        this.cache.store(new Response.Impl<>(answer(request, 200, headerPairs), () -> BODY), BODY, request.headers());
+        cache.store(new Response.Impl<>(answer(request, 200, headerPairs), () -> BODY), BODY, request.headers());
     }
 
     @Test
@@ -373,6 +417,99 @@ class ResponseCacheTest {
 
         assertThat(this.resource.get().isFromCache(), is(true));
         assertThat(this.sent, hasSize(3));
+    }
+
+    @Test
+    @DisplayName("A stale entry carrying a validator is still held after its freshness, and a 304 revalidates it")
+    void staleEntryWithValidatorIsHeldForRevalidation() {
+        this.origin = revalidating("Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.resource.get();
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(120));
+
+        Response<byte[]> revalidated = this.resource.get();
+
+        assertThat(this.sent, hasSize(2));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(revalidated.getBody(), is(BODY));
+    }
+
+    @Test
+    @DisplayName("A response carrying a validator and no freshness is held and revalidated, rather than expired as it is written")
+    void validatorWithoutFreshnessIsHeldForRevalidation() {
+        this.origin = revalidating("ETag", "\"v1\"");
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(true));
+
+        Response<byte[]> revalidated = this.resource.get();
+
+        assertThat(this.sent, hasSize(2));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(revalidated.isFromCache(), is(true));
+    }
+
+    @Test
+    @DisplayName("An entry held for revalidation expires once the stale retention has passed after its freshness, and a zero retention holds none")
+    void staleRetentionIsBounded() {
+        ResponseCache retaining = new ResponseCache(1L << 20, 3_600_000L, TimeUnit.MINUTES.toMillis(10), this.ticks::get);
+        ResponseCache retainingNothing = new ResponseCache(1L << 20, 3_600_000L, 0L, this.ticks::get);
+        storeDirectly(retaining, receivedNow("Cache-Control", "max-age=60", "ETag", "\"v1\""));
+        storeDirectly(retainingNothing, receivedNow("Cache-Control", "max-age=60", "ETag", "\"v1\""));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(61));
+
+        assertThat(lookup(retaining).isPresent(), is(true));
+        assertThat(lookup(retainingNothing).isPresent(), is(false));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(598));
+
+        assertThat(lookup(retaining).isPresent(), is(true));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(2));
+
+        assertThat(lookup(retaining).isPresent(), is(false));
+    }
+
+    @Test
+    @DisplayName("The safety fallback caps the stale retention")
+    void safetyFallbackCapsTheStaleRetention() {
+        ResponseCache capped = new ResponseCache(1L << 20, TimeUnit.MINUTES.toMillis(5), TimeUnit.HOURS.toMillis(1), this.ticks::get);
+        storeDirectly(capped, receivedNow("Cache-Control", "max-age=60", "ETag", "\"v1\""));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(299));
+
+        assertThat(lookup(capped).isPresent(), is(true));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(2));
+
+        assertThat(lookup(capped).isPresent(), is(false));
+    }
+
+    @Test
+    @DisplayName("An entry with no validator is held for its freshness and the stale-if-error window it may be served under, and no longer")
+    void entryWithoutValidatorIsHeldForItsFreshnessAndStaleIfError() {
+        this.storeDirectly(receivedNow("Cache-Control", "max-age=60, stale-if-error=30"));
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(89));
+
+        assertThat(this.lookup().isPresent(), is(true));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(2));
+
+        assertThat(this.lookup().isPresent(), is(false));
+    }
+
+    @Test
+    @DisplayName("A stale-if-error window a directive forbids holds no entry, and no-cache without a validator holds none at all")
+    void forbiddenStaleWindowsHoldNothing() {
+        this.storeDirectly(receivedNow("Cache-Control", "max-age=60, must-revalidate, stale-if-error=600"));
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(61));
+
+        assertThat(this.lookup().isPresent(), is(false));
+
+        this.storeDirectly(receivedNow("Cache-Control", "max-age=60, no-cache, stale-if-error=600"));
+
+        assertThat(this.lookup().isPresent(), is(false));
     }
 
     @Test

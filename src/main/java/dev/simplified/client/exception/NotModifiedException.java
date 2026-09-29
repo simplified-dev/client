@@ -34,7 +34,8 @@ import org.jetbrains.annotations.NotNull;
  * framework no longer holds the corresponding response (for example, streaming endpoints
  * are never cached, and cache entries are bounded by
  * {@link Timings#maxCacheBytes()} and expire according to
- * each entry's {@code Cache-Control} directives capped by
+ * each entry's {@code Cache-Control} directives and validators, a validated entry being kept
+ * {@link Timings#cacheStaleRetention()} past its freshness, capped by
  * {@link Timings#cacheSafetyFallback()}).
  *
  * <p>The {@code 3xx} range in general is not an error range: {@code 301}/{@code 302}/

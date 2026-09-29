@@ -146,7 +146,8 @@ public final class UrlFetcher {
         this.options = options;
         this.responseCache = options.getSharedCache().orElseGet(() -> new ResponseCache(
             options.getTimings().maxCacheBytes(),
-            options.getTimings().cacheSafetyFallback()
+            options.getTimings().cacheSafetyFallback(),
+            options.getTimings().cacheStaleRetention()
         ));
         this.rateLimitManager = options.getSharedRateLimits().orElseGet(RateLimitManager::new);
         this.http = ApacheClientFactory.configure(

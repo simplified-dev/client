@@ -135,8 +135,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * Constructs a new client from the given configuration bundle and pre-built Feign transport.
      * <p>
      * Discovers routes for the target contract interface, initializes the rate-limit manager,
-     * instantiates the response cache from {@link Timings#maxCacheBytes()} and
-     * {@link Timings#cacheSafetyFallback()}, wraps the supplied transport in a
+     * instantiates the response cache from {@link Timings#maxCacheBytes()},
+     * {@link Timings#cacheSafetyFallback()} and {@link Timings#cacheStaleRetention()}, wraps the supplied transport in a
      * {@link CachingFeignClient}, and assembles the Feign proxy through an exception-unwrapping
      * dynamic proxy. The constructor fires DNS and HEAD-probe prewarms on virtual threads so
      * the first real request finds a warm pool; prewarm failures never propagate.
@@ -156,7 +156,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
         this.rateLimitManager = options.getSharedRateLimitManager().orElseGet(RateLimitManager::new);
         this.responseCache = new ResponseCache(
             options.getTimings().maxCacheBytes(),
-            options.getTimings().cacheSafetyFallback()
+            options.getTimings().cacheSafetyFallback(),
+            options.getTimings().cacheStaleRetention()
         );
         this.gson = options.getGson();
         this.contract = this.wrapContractProxy(this.build());

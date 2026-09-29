@@ -9,6 +9,7 @@ import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.UrlFetchException;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.request.Request;
+import dev.simplified.client.request.Timings;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
@@ -97,6 +98,12 @@ class UrlFetcherTest {
      * order they arrived.
      */
     private final List<List<String>> noCacheValidators = new CopyOnWriteArrayList<>();
+
+    /**
+     * The {@code If-None-Match} values each request {@code /validated} answered carried, in the
+     * order they arrived.
+     */
+    private final List<List<String>> validatedValidators = new CopyOnWriteArrayList<>();
 
     /**
      * The headers each request {@code /static-negotiated} answered carried, in the order they
@@ -258,6 +265,23 @@ class UrlFetcherTest {
         this.server.createContext("/unavailable-must-revalidate", exchange -> revalidatedWith(exchange, 503, "must-revalidate"));
         this.server.createContext("/unavailable-proxy-revalidate", exchange -> revalidatedWith(exchange, 503, "proxy-revalidate"));
         this.server.createContext("/unavailable-no-cache", exchange -> revalidatedWith(exchange, 503, "no-cache"));
+        this.server.createContext("/validated", exchange -> {
+            List<String> validator = exchange.getRequestHeaders().getOrDefault("If-None-Match", List.of());
+            this.validatedValidators.add(List.copyOf(validator));
+            exchange.getResponseHeaders().add("ETag", "\"v1\"");
+
+            if (!validator.isEmpty()) {
+                exchange.sendResponseHeaders(304, -1);
+                exchange.close();
+                return;
+            }
+
+            byte[] body = "validated".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
         this.server.createContext("/no-cache", exchange -> {
             List<String> validator = exchange.getRequestHeaders().getOrDefault("If-None-Match", List.of());
             this.noCacheValidators.add(List.copyOf(validator));
@@ -734,6 +758,50 @@ class UrlFetcherTest {
         assertThat(first.getBody(), is(equalTo("checked")));
         assertThat(second.isFromCache(), is(true));
         assertThat(this.noCacheValidators, contains(List.of(), List.of("\"v1\""), List.of("\"v1\"")));
+    }
+
+    @Test
+    @DisplayName("A response carrying a validator and no freshness is revalidated on the next fetch, and a 304 answers it from the cache")
+    void validatorWithoutFreshnessIsRevalidated() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/validated");
+
+        Response<String> live = fetcher.get(uri);
+        Response<String> revalidated = fetcher.get(uri);
+
+        assertThat(live.isFromCache(), is(false));
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(revalidated.getBody(), is(equalTo("validated")));
+        assertThat(this.validatedValidators, contains(List.of(), List.of("\"v1\"")));
+    }
+
+    @Test
+    @DisplayName("A fetcher whose timings retain nothing stale fetches a response with a validator and no freshness in full again")
+    void zeroStaleRetentionHoldsNothingForRevalidation() {
+        Timings defaults = Timings.createDefault();
+        UrlFetcher fetcher = UrlFetcher.create(
+            UrlFetcherConfig.builder(new Gson())
+                .withTimings(new Timings(
+                    defaults.connectionTimeToLive(),
+                    defaults.connectionIdleTimeout(),
+                    defaults.connectionKeepAlive(),
+                    defaults.connectTimeout(),
+                    defaults.socketTimeout(),
+                    defaults.maxConnections(),
+                    defaults.maxConnectionsPerRoute(),
+                    defaults.maxCacheBytes(),
+                    defaults.cacheSafetyFallback(),
+                    0L
+                ))
+                .build()
+        );
+        URI uri = this.baseUri.resolve("/validated");
+
+        fetcher.get(uri);
+        Response<String> again = fetcher.get(uri);
+
+        assertThat(again.isFromCache(), is(false));
+        assertThat(this.validatedValidators, contains(List.of(), List.of()));
     }
 
     @Test

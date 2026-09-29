@@ -60,10 +60,13 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * Eviction is driven by three layered mechanisms:
  * <ul>
  *   <li><b>Per-bucket lifetime</b> - {@link ResponseCacheExpiry} ends each bucket's lifetime,
- *       counted from the write that created or last replaced it, after the longest
- *       {@link Response.CachedImpl#freshnessLifetime() freshness lifetime} plus
- *       {@code stale-if-error} window among its variants, clamped to the
- *       constructor-supplied safety fallback</li>
+ *       counted from the write that created or last replaced it, once none of its variants can
+ *       answer a request any longer: a variant is held for its
+ *       {@link Response.CachedImpl#freshnessLifetime() freshness lifetime} plus the longer of
+ *       the {@code stale-if-error} window it may be served under and, when it carries an
+ *       {@code ETag} or {@code Last-Modified} validator, the constructor-supplied stale
+ *       retention, so a stale variant is still there for a conditional request to revalidate.
+ *       The lifetime is clamped to the constructor-supplied safety fallback</li>
  *   <li><b>Weight-based eviction</b> - {@link ResponseCacheWeigher} sums raw-body bytes,
  *       header bytes, and an object-graph overhead per variant, with a total cap of
  *       the constructor-supplied max cache bytes</li>
@@ -160,6 +163,18 @@ public final class ResponseCache {
     public static final @NotNull String REVALIDATED_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Revalidated";
 
     /**
+     * How long, in milliseconds, an entry carrying an {@code ETag} or {@code Last-Modified}
+     * validator is kept past its freshness when no retention is given - one hour.
+     * <p>
+     * A stale entry held this long answers a request made within the hour through a conditional
+     * request, whose {@code 304 Not Modified} carries no body, rather than a full one; an hour
+     * covers a client polling an origin every few minutes with room to spare, while an entry no
+     * request has revalidated for that long gives up its weight to entries in use. The
+     * {@linkplain #ResponseCache(long, long) safety fallback} caps it.
+     */
+    public static final long DEFAULT_STALE_RETENTION_MILLIS = Duration.ofHours(1).toMillis();
+
+    /**
      * The Caffeine-backed two-level cache of URL bucket -> Vary variants.
      */
     private final @NotNull Cache<CacheKey.UrlKey, java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>>> cache;
@@ -184,7 +199,8 @@ public final class ResponseCache {
     private @NotNull Instant emptiedAt = Instant.EPOCH;
 
     /**
-     * Constructs a new response cache with the given byte cap and safety fallback.
+     * Constructs a new response cache with the given byte cap and safety fallback, keeping an
+     * entry carrying a validator for {@link #DEFAULT_STALE_RETENTION_MILLIS} past its freshness.
      * <p>
      * Caffeine is configured with weight-based eviction capped at {@code maxCacheBytes},
      * a custom {@link ResponseCacheExpiry} whose safety fallback is
@@ -197,7 +213,41 @@ public final class ResponseCache {
      *                                   freshness
      */
     public ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis) {
-        this(maxCacheBytes, cacheSafetyFallbackMillis, Ticker.systemTicker());
+        this(maxCacheBytes, cacheSafetyFallbackMillis, DEFAULT_STALE_RETENTION_MILLIS);
+    }
+
+    /**
+     * Constructs a new response cache with the given byte cap, safety fallback and stale
+     * retention.
+     * <p>
+     * Configured as {@link #ResponseCache(long, long)} is, with a {@link ResponseCacheExpiry}
+     * that keeps an entry carrying an {@code ETag} or {@code Last-Modified} validator for
+     * {@code staleRetentionMillis} past its freshness, so a conditional request can revalidate
+     * it.
+     *
+     * @param maxCacheBytes the maximum total weight of all cached variants in bytes
+     * @param cacheSafetyFallbackMillis the absolute upper bound on any entry's lifetime, in
+     *                                  milliseconds, regardless of response-advertised freshness
+     * @param staleRetentionMillis how long, in milliseconds, an entry carrying a validator is
+     *                             kept past its freshness; zero keeps none past its freshness and
+     *                             {@code stale-if-error} window
+     */
+    public ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, long staleRetentionMillis) {
+        this(maxCacheBytes, cacheSafetyFallbackMillis, staleRetentionMillis, Ticker.systemTicker());
+    }
+
+    /**
+     * Constructs a new response cache whose bucket lifetimes are measured on the given ticker,
+     * keeping an entry carrying a validator for {@link #DEFAULT_STALE_RETENTION_MILLIS} past its
+     * freshness.
+     *
+     * @param maxCacheBytes the maximum total weight of all cached variants in bytes
+     * @param cacheSafetyFallbackMillis the absolute upper bound on any entry's lifetime, in
+     *                                  milliseconds
+     * @param ticker the time source Caffeine measures bucket lifetimes against
+     */
+    ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, @NotNull Ticker ticker) {
+        this(maxCacheBytes, cacheSafetyFallbackMillis, DEFAULT_STALE_RETENTION_MILLIS, ticker);
     }
 
     /**
@@ -206,13 +256,18 @@ public final class ResponseCache {
      * @param maxCacheBytes the maximum total weight of all cached variants in bytes
      * @param cacheSafetyFallbackMillis the absolute upper bound on any entry's lifetime, in
      *                                  milliseconds
+     * @param staleRetentionMillis how long, in milliseconds, an entry carrying a validator is
+     *                             kept past its freshness
      * @param ticker the time source Caffeine measures bucket lifetimes against
      */
-    ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, @NotNull Ticker ticker) {
+    ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, long staleRetentionMillis, @NotNull Ticker ticker) {
         this.cache = Caffeine.newBuilder()
             .maximumWeight(maxCacheBytes)
             .weigher(new ResponseCacheWeigher())
-            .expireAfter(new ResponseCacheExpiry(Duration.ofMillis(cacheSafetyFallbackMillis)))
+            .expireAfter(new ResponseCacheExpiry(
+                Duration.ofMillis(cacheSafetyFallbackMillis),
+                Duration.ofMillis(staleRetentionMillis)
+            ))
             .ticker(ticker)
             .recordStats()
             .build();
@@ -337,10 +392,12 @@ public final class ResponseCache {
      * compares a later request's values with. It joins its URL's bucket through
      * {@code compute}, which writes a new bucket holding the current bucket's variants and this
      * one, replacing any variant with the same fingerprint. Caffeine weighs the new bucket and
-     * sets its lifetime from every variant it holds, so a bucket whose longest freshness
-     * lifetime plus {@code stale-if-error} window is zero - a response with neither explicit
-     * freshness nor a {@code stale-if-error} window - is expired as it is written and is never
-     * answered by {@link #lookup}.
+     * sets its lifetime from every variant it holds (see {@link ResponseCacheExpiry}). A
+     * response carrying a validator is held past its freshness, even one with no explicit
+     * freshness, so a later request revalidates it. A bucket none of whose variants could answer
+     * a request - a response with no validator and neither explicit freshness nor a
+     * {@code stale-if-error} window it may be served under, or one carrying {@code no-cache} and
+     * no validator - is expired as it is written and is never answered by {@link #lookup}.
      * <p>
      * Streaming responses skip this overload entirely - the decoder pipeline routes them
      * around the cache because their bodies cannot be replayed.

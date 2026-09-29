@@ -45,8 +45,8 @@ import java.util.TreeMap;
  *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.3.4">RFC 7234
  *       §4.3.4</a>, and a synthesized replay of the cached bytes is returned, carrying the
  *       refreshed headers. A stale entry is held only while its bucket lives, which
- *       {@link ResponseCacheExpiry} ends once its freshness lifetime plus
- *       {@code stale-if-error} window has passed since it was stored.</li>
+ *       {@link ResponseCacheExpiry} keeps for the cache's stale retention past the entry's
+ *       freshness when the entry carries a validator.</li>
  *   <li>On a stale cache hit where the origin returns {@code 5xx} within the entry's
  *       {@code stale-if-error} window, the cached bytes are served in place of the error
  *       response per <a href="https://datatracker.ietf.org/doc/html/rfc5861#section-4">RFC

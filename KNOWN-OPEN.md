@@ -25,18 +25,6 @@ Open items in `client`. Each stays here until it is closed or accepted.
 > - Type: **GAP**
 > - Status: **OPEN**
 
-> #### A stale entry is almost never held, so a 304 is practically unreachable
-> `ResponseCacheExpiry` ends a bucket's lifetime at the longest freshness lifetime plus
-> `stale-if-error` window among its variants, counted from the write. An entry outlives its
-> freshness only by that window, or by the age it arrived with, so a stale entry is almost never
-> there to revalidate, and a response carrying a validator but no freshness is expired as it is
-> written. GitHub sends `max-age=60` with no `stale-if-error`, so its entries expire at staleness
-> and no conditional request, and no 304, is ever made to it.
->
-> - Affected: `src/main/java/dev/simplified/client/cache/ResponseCacheExpiry.java:56` - `expireAfterCreate`
-> - Type: **GAP**
-> - Status: **OPEN**
-
 > #### `invalidate(url)` has no in-flight guard
 > `invalidateAll` records when it emptied the cache, and `store` and `updateOn304` refuse an answer
 > to a request sent before that. `invalidate(url)`, which runs after a successful unsafe-method
