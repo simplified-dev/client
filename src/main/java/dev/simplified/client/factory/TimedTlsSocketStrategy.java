@@ -1,7 +1,6 @@
 package dev.simplified.client.factory;
 
 import dev.simplified.annotations.RequiredArgsConstructor;
-import dev.simplified.client.Client;
 import dev.simplified.client.response.NetworkDetails;
 import org.apache.hc.client5.http.ssl.DefaultClientTlsStrategy;
 import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
@@ -33,8 +32,8 @@ import java.time.Instant;
  *   <li>{@link NetworkDetails#TLS_CIPHER} - the negotiated cipher suite name</li>
  * </ul>
  * <p>
- * These attributes are later propagated as internal headers by the Apache request interceptor
- * configured in {@link Client}, making them available to
+ * These attributes are recorded on each response as internal headers by the response
+ * interceptor {@link ApacheClientFactory} configures, making them available to
  * {@link NetworkDetails} for per-request TLS reporting.
  *
  * <p><b>HC 5 migration note:</b> this class replaces the HC 4-era

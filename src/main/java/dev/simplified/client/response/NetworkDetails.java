@@ -9,6 +9,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -16,11 +17,12 @@ import java.util.Optional;
  * Immutable snapshot of network-level timing and TLS metadata collected during an HTTP
  * request/response cycle.
  * <p>
- * Instances are constructed either from a {@link feign.Response} (by extracting internal
- * headers injected by the HTTP interceptor layer) or directly from an Apache
- * {@link HttpContext} (by reading context attributes set during connection establishment).
- * Internal headers use the {@code X-Internal-} prefix and are automatically stripped from
- * the public response headers by {@link Response#getHeaders(Map)}.
+ * Instances are constructed either from a {@link feign.Response} (by extracting the internal
+ * headers the client's transport and {@link CachingFeignClient} record on the response) or
+ * directly from an Apache {@link HttpContext} (by reading context attributes set during
+ * connection establishment). Internal headers use the {@code X-Internal-} prefix, never leave
+ * the client on a request, and are automatically stripped from the public response headers by
+ * {@link Response#getHeaders(Map)}.
  * <p>
  * The captured metrics include:
  * <ul>
@@ -93,6 +95,22 @@ public final class NetworkDetails {
     public static final @NotNull String TLS_CIPHER = INTERNAL_HEADER_PREFIX + "TLS-Cipher";
 
     /**
+     * The internal headers describing the connection an exchange used - the DNS, TCP and TLS
+     * markers and the negotiated TLS protocol and cipher - which the client's transport records on
+     * each response it receives from the attributes of its {@link HttpContext}.
+     */
+    public static final @NotNull List<String> CONNECTION_HEADERS = List.of(
+        DNS_START,
+        DNS_END,
+        TCP_CONNECT_START,
+        TCP_CONNECT_END,
+        TLS_HANDSHAKE_START,
+        TLS_HANDSHAKE_END,
+        TLS_PROTOCOL,
+        TLS_CIPHER
+    );
+
+    /**
      * Timing for the full request/response round trip.
      */
     private final @NotNull Stopwatch roundTrip;
@@ -150,14 +168,16 @@ public final class NetworkDetails {
      * request carries none - {@link CachingFeignClient} records it on the response it returns,
      * because Feign rebuilds that response around the request it built. The response-received
      * timestamp is read from the response headers. The DNS, TCP and TLS markers and the TLS
-     * protocol and cipher are read from the request headers, which carry them only when the
-     * transport set them on the request. Any missing header defaults to {@link Instant#EPOCH}
-     * for timestamps and {@link Optional#empty()} for strings.
+     * protocol and cipher - the {@link #CONNECTION_HEADERS} - are read from the response headers,
+     * where the client's transport records them, or from the request headers when the response
+     * carries none of them. Any missing header defaults to {@link Instant#EPOCH} for timestamps
+     * and {@link Optional#empty()} for strings.
      *
-     * @param responseHeaders the response headers carrying the response-received marker, and the
-     *                        request-start marker when the request headers lack it
-     * @param requestHeaders the request headers carrying the request-start, timing and TLS markers
-     *                       the transport set
+     * @param responseHeaders the response headers carrying the response-received marker and the
+     *                        connection markers, and the request-start marker when the request
+     *                        headers lack it
+     * @param requestHeaders the request headers carrying the request-start marker, and the
+     *                       connection markers when the response headers lack them
      */
     public NetworkDetails(
         @NotNull Map<String, Collection<String>> responseHeaders,
@@ -170,12 +190,16 @@ public final class NetworkDetails {
         Instant responseReceived = extractInstant(responseHeaders, RESPONSE_RECEIVED);
         this.roundTrip = Stopwatch.of(requestStart, responseReceived);
 
-        this.dnsResolution = extractStopwatch(requestHeaders, DNS_START, DNS_END);
-        this.tcpConnection = extractStopwatch(requestHeaders, TCP_CONNECT_START, TCP_CONNECT_END);
-        this.tlsHandshake = extractStopwatch(requestHeaders, TLS_HANDSHAKE_START, TLS_HANDSHAKE_END);
+        Map<String, Collection<String>> connection = CONNECTION_HEADERS.stream().anyMatch(responseHeaders::containsKey)
+            ? responseHeaders
+            : requestHeaders;
 
-        this.tlsProtocol = extractHeader(requestHeaders, TLS_PROTOCOL);
-        this.tlsCipher = extractHeader(requestHeaders, TLS_CIPHER);
+        this.dnsResolution = extractStopwatch(connection, DNS_START, DNS_END);
+        this.tcpConnection = extractStopwatch(connection, TCP_CONNECT_START, TCP_CONNECT_END);
+        this.tlsHandshake = extractStopwatch(connection, TLS_HANDSHAKE_START, TLS_HANDSHAKE_END);
+
+        this.tlsProtocol = extractHeader(connection, TLS_PROTOCOL);
+        this.tlsCipher = extractHeader(connection, TLS_CIPHER);
     }
 
     /**
@@ -232,6 +256,19 @@ public final class NetworkDetails {
      */
     public static boolean isInternalHeader(@NotNull String headerName) {
         return headerName.regionMatches(true, 0, INTERNAL_HEADER_PREFIX, 0, INTERNAL_HEADER_PREFIX.length());
+    }
+
+    /**
+     * Checks whether the given header name is one of the {@link #CONNECTION_HEADERS} the client's
+     * transport records on a response, matched ignoring case as {@link #isInternalHeader(String)}
+     * matches.
+     *
+     * @param headerName the header name to test
+     * @return {@code true} if the header name is a connection marker, in any case; {@code false}
+     *         otherwise
+     */
+    public static boolean isConnectionHeader(@NotNull String headerName) {
+        return CONNECTION_HEADERS.stream().anyMatch(headerName::equalsIgnoreCase);
     }
 
     /**

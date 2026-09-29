@@ -119,8 +119,8 @@ public class UrlFetchException extends ApiException {
      * <p>
      * Used by subtypes whose timing data originates from Apache's
      * {@link HttpContext} rather than feign-style header injection -
-     * the {@code X-Internal-*} markers consumed by the standard lazy path are absent in that
-     * source, so the prebuilt snapshot preserves real round-trip / DNS / TCP / TLS timings.
+     * the round-trip markers consumed by the standard lazy path are absent in that source, so
+     * the prebuilt snapshot preserves real round-trip / DNS / TCP / TLS timings.
      *
      * @param context the HTTP context bundle
      * @param details a pre-built network timing snapshot to expose via {@link #getDetails()}

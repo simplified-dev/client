@@ -13,18 +13,6 @@ Open items in `client`. Each stays here until it is closed or accepted.
 > - Type: **RISK**
 > - Status: **OPEN**
 
-> #### Internal headers go out on the wire, and transport timings never reach a Feign response
-> `ApacheClientFactory`'s request interceptor stamps `X-Internal-Request-Start` and the DNS, TCP and
-> TLS markers on the outbound request, and `InternalRequestInterceptor` adds
-> `X-Internal-Request-Sequence`, so every origin receives them. On the Feign path the response is
-> rebuilt around Feign's own request, which carries none of the transport's markers, so a Feign
-> response's `NetworkDetails` reports no DNS, TCP or TLS timing and no TLS protocol or cipher.
->
-> - Affected: `src/main/java/dev/simplified/client/factory/ApacheClientFactory.java:142-150` - `configure`;
->   `src/main/java/dev/simplified/client/interceptor/InternalRequestInterceptor.java:91` - `apply`
-> - Type: **GAP**
-> - Status: **OPEN**
-
 > #### Fetchers sharing one cache with different static queries share entries
 > `ApacheClientFactory` appends a client's static query parameters below the cache, after the URL
 > key a lookup or store uses has been formed, so the key carries none of them. Two `UrlFetcher`s

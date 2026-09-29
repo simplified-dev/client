@@ -67,12 +67,15 @@ import java.util.TreeMap;
  * {@link ResponseCache#lookup}).
  * <p>
  * Every response the delegate returns carries its round trip: any
- * {@linkplain NetworkDetails#isInternalHeader(String) internal header} in it is dropped, and the
- * instant before the request was handed to the delegate and the instant the delegate returned
+ * {@linkplain NetworkDetails#isInternalHeader(String) internal header} in it is dropped but the
+ * {@linkplain NetworkDetails#CONNECTION_HEADERS connection markers} the transport recorded, and
+ * the instant before the request was handed to the delegate and the instant the delegate returned
  * are added to the response's headers as {@link NetworkDetails#REQUEST_START} and
- * {@link NetworkDetails#RESPONSE_RECEIVED}. {@link NetworkDetails} reads both there, so a stored
- * response's {@link Response.CachedImpl#currentAge(Instant) age} and the request start
- * {@link ResponseCache#store} compares with its last drop are measured from them.
+ * {@link NetworkDetails#RESPONSE_RECEIVED}. {@link NetworkDetails} reads all of them there, so a
+ * stored response's {@link Response.CachedImpl#currentAge(Instant) age} and the request start
+ * {@link ResponseCache#store} compares with its last drop are measured from the round trip, and
+ * a response reports the DNS, TCP and TLS timings and TLS protocol and cipher of the connection
+ * it came over.
  * <p>
  * Storage is not handled here. {@link InternalResponseDecoder} offers each buffered response it
  * decodes to {@link ResponseCache#store}, which keeps the raw body bytes; a replay is decoded
@@ -336,12 +339,14 @@ public final class CachingFeignClient implements Client {
      * Sends a request through the delegate and records the round trip on its response.
      * <p>
      * Every {@linkplain NetworkDetails#isInternalHeader(String) internal header} in the
-     * delegate's response is dropped: only this client sets them, and an origin or proxy that
-     * echoes the ones the client sends must not stand in for its round trip. The instant before
-     * the delegate is called and the instant it returns are then added to the response's headers
-     * as {@link NetworkDetails#REQUEST_START} and {@link NetworkDetails#RESPONSE_RECEIVED}. The
-     * request start is recorded on the response rather than the request because Feign rebuilds
-     * the response it is handed around the request it built.
+     * delegate's response is dropped but the {@linkplain NetworkDetails#CONNECTION_HEADERS
+     * connection markers}, which the client's transport records on the response in place of any
+     * the origin sent: an origin or proxy that sends internal headers of its own must not stand in
+     * for the round trip. The instant before the delegate is called and the instant it returns
+     * are then added to the response's headers as {@link NetworkDetails#REQUEST_START} and
+     * {@link NetworkDetails#RESPONSE_RECEIVED}. The request start is recorded on the response
+     * rather than the request because Feign rebuilds the response it is handed around the request
+     * it built.
      *
      * @param request the request to send
      * @param options the Feign request options
@@ -354,7 +359,7 @@ public final class CachingFeignClient implements Client {
         Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
 
         response.headers().forEach((name, values) -> {
-            if (!NetworkDetails.isInternalHeader(name))
+            if (!NetworkDetails.isInternalHeader(name) || NetworkDetails.isConnectionHeader(name))
                 headers.put(name, values);
         });
 

@@ -13,7 +13,10 @@ import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.io.HttpClientConnectionOperator;
 import org.apache.hc.client5.http.ssl.DefaultClientTlsStrategy;
 import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
+import org.apache.hc.core5.http.Header;
+import org.apache.hc.core5.http.HttpMessage;
 import org.apache.hc.core5.http.HttpRequestInterceptor;
+import org.apache.hc.core5.http.HttpResponseInterceptor;
 import org.apache.hc.core5.http.URIScheme;
 import org.apache.hc.core5.http.config.RegistryBuilder;
 import org.apache.hc.core5.http.protocol.HttpContext;
@@ -46,9 +49,15 @@ import java.util.concurrent.locks.ReentrantLock;
  *       {@link TimedTlsSocketStrategy} (TLS handshake timing + protocol/cipher metadata)
  *       so that connection-level observability lands on the {@link HttpContext} as
  *       {@link NetworkDetails} attributes.</li>
- *   <li>A request interceptor that stamps the request-start timestamp, propagates the
- *       captured timing attributes onto the outbound request as {@code X-Internal-} headers,
- *       and appends the configured static queries to the request URL.</li>
+ *   <li>A request interceptor that records the request-start timestamp on the
+ *       {@link HttpContext}, removes every {@linkplain NetworkDetails#isInternalHeader(String)
+ *       internal header} from the outbound request, so none reaches the origin, and appends the
+ *       configured static queries to the request URL.</li>
+ *   <li>A response interceptor that removes every internal header the origin sent and records
+ *       the {@linkplain NetworkDetails#CONNECTION_HEADERS connection markers} the context holds
+ *       on the response in their place, so a caller that sees only the response - a Feign
+ *       transport - reads the same DNS, TCP and TLS timings and TLS protocol and cipher as one
+ *       that reads the context.</li>
  *   <li>Pool sizing, eviction, keep-alive, and connection time-to-live derived from the
  *       given {@link Timings}.</li>
  *   <li>An optional local IPv6 address binding when supplied.</li>
@@ -138,18 +147,19 @@ public final class ApacheClientFactory {
             .evictIdleConnections(TimeValue.ofMilliseconds(timings.connectionIdleTimeout()))
             .addRequestInterceptorFirst((HttpRequestInterceptor) (request, entityDetails, context) -> {
                 context.setAttribute(NetworkDetails.REQUEST_START, Instant.now());
-
-                addHeader(request, context, NetworkDetails.REQUEST_START);
-                addHeader(request, context, NetworkDetails.DNS_START);
-                addHeader(request, context, NetworkDetails.DNS_END);
-                addHeader(request, context, NetworkDetails.TCP_CONNECT_START);
-                addHeader(request, context, NetworkDetails.TCP_CONNECT_END);
-                addHeader(request, context, NetworkDetails.TLS_HANDSHAKE_START);
-                addHeader(request, context, NetworkDetails.TLS_HANDSHAKE_END);
-                addHeader(request, context, NetworkDetails.TLS_PROTOCOL);
-                addHeader(request, context, NetworkDetails.TLS_CIPHER);
+                removeInternalHeaders(request);
 
                 if (!queries.isEmpty()) appendQueryParameters(request, queries);
+            })
+            .addResponseInterceptorFirst((HttpResponseInterceptor) (response, entityDetails, context) -> {
+                removeInternalHeaders(response);
+
+                for (String marker : NetworkDetails.CONNECTION_HEADERS) {
+                    Object value = context.getAttribute(marker);
+
+                    if (value != null)
+                        response.addHeader(marker, String.valueOf(value));
+                }
             })
             .setKeepAliveStrategy((response, context) -> {
                 TimeValue keepAlive = DefaultConnectionKeepAliveStrategy.INSTANCE.getKeepAliveDuration(response, context);
@@ -170,18 +180,16 @@ public final class ApacheClientFactory {
     }
 
     /**
-     * Copies a named attribute from the {@link HttpContext} into the request as a header,
-     * if the attribute is present.
+     * Removes every {@linkplain NetworkDetails#isInternalHeader(String) internal header} from a
+     * message.
      *
-     * @param request the outbound request to add the header to
-     * @param context the HTTP context carrying connection-layer attributes
-     * @param id the attribute name and header name to propagate
+     * @param message the request or response to strip
      */
-    private static void addHeader(@NotNull org.apache.hc.core5.http.HttpRequest request, @NotNull HttpContext context, @NotNull String id) {
-        Object value = context.getAttribute(id);
-
-        if (value != null)
-            request.addHeader(id, String.valueOf(value));
+    private static void removeInternalHeaders(@NotNull HttpMessage message) {
+        for (Header header : message.getHeaders()) {
+            if (NetworkDetails.isInternalHeader(header.getName()))
+                message.removeHeader(header);
+        }
     }
 
     /**

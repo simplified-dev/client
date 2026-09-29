@@ -33,9 +33,9 @@ import java.util.Map;
  *                   {@link HttpStatus} has no constant for
  * @param requestMethod the HTTP method of the originating request
  * @param requestUrl the URL of the originating request
- * @param responseHeaders the raw response headers, including internal instrumentation entries
- * @param requestHeaders the raw request headers, carrying the {@code X-Internal-*} timing
- *                       markers consumed by {@link NetworkDetails}
+ * @param responseHeaders the raw response headers, including the internal round-trip and
+ *                        connection markers consumed by {@link NetworkDetails}
+ * @param requestHeaders the raw headers of the request as Feign built it
  * @param bodyBytes the buffered response body bytes - empty when the body was absent
  */
 public record ErrorContext(
@@ -68,9 +68,9 @@ public record ErrorContext(
      *               failure without one
      * @param requestMethod the HTTP method of the originating request
      * @param requestUrl the URL of the originating request
-     * @param responseHeaders the raw response headers, including internal instrumentation entries
-     * @param requestHeaders the raw request headers, carrying the {@code X-Internal-*} timing
-     *                       markers consumed by {@link NetworkDetails}
+     * @param responseHeaders the raw response headers, including the internal round-trip and
+     *                        connection markers consumed by {@link NetworkDetails}
+     * @param requestHeaders the raw headers of the request as Feign built it
      * @param bodyBytes the buffered response body bytes - empty when the body was absent
      */
     public ErrorContext(

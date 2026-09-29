@@ -21,7 +21,10 @@ import org.jetbrains.annotations.NotNull;
  *       via {@link RouteDiscovery}.</li>
  *   <li>Numbers the request with {@link RateLimitManager#nextSequence()}, replacing any number
  *       an earlier attempt of the same template carried, so {@link InternalResponseInterceptor}
- *       can tell a late response from the response to a later request.</li>
+ *       can tell a late response from the response to a later request. The number rides on the
+ *       request Feign builds as an {@linkplain NetworkDetails#isInternalHeader(String) internal
+ *       header}, which the client's transport removes before the request leaves the client, so
+ *       it never reaches the origin.</li>
  *   <li>Replaces the placeholder target URL on the template with the real HTTPS URL
  *       obtained from the route metadata.</li>
  * </ol>
@@ -62,7 +65,8 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
 
     /**
      * Internal header key used to carry the request's {@linkplain RateLimitManager#nextSequence()
-     * sequence number} from request to response interceptor.
+     * sequence number} from request to response interceptor; the transport removes it from the
+     * request it sends.
      */
     static final @NotNull String SEQUENCE_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Request-Sequence";
 

@@ -1122,6 +1122,21 @@ class UrlFetcherTest {
     }
 
     @Test
+    @DisplayName("No internal header reaches the origin")
+    void sendsNoInternalHeader() {
+        List<List<String>> internal = new CopyOnWriteArrayList<>();
+        this.server.createContext("/wire", exchange -> {
+            internal.add(exchange.getRequestHeaders().keySet().stream().filter(NetworkDetails::isInternalHeader).toList());
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(this.baseUri.resolve("/wire"));
+
+        assertThat(internal, is(equalTo(List.<List<String>>of(List.of()))));
+    }
+
+    @Test
     @DisplayName("A request carrying a configured Authorization does not follow a redirect to another host")
     void credentialStopsACrossHostRedirect() throws IOException {
         List<List<String>> landed = new CopyOnWriteArrayList<>();
