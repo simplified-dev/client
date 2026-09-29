@@ -81,7 +81,8 @@ class ClientInternalHeadersTest {
 
     /**
      * Asserts that the network details of a response describe the TLS connection the origin
-     * received its request over, and none of the markers the origin sent.
+     * received its request over - its TLS protocol and cipher, its TLS handshake, and the
+     * connection window before that handshake - and none of the markers the origin sent.
      *
      * @param details the response's network details
      * @param request the request the origin received
@@ -92,6 +93,9 @@ class ClientInternalHeadersTest {
         assertThat(details.getTlsHandshake().startedAt(), is(not(Instant.EPOCH)));
         assertThat(details.getTlsHandshake().completedAt().isBefore(details.getTlsHandshake().startedAt()), is(false));
         assertThat(details.getTcpConnection().startedAt(), is(not(FORGED_TCP_START)));
+        assertThat(details.getTcpConnection().startedAt(), is(not(Instant.EPOCH)));
+        assertThat(details.getTcpConnection().completedAt().isBefore(details.getTcpConnection().startedAt()), is(false));
+        assertThat(details.getTcpConnection().completedAt().isAfter(details.getTlsHandshake().startedAt()), is(false));
     }
 
     @Test

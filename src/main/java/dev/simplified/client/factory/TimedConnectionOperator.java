@@ -4,19 +4,21 @@ import dev.simplified.client.response.NetworkDetails;
 import org.apache.hc.client5.http.DnsResolver;
 import org.apache.hc.client5.http.SchemePortResolver;
 import org.apache.hc.client5.http.impl.io.DefaultHttpClientConnectionOperator;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.client5.http.io.ManagedHttpClientConnection;
 import org.apache.hc.client5.http.ssl.TlsSocketStrategy;
-import org.apache.hc.core5.annotation.Internal;
 import org.apache.hc.core5.http.HttpHost;
 import org.apache.hc.core5.http.config.Lookup;
 import org.apache.hc.core5.http.io.SocketConfig;
 import org.apache.hc.core5.http.protocol.HttpContext;
-import org.apache.hc.core5.util.TimeValue;
+import org.apache.hc.core5.net.NamedEndpoint;
+import org.apache.hc.core5.util.Timeout;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.time.Instant;
 
 /**
@@ -31,7 +33,15 @@ import java.time.Instant;
  * HC 4 {@code ConnectionSocketFactory.connectSocket()} hook where the two were timed
  * individually.
  * <p>
- * The TLS handshake is timed separately via {@link TimedTlsSocketStrategy}.
+ * Every {@code connect()} overload of the default operator ends in the one taking a Unix domain
+ * socket path, which is also the one {@link PoolingHttpClientConnectionManager} calls, so that
+ * overload is the one timed, and each connection is timed once whichever overload a caller
+ * reaches.
+ * <p>
+ * The TLS handshake is timed separately via {@link TimedTlsSocketStrategy}. The default operator
+ * performs it inside {@code connect()}, after the TCP handshake, so the connection window ends
+ * where the handshake {@link TimedTlsSocketStrategy} recorded for the connection starts. The
+ * window is recorded whether or not the connection succeeds.
  * <p>
  * Attributes written into the context use keys from {@link NetworkDetails}:
  * <ul>
@@ -65,8 +75,17 @@ public final class TimedConnectionOperator extends DefaultHttpClientConnectionOp
      * {@inheritDoc}
      */
     @Override
-    @Internal
-    public void connect(@NotNull ManagedHttpClientConnection conn, @NotNull HttpHost host, @Nullable InetSocketAddress localAddress, @NotNull TimeValue connectTimeout, @NotNull SocketConfig socketConfig, @NotNull HttpContext context) throws IOException {
+    public void connect(
+        @NotNull ManagedHttpClientConnection conn,
+        @NotNull HttpHost endpointHost,
+        @Nullable NamedEndpoint endpointName,
+        @Nullable Path unixDomainSocket,
+        @Nullable InetSocketAddress localAddress,
+        @Nullable Timeout connectTimeout,
+        @NotNull SocketConfig socketConfig,
+        @Nullable Object attachment,
+        @NotNull HttpContext context
+    ) throws IOException {
         // Anchor a single wall-clock Instant against a monotonic nanoTime baseline so that
         // the stopwatch boundaries can be derived from nanoTime deltas (single non-allocating
         // native call) instead of paying for Instant.now() syscalls per sample.
@@ -74,11 +93,17 @@ public final class TimedConnectionOperator extends DefaultHttpClientConnectionOp
         long anchorNanos = System.nanoTime();
         long startNanos = System.nanoTime();
         try {
-            super.connect(conn, host, localAddress, connectTimeout, socketConfig, context);
+            super.connect(conn, endpointHost, endpointName, unixDomainSocket, localAddress, connectTimeout, socketConfig, attachment, context);
         } finally {
             long endNanos = System.nanoTime();
-            context.setAttribute(NetworkDetails.TCP_CONNECT_START, instantAt(anchorInstant, anchorNanos, startNanos));
-            context.setAttribute(NetworkDetails.TCP_CONNECT_END, instantAt(anchorInstant, anchorNanos, endNanos));
+            Instant start = instantAt(anchorInstant, anchorNanos, startNanos);
+            Instant end = instantAt(anchorInstant, anchorNanos, endNanos);
+
+            if (context.getAttribute(NetworkDetails.TLS_HANDSHAKE_START) instanceof Instant tlsStart && !tlsStart.isBefore(start) && tlsStart.isBefore(end))
+                end = tlsStart;
+
+            context.setAttribute(NetworkDetails.TCP_CONNECT_START, start);
+            context.setAttribute(NetworkDetails.TCP_CONNECT_END, end);
         }
     }
 
