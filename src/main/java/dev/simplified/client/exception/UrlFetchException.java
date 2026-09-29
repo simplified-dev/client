@@ -26,18 +26,25 @@ import java.util.Map;
  * Each cause has its own type, so a caller tells them apart by the type it catches:
  * <ul>
  *   <li>{@link ClientError} - the origin answered with a status {@link HttpState#CLIENT_ERROR}
- *       classifies, {@code 400} to {@code 451}</li>
+ *       classifies, {@code 400} to {@code 451}, or with a code from {@code 400} to {@code 499}
+ *       that {@link HttpStatus} has no constant for</li>
  *   <li>{@code UrlFetchException} itself - the origin answered with any other error status: a
  *       {@code 5xx}, or a vendor-specific code such as Nginx's {@code 444} and
- *       {@code 494-499}</li>
+ *       {@code 494-499}; or with a code outside {@code 400} to {@code 499} that
+ *       {@link HttpStatus} has no constant for, whatever its class</li>
  *   <li>{@link Transport} - no response arrived</li>
  *   <li>{@link BodyCapExceeded} - the body of a response that is not an error was larger than
- *       the fetch's cap; an error status raises its own type whatever the size of its body</li>
+ *       the fetch's cap; an error status, or a code {@link HttpStatus} has no constant for,
+ *       raises its own type whatever the size of its body</li>
  *   <li>{@link RateLimited} - the local budget refused the request before it was sent</li>
  * </ul>
  * {@link #getStatus()} does not separate them on its own: a {@link RateLimited} carries a
  * synthetic {@code 429} and a {@link Transport} or {@link BodyCapExceeded} a synthetic
  * {@link HttpStatus#IO_ERROR}.
+ * <p>
+ * {@link #getStatusCode()} is the numeric status. For a code {@link HttpStatus} has no constant
+ * for, it is the code the origin sent and {@link #getStatus()} is
+ * {@link HttpStatus#UNKNOWN_ERROR}; otherwise it is the code of {@link #getStatus()}.
  * <p>
  * Extends {@link ApiException} so URL-fetch failures participate in the same exception family
  * as contract-driven API errors: {@link #getStatus()}, {@link #getHeaders()},
@@ -61,6 +68,30 @@ public class UrlFetchException extends ApiException {
      * status code, the status message and the URL.
      */
     private static final @NotNull String STATUS_MESSAGE = "Origin returned %d %s for URL '%s'";
+
+    /**
+     * The message format of an exception raised for a status code {@link HttpStatus} has no
+     * constant for, taking the status code and the URL.
+     */
+    private static final @NotNull String UNKNOWN_STATUS_MESSAGE = "Origin returned unknown status %d for URL '%s'";
+
+    /**
+     * The lowest code without an {@link HttpStatus} constant that raises a {@link ClientError}.
+     */
+    private static final int CLIENT_ERROR_MIN = 400;
+
+    /**
+     * The highest code without an {@link HttpStatus} constant that raises a {@link ClientError}.
+     */
+    private static final int CLIENT_ERROR_MAX = 499;
+
+    /**
+     * The numeric status - the code the origin answered with, including one {@link HttpStatus}
+     * has no constant for, or the code of the synthetic status a failure without an origin
+     * status carries.
+     */
+    @Getter
+    private final int statusCode;
 
     /**
      * Constructs a new {@code UrlFetchException} with the given context and pre-formatted message.
@@ -88,6 +119,7 @@ public class UrlFetchException extends ApiException {
         @Nullable Object... args
     ) {
         super(cause, NAME, context, args.length == 0 ? message : String.format(message, args), true);
+        this.statusCode = context.status().getCode();
     }
 
     /**
@@ -131,6 +163,21 @@ public class UrlFetchException extends ApiException {
         @Nullable Object... args
     ) {
         super(cause, NAME, context, details, args.length == 0 ? message : String.format(message, args), true);
+        this.statusCode = context.status().getCode();
+    }
+
+    /**
+     * Constructs a new {@code UrlFetchException} for a status code {@link HttpStatus} has no
+     * constant for.
+     *
+     * @param statusCode the status code the origin answered with
+     * @param context the HTTP context bundle, carrying {@link HttpStatus#UNKNOWN_ERROR} in place
+     *                of the code
+     * @param details the network timing snapshot of the exchange
+     */
+    private UrlFetchException(int statusCode, @NotNull ErrorContext context, @NotNull NetworkDetails details) {
+        super(null, NAME, context, details, String.format(UNKNOWN_STATUS_MESSAGE, statusCode, context.requestUrl()), true);
+        this.statusCode = statusCode;
     }
 
     /**
@@ -203,13 +250,52 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
-     * Thrown when the origin answers a fetch with a status {@link HttpState#CLIENT_ERROR}
-     * classifies, {@code 400} to {@code 451}.
+     * Builds the exception a fetch raises when the origin answers with a status code
+     * {@link HttpStatus} has no constant for - a {@link ClientError} for a code from {@code 400}
+     * to {@code 499}, a {@code UrlFetchException} for any other, whatever its class.
      * <p>
-     * {@link #getStatus()} is the status the origin sent, {@link #getBody()} the body it sent
-     * with it, cut at the fetch's body cap, and {@link #getHeaders()} its headers. A fetch
-     * answered from the response cache with such a status raises it as well, with the cached
-     * headers.
+     * Either carries the code as its {@link #getStatusCode()} and
+     * {@link HttpStatus#UNKNOWN_ERROR} as its {@link #getStatus()}.
+     *
+     * @param statusCode the status code the origin answered with
+     * @param url the URL the origin answered
+     * @param responseHeaders the response headers
+     * @param body the response body
+     * @param details the network timing snapshot of the exchange
+     * @return the exception to raise
+     */
+    public static @NotNull UrlFetchException ofUnknownStatus(
+        int statusCode,
+        @NotNull URI url,
+        @NotNull Map<String, Collection<String>> responseHeaders,
+        byte @NotNull [] body,
+        @NotNull NetworkDetails details
+    ) {
+        ErrorContext context = new ErrorContext(
+            HttpStatus.UNKNOWN_ERROR,
+            HttpMethod.GET,
+            url.toString(),
+            responseHeaders,
+            Collections.emptyMap(),
+            body
+        );
+
+        if (statusCode >= CLIENT_ERROR_MIN && statusCode <= CLIENT_ERROR_MAX)
+            return new ClientError(statusCode, context, details);
+
+        return new UrlFetchException(statusCode, context, details);
+    }
+
+    /**
+     * Thrown when the origin answers a fetch with a status {@link HttpState#CLIENT_ERROR}
+     * classifies, {@code 400} to {@code 451}, or with a code from {@code 400} to {@code 499}
+     * that {@link HttpStatus} has no constant for.
+     * <p>
+     * {@link #getStatusCode()} is the code the origin sent and {@link #getStatus()} its
+     * constant, {@link HttpStatus#UNKNOWN_ERROR} for a code without one. {@link #getBody()} is
+     * the body the origin sent with it, cut at the fetch's body cap, and {@link #getHeaders()} its
+     * headers. A fetch answered from the response cache with such a status raises it as well,
+     * with the cached headers.
      */
     public static final class ClientError extends UrlFetchException {
 
@@ -230,6 +316,19 @@ public class UrlFetchException extends ApiException {
                 context.status().getMessage(),
                 context.requestUrl()
             );
+        }
+
+        /**
+         * Constructs a new {@code ClientError} for a status code {@link HttpStatus} has no
+         * constant for.
+         *
+         * @param statusCode the status code the origin answered with
+         * @param context the HTTP context bundle, carrying {@link HttpStatus#UNKNOWN_ERROR} in
+         *                place of the code
+         * @param details the network timing snapshot of the exchange
+         */
+        private ClientError(int statusCode, @NotNull ErrorContext context, @NotNull NetworkDetails details) {
+            super(statusCode, context, details);
         }
 
     }

@@ -74,6 +74,11 @@ class UrlFetcherTest {
     private final AtomicInteger retiredHits = new AtomicInteger();
 
     /**
+     * The requests {@code /unknown-client} has answered.
+     */
+    private final AtomicInteger unknownClientHits = new AtomicInteger();
+
+    /**
      * The {@code X-Variant} values each request {@code /negotiated} answered carried, in the
      * order they arrived.
      */
@@ -193,6 +198,38 @@ class UrlFetcherTest {
             byte[] body = new byte[64 * 1024];
             java.util.Arrays.fill(body, (byte) 'b');
             exchange.sendResponseHeaders(503, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unknown-client", exchange -> {
+            this.unknownClientHits.incrementAndGet();
+            byte[] body = "refused".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(460, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unknown-client-big", exchange -> {
+            byte[] body = new byte[64 * 1024];
+            java.util.Arrays.fill(body, (byte) 'u');
+            exchange.sendResponseHeaders(460, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unknown-server", exchange -> {
+            byte[] body = "odd".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(540, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unknown-success", exchange -> {
+            byte[] body = "odd".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(299, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
             }
@@ -467,8 +504,87 @@ class UrlFetcherTest {
         );
 
         assertThat(raised.getStatus(), is(HttpStatus.NOT_FOUND));
+        assertThat(raised.getStatusCode(), is(404));
         assertThat(new String(raised.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("gone")));
         assertThat(raised.getMessage(), containsString("404"));
+    }
+
+    @Test
+    @DisplayName("A 4xx HttpStatus has no constant for raises ClientError carrying the origin's code and body")
+    void unknownClientErrorStatusRaisesClientError() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> fetcher.get(this.baseUri.resolve("/unknown-client"))
+        );
+
+        assertThat(raised.getStatusCode(), is(460));
+        assertThat(raised.getStatus(), is(HttpStatus.UNKNOWN_ERROR));
+        assertThat(new String(raised.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("refused")));
+        assertThat(raised.getMessage(), containsString("460"));
+        assertThat(raised.getUrl(), is(this.baseUri.resolve("/unknown-client")));
+    }
+
+    @Test
+    @DisplayName("A 4xx HttpStatus has no constant for is never stored, so each fetch of it reaches the origin")
+    void unknownClientErrorStatusIsNeverStored() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        assertThrows(UrlFetchException.ClientError.class, () -> fetcher.bytes(this.baseUri.resolve("/unknown-client")));
+        assertThrows(UrlFetchException.ClientError.class, () -> fetcher.bytes(this.baseUri.resolve("/unknown-client")));
+        assertThat(this.unknownClientHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 4xx HttpStatus has no constant for, with a body larger than the cap, raises ClientError with the body cut at the cap")
+    void unknownClientErrorOverTheCapRaisesClientError() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> fetcher.bytes(this.baseUri.resolve("/unknown-client-big"), 1024)
+        );
+
+        assertThat(raised.getStatusCode(), is(460));
+        assertThat(raised.getBody().orElseThrow().length, is(1024));
+    }
+
+    @Test
+    @DisplayName("A 5xx HttpStatus has no constant for raises a UrlFetchException that is not a ClientError")
+    void unknownServerErrorStatusIsNotAClientError() {
+        UrlFetchException raised = assertThrows(
+            UrlFetchException.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(this.baseUri.resolve("/unknown-server"))
+        );
+
+        assertThat(raised, is(not(instanceOf(UrlFetchException.ClientError.class))));
+        assertThat(raised.getStatusCode(), is(540));
+        assertThat(raised.getStatus(), is(HttpStatus.UNKNOWN_ERROR));
+        assertThat(new String(raised.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("odd")));
+    }
+
+    @Test
+    @DisplayName("A 2xx HttpStatus has no constant for raises a UrlFetchException that is not a ClientError")
+    void unknownSuccessStatusRaises() {
+        UrlFetchException raised = assertThrows(
+            UrlFetchException.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).get(this.baseUri.resolve("/unknown-success"))
+        );
+
+        assertThat(raised, is(not(instanceOf(UrlFetchException.ClientError.class))));
+        assertThat(raised.getStatusCode(), is(299));
+    }
+
+    @Test
+    @DisplayName("A synthetic status carries its own code as the status code")
+    void syntheticStatusCarriesItsCode() {
+        UrlFetchException.BodyCapExceeded raised = assertThrows(
+            UrlFetchException.BodyCapExceeded.class,
+            () -> buildFetcher(1024).bytes(this.baseUri.resolve("/big"))
+        );
+
+        assertThat(raised.getStatusCode(), is(HttpStatus.IO_ERROR.getCode()));
     }
 
     @Test

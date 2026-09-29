@@ -77,7 +77,14 @@ import java.util.TreeMap;
  *       {@link NetworkDetails} carry the whole round trip.</li>
  *   <li>Read the response body capped at the fetch's cap; raise
  *       {@link UrlFetchException.BodyCapExceeded} if the cap is hit, except under an error
- *       status, whose body is cut at the cap so that the status is what the fetch raises.</li>
+ *       status or a code {@link HttpStatus} has no constant for, whose body is cut at the cap
+ *       so that the status is what the fetch raises.</li>
+ *   <li>Raise for a code {@link HttpStatus} has no constant for, as
+ *       {@link UrlFetchException#ofUnknownStatus UrlFetchException.ofUnknownStatus} builds it:
+ *       {@link UrlFetchException.ClientError} for a code from {@code 400} to {@code 499}, a
+ *       {@link UrlFetchException} for any other, each carrying the code as its
+ *       {@link UrlFetchException#getStatusCode() status code}. No response is recorded or
+ *       stored for it.</li>
  *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>
  *   <li>Raise for an {@linkplain Response#isError() error} status, which is never offered to
  *       the cache: {@link UrlFetchException.ClientError} for a {@code 4xx}, a
@@ -370,9 +377,15 @@ public final class UrlFetcher {
                 return this.serveFromCache(url, request, revalidating, true, maxBodyBytes);
             }
 
-            byte[] body = readBody(apacheResponse, url, context, maxBodyBytes, isErrorStatus(statusCode));
-            HttpStatus status = HttpStatus.of(statusCode);
+            Optional<HttpStatus> known = knownStatus(statusCode);
+            boolean raises = known.map(HttpStatus::getState).map(HttpState::isError).orElse(true);
+            byte[] body = readBody(apacheResponse, url, context, maxBodyBytes, raises);
             Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
+
+            if (known.isEmpty())
+                throw UrlFetchException.ofUnknownStatus(statusCode, url, headers, body, new NetworkDetails(context));
+
+            HttpStatus status = known.get();
 
             Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
                 status,
@@ -540,17 +553,17 @@ public final class UrlFetcher {
     }
 
     /**
-     * Tells whether a status code the origin answered is an {@linkplain HttpState#isError() error},
-     * answering {@code false} for a code {@link HttpStatus} has no constant for.
+     * Resolves the {@link HttpStatus} constant of a status code the origin answered.
      *
      * @param statusCode the status code
-     * @return {@code true} when the code's state is an error
+     * @return the constant for {@code statusCode}, or {@link Optional#empty()} when
+     *         {@link HttpStatus} has none
      */
-    private static boolean isErrorStatus(int statusCode) {
+    private static @NotNull Optional<HttpStatus> knownStatus(int statusCode) {
         try {
-            return HttpStatus.of(statusCode).getState().isError();
+            return Optional.of(HttpStatus.of(statusCode));
         } catch (IllegalArgumentException ex) {
-            return false;
+            return Optional.empty();
         }
     }
 
