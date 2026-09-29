@@ -711,6 +711,23 @@ public interface Response<T> {
         }
 
         /**
+         * Reads the instant this response was generated from its {@code Date} header, or takes
+         * the instant it was received when it carries no {@code Date} that parses, per
+         * <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.2">RFC 7231
+         * §7.1.1.2</a>.
+         * <p>
+         * {@link #currentAge(Instant)} measures the response's apparent age from it, and
+         * {@link ResponseCache#lookup} answers a request that several variants match with the
+         * one whose date is the most recent.
+         *
+         * @return the instant this response was generated
+         */
+        public @NotNull Instant date() {
+            return HttpDates.parseFromHeaders(this.getHeaders(), "Date")
+                .orElseGet(() -> this.getDetails().getRoundTrip().completedAt());
+        }
+
+        /**
          * Computes this response's current age per
          * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3">RFC 7234
          * Section 4.2.3</a>, anchored on the {@link NetworkDetails#getRoundTrip()} bookends of
@@ -728,7 +745,7 @@ public interface Response<T> {
         public @NotNull Duration currentAge(@NotNull Instant now) {
             Instant requestTime = this.getDetails().getRoundTrip().startedAt();
             Instant responseTime = this.getDetails().getRoundTrip().completedAt();
-            Instant dateValue = HttpDates.parseFromHeaders(this.getHeaders(), "Date").orElse(responseTime);
+            Instant dateValue = this.date();
             long ageValueSeconds = this.ageHeaderSeconds();
 
             long apparentAge = Math.max(0L, Duration.between(dateValue, responseTime).getSeconds());

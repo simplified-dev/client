@@ -36,16 +36,6 @@ Open items in `client`. Each stays here until it is closed or accepted.
 > - Type: **RISK**
 > - Status: **OPEN**
 
-> #### Variants stored under different `Vary` sets can both match one request
-> `lookup` returns the first variant whose fingerprint matches, and variants of one URL are held in a
-> map with no order. When an origin changes the headers its `Vary` names for a URL, variants stored
-> under the old and the new set can both match a request, and which one answers is unspecified
-> rather than the most recent by `Date`, as RFC 7234 section 4.1 asks.
->
-> - Affected: `src/main/java/dev/simplified/client/cache/ResponseCache.java:283` - `lookup`
-> - Type: **GAP**
-> - Status: **OPEN**
-
 > #### A 304 carrying a different `Vary` strands its variant
 > `updateOn304` refreshes a variant under the fingerprint it was stored with and overlays the 304's
 > headers, a new `Vary` included. `lookup` fingerprints a request by the refreshed entry's `Vary`,

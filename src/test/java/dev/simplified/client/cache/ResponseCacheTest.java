@@ -16,10 +16,13 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -71,6 +74,13 @@ class ResponseCacheTest {
     private static final String URL = "https://127.0.0.1:0/resource";
 
     private static final byte[] BODY = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+
+    /**
+     * Formats an instant as the IMF-fixdate an origin sends in {@code Date}.
+     */
+    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter
+        .ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+        .withZone(ZoneOffset.UTC);
 
     /**
      * The time Caffeine measures bucket lifetimes against, advanced by hand.
@@ -133,13 +143,7 @@ class ResponseCacheTest {
      * @return the headers with the round trip added
      */
     private static String[] receivedNow(String... headerPairs) {
-        String now = Instant.now().toString();
-        String[] stamped = Arrays.copyOf(headerPairs, headerPairs.length + 4);
-        stamped[headerPairs.length] = NetworkDetails.REQUEST_START;
-        stamped[headerPairs.length + 1] = now;
-        stamped[headerPairs.length + 2] = NetworkDetails.RESPONSE_RECEIVED;
-        stamped[headerPairs.length + 3] = now;
-        return stamped;
+        return receivedAt(Instant.now(), headerPairs);
     }
 
     private static Map<String, Collection<String>> headers(String... pairs) {
@@ -249,8 +253,85 @@ class ResponseCacheTest {
      * @param headerPairs the answer's headers, as alternating names and values
      */
     private static void storeDirectly(ResponseCache cache, String... headerPairs) {
-        Request request = Request.create(Request.HttpMethod.GET, URL, headers(), null, StandardCharsets.UTF_8, null);
+        storeDirectly(cache, headers(), headerPairs);
+    }
+
+    /**
+     * Offers an answer to a {@code GET} of the test resource carrying the given request headers
+     * straight to the given cache, as the decoder offers a live one.
+     *
+     * @param cache the cache to offer the answer to
+     * @param requestHeaders the headers of the request the answer responds to
+     * @param headerPairs the answer's headers, as alternating names and values
+     */
+    private static void storeDirectly(ResponseCache cache, Map<String, Collection<String>> requestHeaders, String... headerPairs) {
+        Request request = Request.create(Request.HttpMethod.GET, URL, requestHeaders, null, StandardCharsets.UTF_8, null);
         cache.store(new Response.Impl<>(answer(request, 200, headerPairs), () -> BODY), BODY, request.headers());
+    }
+
+    /**
+     * Returns the given headers followed by a request start and a response received both set to
+     * the given instant.
+     *
+     * @param received the instant the answer was sent for and received
+     * @param headerPairs the headers, as alternating names and values
+     * @return the headers with the round trip added
+     */
+    private static String[] receivedAt(Instant received, String... headerPairs) {
+        String[] stamped = Arrays.copyOf(headerPairs, headerPairs.length + 4);
+        stamped[headerPairs.length] = NetworkDetails.REQUEST_START;
+        stamped[headerPairs.length + 1] = received.toString();
+        stamped[headerPairs.length + 2] = NetworkDetails.RESPONSE_RECEIVED;
+        stamped[headerPairs.length + 3] = received.toString();
+        return stamped;
+    }
+
+    /**
+     * Returns the headers of an answer varying on {@code Accept}, tagged {@code "accept"}, carrying
+     * the given further headers and received at the given instant.
+     *
+     * @param received the instant the answer was received
+     * @param headerPairs the answer's further headers, as alternating names and values
+     * @return the answer's headers
+     */
+    private static String[] varyingOnAccept(Instant received, String... headerPairs) {
+        return varying("Accept", "\"accept\"", received, headerPairs);
+    }
+
+    /**
+     * Returns the headers of an answer varying on {@code Accept-Language}, tagged
+     * {@code "language"}, carrying the given further headers and received at the given instant.
+     *
+     * @param received the instant the answer was received
+     * @param headerPairs the answer's further headers, as alternating names and values
+     * @return the answer's headers
+     */
+    private static String[] varyingOnLanguage(Instant received, String... headerPairs) {
+        return varying("Accept-Language", "\"language\"", received, headerPairs);
+    }
+
+    private static String[] varying(String vary, String etag, Instant received, String... headerPairs) {
+        String[] fixed = { "Vary", vary, "ETag", etag, "Cache-Control", "max-age=60" };
+        String[] joined = Arrays.copyOf(fixed, fixed.length + headerPairs.length);
+        System.arraycopy(headerPairs, 0, joined, fixed.length, headerPairs.length);
+        return receivedAt(received, joined);
+    }
+
+    /**
+     * Stores the given answers, in order, in a new cache, each answering one request carrying
+     * both {@code Accept} and {@code Accept-Language}, and looks that request up.
+     *
+     * @param variants the headers of each answer, as alternating names and values
+     * @return the {@code ETag} of the variant the lookup answers with
+     */
+    private Collection<String> answering(String[]... variants) {
+        ResponseCache cache = new ResponseCache(1L << 20, 3_600_000L, this.ticks::get);
+        Map<String, Collection<String>> request = headers("Accept", "a", "Accept-Language", "en");
+
+        for (String[] variant : variants)
+            storeDirectly(cache, request, variant);
+
+        return cache.lookup(HttpMethod.GET, URL, request).orElseThrow().response().getHeaders().get("ETag");
     }
 
     @Test
@@ -752,6 +833,40 @@ class ResponseCacheTest {
             this.cache.lookup(HttpMethod.GET, URL, headers("Accept", "b")).orElseThrow().response().getHeaders().get("Cache-Control"),
             contains("max-age=60")
         );
+    }
+
+    @Test
+    @DisplayName("Of variants stored under different Vary sets that both match a request, the one with the latest Date answers")
+    void latestDateAnswersAmongMatchingVariants() {
+        Instant now = Instant.now();
+        String latest = HTTP_DATE.format(now);
+        String earlier = HTTP_DATE.format(now.minusSeconds(60));
+
+        assertThat(this.answering(varyingOnAccept(now, "Date", latest), varyingOnLanguage(now, "Date", earlier)), contains("\"accept\""));
+        assertThat(this.answering(varyingOnAccept(now, "Date", earlier), varyingOnLanguage(now, "Date", latest)), contains("\"language\""));
+    }
+
+    @Test
+    @DisplayName("A matching variant with no Date is dated by when it was received")
+    void variantWithoutDateIsDatedByItsReceipt() {
+        Instant now = Instant.now();
+        Instant earlier = now.minusSeconds(60);
+
+        assertThat(this.answering(varyingOnAccept(earlier, "Date", HTTP_DATE.format(earlier)), varyingOnLanguage(now)), contains("\"language\""));
+        assertThat(this.answering(varyingOnAccept(now, "Date", HTTP_DATE.format(now)), varyingOnLanguage(earlier)), contains("\"accept\""));
+    }
+
+    @Test
+    @DisplayName("Matching variants with the same Date are told apart by when each was received, and then by their fingerprints")
+    void matchingVariantsWithOneDateAreOrderedDeterministically() {
+        Instant now = Instant.now();
+        Instant earlier = now.minusMillis(500);
+        String date = HTTP_DATE.format(now);
+
+        assertThat(this.answering(varyingOnAccept(now, "Date", date), varyingOnLanguage(earlier, "Date", date)), contains("\"accept\""));
+        assertThat(this.answering(varyingOnAccept(earlier, "Date", date), varyingOnLanguage(now, "Date", date)), contains("\"language\""));
+        assertThat(this.answering(varyingOnAccept(now, "Date", date), varyingOnLanguage(now, "Date", date)), contains("\"language\""));
+        assertThat(this.answering(varyingOnLanguage(now, "Date", date), varyingOnAccept(now, "Date", date)), contains("\"language\""));
     }
 
     @Test

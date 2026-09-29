@@ -19,6 +19,7 @@ import org.jetbrains.annotations.Nullable;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -46,7 +47,8 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.1">RFC 7234 §4.1</a>. A
  * variant is held under the {@link CacheKey.VaryFingerprint fingerprint} of the request that
  * produced it - that request's values of the headers its response's {@code Vary} names - and
- * answers a later request only when that request carries the same values. Callers pass a
+ * answers a later request only when that request carries the same values; of several variants
+ * one request matches, the most recent by {@code Date} answers. Callers pass a
  * request's headers as the request leaves the client, the client's configured static and
  * dynamic headers included, to {@link #store}, {@link #lookup} and {@link #updateOn304} alike. A
  * response that varies on a header the transport sets below the cache with a value those
@@ -187,6 +189,17 @@ public final class ResponseCache {
      * which bounds the records a client that mutates many URLs holds.
      */
     static final int INVALIDATION_RECORD_LIMIT = 1024;
+
+    /**
+     * Orders the variants of one URL from the least to the most recent: by the
+     * {@linkplain Response.CachedImpl#date() date} each response was generated, then by the
+     * instant each was received, then by the headers and values of the fingerprint each is held
+     * under, which no two variants of one bucket share.
+     */
+    private static final @NotNull Comparator<Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>>> RECENCY = Comparator
+        .<Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>>, Instant>comparing(variant -> variant.getValue().response().date())
+        .thenComparing(variant -> variant.getValue().response().getDetails().getRoundTrip().completedAt())
+        .thenComparing(variant -> ordering(variant.getKey()));
 
     /**
      * The Caffeine-backed two-level cache of URL bucket -> Vary variants.
@@ -346,11 +359,14 @@ public final class ResponseCache {
      * {@link Response.CachedImpl#varyHeaderNames() Vary} names - equals the values of the same
      * headers in {@code requestHeaders}, per
      * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.1">RFC 7234 §4.1</a>. A
-     * variant whose response has no {@code Vary} matches every request. When variants stored
-     * under different {@code Vary} header sets both match, which one is returned is unspecified.
-     * Returns {@link Optional#empty()} if no bucket or variant matches. Freshness and
-     * revalidation decisions are the caller's responsibility (typically
-     * {@link CachingFeignClient}).
+     * variant whose response has no {@code Vary} matches every request. When several variants
+     * match - variants stored under different {@code Vary} header sets, after an origin changed
+     * the headers it varies a URL on - the most recent answers: the one whose response's
+     * {@linkplain Response.CachedImpl#date() date} is the latest, then the one received last,
+     * then the one whose fingerprint orders last by header name and value, so the answer never
+     * depends on the order the bucket holds its variants in. Returns {@link Optional#empty()} if
+     * no bucket or variant matches. Freshness and revalidation decisions are the caller's
+     * responsibility (typically {@link CachingFeignClient}).
      *
      * @param method the HTTP method of the lookup request
      * @param url the raw URL of the lookup request (will be canonicalized internally)
@@ -369,14 +385,11 @@ public final class ResponseCache {
         if (variants == null || variants.isEmpty())
             return Optional.empty();
 
-        for (Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>> variant : variants.entrySet()) {
-            Set<String> varyNames = variant.getValue().response().varyHeaderNames();
-
-            if (CacheKey.VaryFingerprint.of(varyNames, requestHeaders).equals(variant.getKey()))
-                return Optional.of(variant.getValue());
-        }
-
-        return Optional.empty();
+        return variants.entrySet()
+            .stream()
+            .filter(variant -> CacheKey.VaryFingerprint.of(variant.getValue().response().varyHeaderNames(), requestHeaders).equals(variant.getKey()))
+            .max(RECENCY)
+            .map(Map.Entry::getValue);
     }
 
     /**
@@ -676,6 +689,21 @@ public final class ResponseCache {
 
         bucket.put(fingerprint, entry);
         return bucket;
+    }
+
+    /**
+     * Renders a fingerprint as the key {@link #RECENCY} orders variants by when neither their
+     * dates nor their receipts tell them apart: each header name the fingerprint holds, in
+     * order, with the request's value of it, every name and value closed by a {@code NUL}, which
+     * no header name or value carries.
+     *
+     * @param fingerprint the fingerprint a variant is held under
+     * @return the fingerprint's headers and values as one string
+     */
+    private static @NotNull String ordering(@NotNull CacheKey.VaryFingerprint fingerprint) {
+        StringBuilder ordering = new StringBuilder();
+        fingerprint.values().forEach((name, value) -> ordering.append(name).append('\0').append(value).append('\0'));
+        return ordering.toString();
     }
 
     /**
