@@ -9,6 +9,7 @@ import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.InternalErrorDecoder;
 import dev.simplified.client.decoder.InternalResponseDecoder;
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.RetryableApiException;
 import dev.simplified.client.factory.ApacheClientFactory;
 import dev.simplified.client.factory.TimedConnectionOperator;
@@ -30,22 +31,15 @@ import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.gson.GsonSettings;
 import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
-import feign.RequestTemplate;
-import feign.Target;
 import feign.codec.DecodeException;
 import feign.hc5.ApacheHttp5Client;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 /**
  * Feign-backed HTTP client providing connection pooling, rate limiting, route discovery,
@@ -338,9 +332,10 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * {@link RateLimitingFeignClient}, which enforces and counts the client-side rate limit on
      * each request sent, and that in a {@link CachingFeignClient} so that RFC 7234 fresh-hit
      * short-circuiting, conditional revalidation, and unsafe-method invalidation happen
-     * transparently below Feign; a request the cache answers never reaches the rate limit. Its
-     * {@link ConfiguredHeadersTarget target} adds the configured static and dynamic headers to
-     * each request Feign builds, so the cache sees the headers the transport sends. The
+     * transparently below Feign; a request the cache answers never reaches the rate limit. The
+     * {@link CachingFeignClient} also adds the configured static and dynamic headers to each
+     * request it sends, keying the cache by their fingerprints, so the request Feign builds - the
+     * one Feign logs and an {@link ErrorContext} records - carries none of their values. The
      * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
      * {@linkplain ClientConfig#getDecoderFactory() decoder factory} from the options are
      * each invoked once with the configured {@link Gson Gson}.
@@ -361,7 +356,12 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             this.getRateLimitManager(),
             this.getRouteDiscovery()
         );
-        feign.Client cachingClient = new CachingFeignClient(rateLimitedClient, this.responseCache);
+        feign.Client cachingClient = new CachingFeignClient(
+            rateLimitedClient,
+            this.responseCache,
+            this.options.getHeaders(),
+            this.options.getDynamicHeaders()
+        );
         InternalErrorDecoder errorDecoder = new InternalErrorDecoder(
             this.options.getErrorDecoder(),
             this.getRouteDiscovery(),
@@ -394,7 +394,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             ))
             .doNotCloseAfterDecode()
             .decodeVoid()
-            .target(new ConfiguredHeadersTarget<>(this.options));
+            .target(this.options.getTarget(), "https://placeholder");
     }
 
     /**
@@ -437,67 +437,6 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                 }
             }
         );
-    }
-
-    /**
-     * Feign target that adds the client's configured headers to every request it builds.
-     * <p>
-     * A request carries its contract's headers, then each configured static header, then the
-     * present value of each dynamic header, whose supplier is read once for that request. Feign
-     * sends the request through {@link CachingFeignClient} and hands it to the decoder with its
-     * answer, so {@link ResponseCache} looks up, stores and revalidates a variant by the header
-     * values the transport sends, a rotated dynamic value included.
-     *
-     * @param <C> the contract interface type
-     */
-    private static final class ConfiguredHeadersTarget<C extends Contract> extends Target.HardCodedTarget<C> {
-
-        /**
-         * The static headers every request carries.
-         */
-        private final @NotNull Map<String, String> headers;
-
-        /**
-         * The dynamic headers a request carries when their supplier yields a value.
-         */
-        private final @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders;
-
-        /**
-         * Constructs a target for the contract of the given options, adding their headers.
-         *
-         * @param options the client's configuration
-         */
-        ConfiguredHeadersTarget(@NotNull ClientConfig<C> options) {
-            super(options.getTarget(), "https://placeholder");
-            this.headers = options.getHeaders();
-            this.dynamicHeaders = options.getDynamicHeaders();
-        }
-
-        /** {@inheritDoc} */
-        @Override
-        public feign.Request apply(RequestTemplate input) {
-            feign.Request request = super.apply(input);
-
-            if (this.headers.isEmpty() && this.dynamicHeaders.isEmpty())
-                return request;
-
-            Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            request.headers().forEach((name, values) -> headers.put(name, new ArrayList<>(values)));
-            this.headers.forEach((name, value) -> headers.computeIfAbsent(name, key -> new ArrayList<>()).add(value));
-            this.dynamicHeaders.forEach((name, supplier) -> supplier.get()
-                .ifPresent(value -> headers.computeIfAbsent(name, key -> new ArrayList<>()).add(value))
-            );
-
-            return feign.Request.create(
-                request.httpMethod(),
-                request.url(),
-                headers,
-                request.body(),
-                request.charset(),
-                request.requestTemplate()
-            );
-        }
-
     }
 
 }

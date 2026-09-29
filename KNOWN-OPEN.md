@@ -2,17 +2,6 @@
 
 Open items in `client`. Each stays here until it is closed or accepted.
 
-> #### Configured credentials sit on the `feign.Request`
-> `Client` adds its configured static and dynamic headers - an `Authorization` or `API-Key` among
-> them - to each request Feign builds, so the cache fingerprints the values the origin receives.
-> Those values are now part of the `feign.Request`, and its `toString()`, a Feign `HEADERS` logger
-> and `ErrorContext`'s record `toString()` would print them. Nothing in the workspace logs any of
-> these today.
->
-> - Affected: `src/main/java/dev/simplified/client/Client.java:432` - `ConfiguredHeadersTarget`
-> - Type: **RISK**
-> - Status: **OPEN**
-
 > #### Fetchers sharing one cache with different static queries share entries
 > `ApacheClientFactory` appends a client's static query parameters below the cache, after the URL
 > key a lookup or store uses has been formed, so the key carries none of them. Two `UrlFetcher`s

@@ -59,10 +59,11 @@ import java.util.function.Supplier;
  * For non-streaming types, a {@link Response.Impl} envelope is built around the original
  * anchor (used for status / headers / request) plus a body supplier that closes over the
  * captured bytes; the typed body is materialized on demand via the envelope's
- * {@link Response.Impl#getBody()}. The envelope, the captured bytes and the headers of the
- * request Feign sent for it - the contract's headers and the client's configured ones - are
- * then offered to {@link ResponseCache#store}, which applies the RFC 7234 §3 storage predicate
- * and either stores the entry, as the variant for those request headers, or drops it. The
+ * {@link Response.Impl#getBody()}. The envelope, the captured bytes and the headers the cache
+ * keys the request by - {@link CachingFeignClient#keyHeaders(feign.Response)}: the contract's
+ * headers and the fingerprint of each of the client's configured values - are then offered to
+ * {@link ResponseCache#store}, which applies the RFC 7234 §3 storage predicate and either stores
+ * the entry, as the variant for those request headers, or drops it. The
  * envelope is always passed to {@link ResponseCache#recordLastResponse(Response)} regardless
  * of caching decisions so that {@link Client#getLastResponse() Client.getLastResponse()}
  * observes every outcome.
@@ -230,7 +231,7 @@ public final class InternalResponseDecoder implements Decoder {
                         return this.decodeBody(feignResponse, capturedBody, finalBodyType);
                     } catch (RuntimeException ex) {
                         feign.Request request = feignResponse.request();
-                        this.responseCache.discard(HttpMethod.of(request.httpMethod().name()), request.url(), request.headers(), capturedBody);
+                        this.responseCache.discard(HttpMethod.of(request.httpMethod().name()), request.url(), CachingFeignClient.keyHeaders(feignResponse), capturedBody);
                         throw ex;
                     }
                 };
@@ -240,7 +241,7 @@ public final class InternalResponseDecoder implements Decoder {
             this.responseCache.recordLastResponse(response);
 
             if (shouldWrap) {
-                this.responseCache.store(response, bodyData, feignResponse.request().headers());
+                this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
                 return response;
             }
 
@@ -253,7 +254,7 @@ public final class InternalResponseDecoder implements Decoder {
                 throw ex;
             }
 
-            this.responseCache.store(response, bodyData, feignResponse.request().headers());
+            this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
             return body;
         } finally {
             Util.ensureClosed(feignResponse.body());

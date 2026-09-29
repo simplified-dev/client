@@ -54,7 +54,9 @@ import java.util.function.Function;
  * answers a later request only when that request carries the same values; of several variants
  * one request matches, the most recent by {@code Date} answers. Callers pass a
  * request's headers as the request leaves the client, the client's configured static and
- * dynamic headers included, to {@link #store}, {@link #lookup} and {@link #updateOn304} alike. A
+ * dynamic headers included - each as its value, or, as {@link CachingFeignClient} passes them, as
+ * its {@linkplain CacheKey#fingerprint(String) fingerprint} - to {@link #store}, {@link #lookup}
+ * and {@link #updateOn304} alike. A
  * response that varies on a header the transport sets below the cache with a value those
  * headers do not fix is not stored.
  * <p>

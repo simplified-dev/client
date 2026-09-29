@@ -8,8 +8,13 @@ import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.collection.tuple.pair.Pair;
 import org.jetbrains.annotations.NotNull;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Locale;
@@ -35,11 +40,52 @@ import java.util.TreeMap;
  * {@link Concurrent#toUnmodifiableTreeMap(java.util.Comparator) toUnmodifiableSortedMap}
  * collector, inheriting content-based equality through the
  * {@code dev.simplified.collection.atomic.AtomicMap#equals(Object)} delegate.
+ * <p>
+ * {@link #fingerprint(String)} computes the stand-in a key holds for a value configured on a
+ * client, so a key never holds the value itself.
  *
  * @see ResponseCache
  */
 @NoArgsConstructor(access = AccessLevel.PRIVATE)
 public final class CacheKey {
+
+    /**
+     * The key {@link #fingerprint(String)} signs values under, drawn at random once per JVM.
+     */
+    private static final @NotNull SecretKeySpec FINGERPRINT_KEY = randomKey();
+
+    /**
+     * Computes the stand-in a cache key holds for a value configured on a client, in place of the
+     * value itself.
+     * <p>
+     * The fingerprint is an HMAC-SHA256 of the value under a key drawn at random once per JVM,
+     * encoded as unpadded Base64url. Within one JVM equal values have equal fingerprints, so a
+     * variant keyed by the fingerprint of a value answers every request carrying that value, and
+     * nothing that prints a fingerprint discloses the value.
+     *
+     * @param value the configured value
+     * @return the value's fingerprint
+     */
+    public static @NotNull String fingerprint(@NotNull String value) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(FINGERPRINT_KEY);
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (GeneralSecurityException ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    /**
+     * Draws the key {@link #fingerprint(String)} signs values under.
+     *
+     * @return a random 256-bit HMAC-SHA256 key
+     */
+    private static @NotNull SecretKeySpec randomKey() {
+        byte[] key = new byte[32];
+        new SecureRandom().nextBytes(key);
+        return new SecretKeySpec(key, "HmacSHA256");
+    }
 
     /**
      * Canonical identifier for an HTTP response keyed by method and canonicalized URL.
