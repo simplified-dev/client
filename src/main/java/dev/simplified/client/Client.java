@@ -19,6 +19,7 @@ import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
+import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.route.DynamicRoute;
@@ -339,7 +340,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * each invoked once with the configured {@link Gson Gson}.
      * {@link feign.Feign.Builder#doNotCloseAfterDecode()} is set so that
      * {@link InternalResponseDecoder} can manage response body lifecycle for
-     * {@link InputStream} return types.
+     * {@link InputStream} return types, and {@link feign.Feign.Builder#decodeVoid()} so that a
+     * {@code void} contract method reaches it too, raising for a status code {@link HttpStatus}
+     * has no constant for as every other return type does.
      * <p>
      * The returned proxy is subsequently wrapped by {@link #wrapContractProxy(Contract)} to
      * strip internal exception wrappers before they reach callers.
@@ -379,6 +382,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                 true
             ))
             .doNotCloseAfterDecode()
+            .decodeVoid()
             .target(new ConfiguredHeadersTarget<>(this.options));
     }
 

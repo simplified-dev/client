@@ -1,6 +1,5 @@
 package dev.simplified.client.decoder;
 
-import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
@@ -84,7 +83,14 @@ import java.util.function.Supplier;
  * so the contract method raises the client's {@link ApiException} carrying the code as
  * {@link ApiException#getStatusCode()} and {@link HttpStatus#UNKNOWN_ERROR} as
  * {@link ApiException#getStatus()}. The exception is recorded as the last response, as an
- * error status's is, and nothing is stored for it.
+ * error status's is, and nothing is stored for it. A decoder built without an error decoder
+ * hands such a response to Feign's {@link ErrorDecoder.Default}, as a Feign builder given no
+ * error decoder raises an error status.
+ * <p>
+ * A {@code void} return type decodes to {@code null} and records nothing, and a response to it
+ * whose status code {@link HttpStatus} has no constant for raises as it does for any other
+ * return type. The Feign builder hands this decoder a {@code void} return type only under
+ * {@link feign.Feign.Builder#decodeVoid()}, which {@link Client} sets.
  * <p>
  * This decoder requires {@link feign.Feign.Builder#doNotCloseAfterDecode()} to be set
  * on the Feign builder so that {@link InputStream} responses are not prematurely closed
@@ -99,7 +105,6 @@ import java.util.function.Supplier;
  * @see NetworkDetails
  * @see Response
  */
-@RequiredArgsConstructor
 public final class InternalResponseDecoder implements Decoder {
 
     /**
@@ -119,9 +124,41 @@ public final class InternalResponseDecoder implements Decoder {
 
     /**
      * The error decoder that raises a response whose status code {@link HttpStatus} has no
-     * constant for, the client's {@link InternalErrorDecoder}.
+     * constant for - the client's {@link InternalErrorDecoder}, or Feign's
+     * {@link ErrorDecoder.Default} for a decoder built without one.
      */
     private final @NotNull ErrorDecoder errorDecoder;
+
+    /**
+     * Constructs a new {@code InternalResponseDecoder} that hands a response whose status code
+     * {@link HttpStatus} has no constant for to Feign's {@link ErrorDecoder.Default}.
+     *
+     * @param delegate the inner decoder that performs JSON deserialization
+     * @param responseCache the shared response cache used for observability and storage
+     */
+    public InternalResponseDecoder(@NotNull Decoder delegate, @NotNull ResponseCache responseCache) {
+        this(delegate, responseCache, new ErrorDecoder.Default());
+    }
+
+    /**
+     * Constructs a new {@code InternalResponseDecoder} that hands a response whose status code
+     * {@link HttpStatus} has no constant for to {@code errorDecoder}.
+     *
+     * @param delegate the inner decoder that performs JSON deserialization
+     * @param responseCache the shared response cache used for observability and storage
+     * @param errorDecoder the error decoder that raises a response whose status code
+     *                     {@link HttpStatus} has no constant for, the client's
+     *                     {@link InternalErrorDecoder}
+     */
+    public InternalResponseDecoder(
+        @NotNull Decoder delegate,
+        @NotNull ResponseCache responseCache,
+        @NotNull ErrorDecoder errorDecoder
+    ) {
+        this.delegate = delegate;
+        this.responseCache = responseCache;
+        this.errorDecoder = errorDecoder;
+    }
 
     /**
      * {@inheritDoc}
@@ -135,6 +172,11 @@ public final class InternalResponseDecoder implements Decoder {
                 throw unchecked;
 
             throw new DecodeException(feignResponse.status(), raised.getMessage(), feignResponse.request(), raised);
+        }
+
+        if (type == void.class || type == Void.class) {
+            Util.ensureClosed(feignResponse.body());
+            return null;
         }
 
         Type bodyType = type;

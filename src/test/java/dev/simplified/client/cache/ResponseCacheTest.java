@@ -11,7 +11,6 @@ import feign.Param;
 import feign.Request;
 import feign.RequestLine;
 import feign.codec.Decoder;
-import feign.codec.ErrorDecoder;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -107,7 +106,7 @@ class ResponseCacheTest {
                 },
                 this.cache
             ))
-            .decoder(new InternalResponseDecoder(new Decoder.Default(), this.cache, new ErrorDecoder.Default()))
+            .decoder(new InternalResponseDecoder(new Decoder.Default(), this.cache))
             .target(contract, "https://127.0.0.1:0");
     }
 

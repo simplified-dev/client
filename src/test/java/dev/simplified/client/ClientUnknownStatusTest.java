@@ -17,6 +17,8 @@ import org.junit.jupiter.api.function.Executable;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -24,8 +26,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.sameInstance;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -46,6 +50,9 @@ class ClientUnknownStatusTest {
 
         @RequestLine("GET /resource")
         InputStream stream();
+
+        @RequestLine("GET /resource")
+        void touch();
 
     }
 
@@ -76,12 +83,31 @@ class ClientUnknownStatusTest {
      */
     private final AtomicInteger status = new AtomicInteger(200);
 
-    private final Client<Resource> client = new Client<>(
-        ClientConfig.builder(Resource.class, GsonSettings.builder().build())
-            .withErrorDecoder(OriginException::new)
-            .build(),
-        this::answer
-    );
+    /**
+     * The headers every {@code GET} is answered with.
+     */
+    private Map<String, Collection<String>> headers = Map.of();
+
+    /**
+     * The {@code GET} requests answered.
+     */
+    private final AtomicInteger answered = new AtomicInteger();
+
+    private final Client<Resource> client = this.newClient();
+
+    /**
+     * Builds a client over the scripted transport, with an error decoder of its own.
+     *
+     * @return the client
+     */
+    private Client<Resource> newClient() {
+        return new Client<>(
+            ClientConfig.builder(Resource.class, GsonSettings.builder().build())
+                .withErrorDecoder(OriginException::new)
+                .build(),
+            this::answer
+        );
+    }
 
     /**
      * Answers a {@code GET} with the scripted status and a JSON body; answers anything else, the
@@ -94,11 +120,14 @@ class ClientUnknownStatusTest {
     private feign.Response answer(Request request, Request.Options options) {
         boolean scripted = request.httpMethod() == Request.HttpMethod.GET;
 
+        if (scripted)
+            this.answered.incrementAndGet();
+
         return feign.Response.builder()
             .status(scripted ? this.status.get() : 200)
             .reason("")
             .request(request)
-            .headers(Map.of())
+            .headers(scripted ? this.headers : Map.of())
             .body(scripted ? BODY.getBytes(StandardCharsets.UTF_8) : new byte[0])
             .build();
     }
@@ -159,6 +188,40 @@ class ClientUnknownStatusTest {
         assertThat(new String(raw.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo(BODY)));
         assertThat(typed.getStatusCode(), is(218));
         assertThat(stream.getStatusCode(), is(218));
+    }
+
+    @Test
+    @DisplayName("A 2xx HttpStatus has no constant for raises from a void contract method as from any other")
+    void unknownSuccessRaisesFromAVoidMethod() {
+        OriginException raised = this.raise(218, () -> this.client.getContract().touch());
+
+        assertThat(raised.getStatusCode(), is(218));
+        assertThat(raised.getStatus(), is(HttpStatus.UNKNOWN_ERROR));
+        assertThat(this.client.getLastResponse().orElseThrow(), is(sameInstance(raised)));
+    }
+
+    @Test
+    @DisplayName("A void contract method answered with a 2xx HttpStatus names returns")
+    void knownSuccessReturnsFromAVoidMethod() {
+        this.status.set(204);
+
+        assertDoesNotThrow(() -> this.client.getContract().touch());
+    }
+
+    @Test
+    @DisplayName("A 2xx HttpStatus has no constant for, sent with Retry-After, is retried and raised as an error status is")
+    void unknownSuccessWithRetryAfterRetriesAsAnErrorStatusDoes() {
+        this.headers = Map.of("Retry-After", List.of("0"));
+        Client<Resource> other = this.newClient();
+
+        OriginException error = this.raise(460, () -> this.client.getContract().raw());
+        int errorAttempts = this.answered.getAndSet(0);
+        OriginException success = this.raise(218, () -> other.getContract().raw());
+
+        assertThat(errorAttempts, is(greaterThan(1)));
+        assertThat(this.answered.get(), is(errorAttempts));
+        assertThat(success.getStatusCode(), is(218));
+        assertThat(success.getRetryAttempts(), is(error.getRetryAttempts()));
     }
 
     @Test
