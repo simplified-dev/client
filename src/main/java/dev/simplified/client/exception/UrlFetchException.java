@@ -26,12 +26,12 @@ import java.util.Map;
  * Each cause has its own type, so a caller tells them apart by the type it catches:
  * <ul>
  *   <li>{@link ClientError} - the origin answered with a status {@link HttpState#CLIENT_ERROR}
- *       classifies, {@code 400} to {@code 451}, or with a code from {@code 400} to {@code 499}
- *       that {@link HttpStatus} has no constant for</li>
+ *       classifies, {@code 400} to {@code 451}, or with a {@code 4xx} code {@link HttpStatus}
+ *       has no constant for, outside the Nginx range {@code 494-499}</li>
  *   <li>{@code UrlFetchException} itself - the origin answered with any other error status: a
  *       {@code 5xx}, or a vendor-specific code such as Nginx's {@code 444} and
- *       {@code 494-499}; or with a code outside {@code 400} to {@code 499} that
- *       {@link HttpStatus} has no constant for, whatever its class</li>
+ *       {@code 494-499}; or with any other code {@link HttpStatus} has no constant for,
+ *       whatever its class</li>
  *   <li>{@link Transport} - no response arrived</li>
  *   <li>{@link BodyCapExceeded} - the body of a response that is not an error was larger than
  *       the fetch's cap; an error status, or a code {@link HttpStatus} has no constant for,
@@ -76,12 +76,12 @@ public class UrlFetchException extends ApiException {
     private static final @NotNull String UNKNOWN_STATUS_MESSAGE = "Origin returned unknown status %d for URL '%s'";
 
     /**
-     * The lowest code without an {@link HttpStatus} constant that raises a {@link ClientError}.
+     * The lowest code of the {@code 4xx} class.
      */
     private static final int CLIENT_ERROR_MIN = 400;
 
     /**
-     * The highest code without an {@link HttpStatus} constant that raises a {@link ClientError}.
+     * The highest code of the {@code 4xx} class.
      */
     private static final int CLIENT_ERROR_MAX = 499;
 
@@ -251,8 +251,10 @@ public class UrlFetchException extends ApiException {
 
     /**
      * Builds the exception a fetch raises when the origin answers with a status code
-     * {@link HttpStatus} has no constant for - a {@link ClientError} for a code from {@code 400}
-     * to {@code 499}, a {@code UrlFetchException} for any other, whatever its class.
+     * {@link HttpStatus} has no constant for - a {@link ClientError} for a {@code 4xx} code
+     * outside the range {@link HttpState#NGINX_ERROR} holds, a {@code UrlFetchException} for any
+     * other, whatever its class, so a code in the Nginx range raises as the Nginx codes
+     * {@link HttpStatus} names do.
      * <p>
      * Either carries the code as its {@link #getStatusCode()} and
      * {@link HttpStatus#UNKNOWN_ERROR} as its {@link #getStatus()}.
@@ -263,6 +265,9 @@ public class UrlFetchException extends ApiException {
      * @param body the response body
      * @param details the network timing snapshot of the exchange
      * @return the exception to raise
+     * @throws IllegalArgumentException if {@link HttpStatus} has a constant for
+     *         {@code statusCode}, whose exception {@link #ofStatus(ErrorContext, NetworkDetails)}
+     *         builds
      */
     public static @NotNull UrlFetchException ofUnknownStatus(
         int statusCode,
@@ -271,6 +276,9 @@ public class UrlFetchException extends ApiException {
         byte @NotNull [] body,
         @NotNull NetworkDetails details
     ) {
+        if (hasConstant(statusCode))
+            throw new IllegalArgumentException(String.format("HttpStatus has a constant for status code '%s'", statusCode));
+
         ErrorContext context = new ErrorContext(
             HttpStatus.UNKNOWN_ERROR,
             HttpMethod.GET,
@@ -280,16 +288,31 @@ public class UrlFetchException extends ApiException {
             body
         );
 
-        if (statusCode >= CLIENT_ERROR_MIN && statusCode <= CLIENT_ERROR_MAX)
+        if (statusCode >= CLIENT_ERROR_MIN && statusCode <= CLIENT_ERROR_MAX && !HttpState.NGINX_ERROR.containsCode(statusCode))
             return new ClientError(statusCode, context, details);
 
         return new UrlFetchException(statusCode, context, details);
     }
 
     /**
+     * Tells whether {@link HttpStatus} has a constant for a status code.
+     *
+     * @param statusCode the status code
+     * @return {@code true} when {@link HttpStatus#of(int)} resolves {@code statusCode}
+     */
+    private static boolean hasConstant(int statusCode) {
+        try {
+            HttpStatus.of(statusCode);
+            return true;
+        } catch (IllegalArgumentException ex) {
+            return false;
+        }
+    }
+
+    /**
      * Thrown when the origin answers a fetch with a status {@link HttpState#CLIENT_ERROR}
-     * classifies, {@code 400} to {@code 451}, or with a code from {@code 400} to {@code 499}
-     * that {@link HttpStatus} has no constant for.
+     * classifies, {@code 400} to {@code 451}, or with a {@code 4xx} code {@link HttpStatus} has
+     * no constant for, outside the Nginx range {@code 494-499}.
      * <p>
      * {@link #getStatusCode()} is the code the origin sent and {@link #getStatus()} its
      * constant, {@link HttpStatus#UNKNOWN_ERROR} for a code without one. {@link #getBody()} is

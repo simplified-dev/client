@@ -81,8 +81,8 @@ import java.util.TreeMap;
  *       so that the status is what the fetch raises.</li>
  *   <li>Raise for a code {@link HttpStatus} has no constant for, as
  *       {@link UrlFetchException#ofUnknownStatus UrlFetchException.ofUnknownStatus} builds it:
- *       {@link UrlFetchException.ClientError} for a code from {@code 400} to {@code 499}, a
- *       {@link UrlFetchException} for any other, each carrying the code as its
+ *       {@link UrlFetchException.ClientError} for a {@code 4xx} code outside the Nginx range
+ *       {@code 494-499}, a {@link UrlFetchException} for any other, each carrying the code as its
  *       {@link UrlFetchException#getStatusCode() status code}. No response is recorded or
  *       stored for it.</li>
  *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>

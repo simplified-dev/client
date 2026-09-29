@@ -2,6 +2,7 @@ package dev.simplified.client.fetch;
 
 import com.google.gson.Gson;
 import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.UrlFetchException;
@@ -234,6 +235,19 @@ class UrlFetcherTest {
                 os.write(body);
             }
         });
+        this.server.createContext("/unknown-nginx", exchange -> {
+            byte[] body = "invalid token".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(498, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unknown-empty", exchange -> {
+            exchange.sendResponseHeaders(460, -1);
+            exchange.close();
+        });
+        this.server.createContext("/wobbly", exchange -> revalidatedWith(exchange, 540));
+        this.server.createContext("/withdrawn", exchange -> revalidatedWith(exchange, 460));
         this.server.createContext("/retired", exchange -> {
             this.retiredHits.incrementAndGet();
             exchange.getResponseHeaders().add("ETag", "\"v1\"");
@@ -328,6 +342,28 @@ class UrlFetcherTest {
 
     private UrlFetcher buildFetcher(long maxBytes) {
         return UrlFetcher.create(UrlFetcherConfig.builder(new Gson()).withMaxBodyBytes(maxBytes).build());
+    }
+
+    /**
+     * Answers a request with {@code 200 steady}, stale at once and servable stale on error for a
+     * minute under an {@code ETag}, or a conditional request with {@code revalidationStatus}.
+     *
+     * @param exchange the exchange to answer
+     * @param revalidationStatus the status a conditional request is answered with
+     * @throws IOException if writing the response fails
+     */
+    private static void revalidatedWith(HttpExchange exchange, int revalidationStatus) throws IOException {
+        boolean conditional = exchange.getRequestHeaders().containsKey("If-None-Match");
+        byte[] body = (conditional ? "odd" : "steady").getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().add("ETag", "\"v1\"");
+
+        if (!conditional)
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=0, stale-if-error=60");
+
+        exchange.sendResponseHeaders(conditional ? revalidationStatus : 200, body.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(body);
+        }
     }
 
     /**
@@ -574,6 +610,79 @@ class UrlFetcherTest {
 
         assertThat(raised, is(not(instanceOf(UrlFetchException.ClientError.class))));
         assertThat(raised.getStatusCode(), is(299));
+    }
+
+    @Test
+    @DisplayName("A code in the Nginx range HttpStatus has no constant for raises as the Nginx codes it names do, not as a ClientError")
+    void unknownNginxStatusIsNotAClientError() {
+        UrlFetchException raised = assertThrows(
+            UrlFetchException.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(this.baseUri.resolve("/unknown-nginx"))
+        );
+
+        assertThat(raised, is(not(instanceOf(UrlFetchException.ClientError.class))));
+        assertThat(raised.getStatusCode(), is(498));
+    }
+
+    @Test
+    @DisplayName("An unknown status raises with a message naming the code and the URL")
+    void unknownStatusMessageNamesCodeAndUrl() {
+        URI uri = this.baseUri.resolve("/unknown-client");
+        UrlFetchException raised = assertThrows(
+            UrlFetchException.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(uri)
+        );
+
+        assertThat(raised.getMessage(), is(equalTo("Origin returned unknown status 460 for URL '" + uri + "'")));
+    }
+
+    @Test
+    @DisplayName("A 4xx HttpStatus has no constant for, sent without a body, raises ClientError carrying no body")
+    void unknownClientErrorWithoutBody() {
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(this.baseUri.resolve("/unknown-empty"))
+        );
+
+        assertThat(raised.getStatusCode(), is(460));
+        assertThat(raised.getBody(), is(Optional.empty()));
+    }
+
+    @Test
+    @DisplayName("A 5xx HttpStatus has no constant for, answering a revalidation, is replaced by the stale entry within stale-if-error")
+    void unknownServerErrorOnRevalidationServesStale() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/wobbly");
+
+        fetcher.get(uri);
+        Response<String> replay = fetcher.get(uri);
+
+        assertThat(replay.getBody(), is(equalTo("steady")));
+        assertThat(replay.isStaleFromCache(), is(true));
+    }
+
+    @Test
+    @DisplayName("A 4xx HttpStatus has no constant for, answering a revalidation, raises ClientError rather than replaying the stale entry")
+    void unknownClientErrorOnRevalidationRaises() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/withdrawn");
+
+        fetcher.get(uri);
+        UrlFetchException.ClientError raised = assertThrows(UrlFetchException.ClientError.class, () -> fetcher.get(uri));
+
+        assertThat(raised.getStatusCode(), is(460));
+        assertThat(new String(raised.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("odd")));
+    }
+
+    @Test
+    @DisplayName("ofUnknownStatus refuses a code HttpStatus has a constant for, naming the code")
+    void ofUnknownStatusRefusesKnownCode() {
+        IllegalArgumentException thrown = assertThrows(
+            IllegalArgumentException.class,
+            () -> UrlFetchException.ofUnknownStatus(404, this.baseUri, Map.of(), new byte[0], NetworkDetails.EMPTY)
+        );
+
+        assertThat(thrown.getMessage(), containsString("'404'"));
     }
 
     @Test
