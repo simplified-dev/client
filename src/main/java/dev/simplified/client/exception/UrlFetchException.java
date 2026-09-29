@@ -86,14 +86,6 @@ public class UrlFetchException extends ApiException {
     private static final int CLIENT_ERROR_MAX = 499;
 
     /**
-     * The numeric status - the code the origin answered with, including one {@link HttpStatus}
-     * has no constant for, or the code of the synthetic status a failure without an origin
-     * status carries.
-     */
-    @Getter
-    private final int statusCode;
-
-    /**
      * Constructs a new {@code UrlFetchException} with the given context and pre-formatted message.
      *
      * @param context the HTTP context bundle carrying status, headers, body, and request metadata
@@ -119,7 +111,6 @@ public class UrlFetchException extends ApiException {
         @Nullable Object... args
     ) {
         super(cause, NAME, context, args.length == 0 ? message : String.format(message, args), true);
-        this.statusCode = context.status().getCode();
     }
 
     /**
@@ -163,21 +154,6 @@ public class UrlFetchException extends ApiException {
         @Nullable Object... args
     ) {
         super(cause, NAME, context, details, args.length == 0 ? message : String.format(message, args), true);
-        this.statusCode = context.status().getCode();
-    }
-
-    /**
-     * Constructs a new {@code UrlFetchException} for a status code {@link HttpStatus} has no
-     * constant for.
-     *
-     * @param statusCode the status code the origin answered with
-     * @param context the HTTP context bundle, carrying {@link HttpStatus#UNKNOWN_ERROR} in place
-     *                of the code
-     * @param details the network timing snapshot of the exchange
-     */
-    private UrlFetchException(int statusCode, @NotNull ErrorContext context, @NotNull NetworkDetails details) {
-        super(null, NAME, context, details, String.format(UNKNOWN_STATUS_MESSAGE, statusCode, context.requestUrl()), true);
-        this.statusCode = statusCode;
     }
 
     /**
@@ -239,14 +215,7 @@ public class UrlFetchException extends ApiException {
         if (context.status().getState() == HttpState.CLIENT_ERROR)
             return new ClientError(context, details);
 
-        return new UrlFetchException(
-            context,
-            details,
-            STATUS_MESSAGE,
-            context.status().getCode(),
-            context.status().getMessage(),
-            context.requestUrl()
-        );
+        return new UrlFetchException(context, details, statusMessage(context));
     }
 
     /**
@@ -276,11 +245,12 @@ public class UrlFetchException extends ApiException {
         byte @NotNull [] body,
         @NotNull NetworkDetails details
     ) {
-        if (hasConstant(statusCode))
+        if (HttpStatus.findByCode(statusCode).isPresent())
             throw new IllegalArgumentException(String.format("HttpStatus has a constant for status code '%s'", statusCode));
 
         ErrorContext context = new ErrorContext(
             HttpStatus.UNKNOWN_ERROR,
+            statusCode,
             HttpMethod.GET,
             url.toString(),
             responseHeaders,
@@ -289,24 +259,24 @@ public class UrlFetchException extends ApiException {
         );
 
         if (statusCode >= CLIENT_ERROR_MIN && statusCode <= CLIENT_ERROR_MAX && !HttpState.NGINX_ERROR.containsCode(statusCode))
-            return new ClientError(statusCode, context, details);
+            return new ClientError(context, details);
 
-        return new UrlFetchException(statusCode, context, details);
+        return new UrlFetchException(context, details, statusMessage(context));
     }
 
     /**
-     * Tells whether {@link HttpStatus} has a constant for a status code.
+     * Formats the message of an exception raised for the status an origin answered with,
+     * naming the code, the URL and, for a code {@link HttpStatus} has a constant for, the
+     * constant's message.
      *
-     * @param statusCode the status code
-     * @return {@code true} when {@link HttpStatus#of(int)} resolves {@code statusCode}
+     * @param context the HTTP context bundle carrying the status the origin answered with
+     * @return the formatted message
      */
-    private static boolean hasConstant(int statusCode) {
-        try {
-            HttpStatus.of(statusCode);
-            return true;
-        } catch (IllegalArgumentException ex) {
-            return false;
-        }
+    private static @NotNull String statusMessage(@NotNull ErrorContext context) {
+        if (!context.isKnownStatus())
+            return String.format(UNKNOWN_STATUS_MESSAGE, context.statusCode(), context.requestUrl());
+
+        return String.format(STATUS_MESSAGE, context.statusCode(), context.status().getMessage(), context.requestUrl());
     }
 
     /**
@@ -326,32 +296,13 @@ public class UrlFetchException extends ApiException {
          * Constructs a new {@code ClientError} with the context and network details of the
          * exchange the origin answered.
          *
-         * @param context the HTTP context bundle carrying the client error status, headers, body,
-         *                and request metadata
+         * @param context the HTTP context bundle carrying the client error status, or a
+         *                {@code 4xx} code {@link HttpStatus} has no constant for, and the
+         *                headers, body, and request metadata
          * @param details the network timing snapshot of the exchange
          */
         public ClientError(@NotNull ErrorContext context, @NotNull NetworkDetails details) {
-            super(
-                context,
-                details,
-                STATUS_MESSAGE,
-                context.status().getCode(),
-                context.status().getMessage(),
-                context.requestUrl()
-            );
-        }
-
-        /**
-         * Constructs a new {@code ClientError} for a status code {@link HttpStatus} has no
-         * constant for.
-         *
-         * @param statusCode the status code the origin answered with
-         * @param context the HTTP context bundle, carrying {@link HttpStatus#UNKNOWN_ERROR} in
-         *                place of the code
-         * @param details the network timing snapshot of the exchange
-         */
-        private ClientError(int statusCode, @NotNull ErrorContext context, @NotNull NetworkDetails details) {
-            super(statusCode, context, details);
+            super(context, details, statusMessage(context));
         }
 
     }

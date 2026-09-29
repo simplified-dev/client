@@ -377,7 +377,7 @@ public final class UrlFetcher {
                 return this.serveFromCache(url, request, revalidating, true, maxBodyBytes);
             }
 
-            Optional<HttpStatus> known = knownStatus(statusCode);
+            Optional<HttpStatus> known = HttpStatus.findByCode(statusCode);
             boolean raises = known.map(HttpStatus::getState).map(HttpState::isError).orElse(true);
             byte[] body = readBody(apacheResponse, url, context, maxBodyBytes, raises);
             Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
@@ -550,21 +550,6 @@ public final class UrlFetcher {
             new ErrorContext(status, request.getMethod(), request.getUrl(), headers, Collections.emptyMap(), body),
             details
         );
-    }
-
-    /**
-     * Resolves the {@link HttpStatus} constant of a status code the origin answered.
-     *
-     * @param statusCode the status code
-     * @return the constant for {@code statusCode}, or {@link Optional#empty()} when
-     *         {@link HttpStatus} has none
-     */
-    private static @NotNull Optional<HttpStatus> knownStatus(int statusCode) {
-        try {
-            return Optional.of(HttpStatus.of(statusCode));
-        } catch (IllegalArgumentException ex) {
-            return Optional.empty();
-        }
     }
 
     /**

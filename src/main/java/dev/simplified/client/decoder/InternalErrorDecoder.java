@@ -41,6 +41,12 @@ import java.util.OptionalLong;
  *       {@link PreconditionFailedException}; if a 3xx redirection, a
  *       {@link NotModifiedException}. Otherwise it delegates to the client-supplied
  *       {@link ClientErrorDecoder} for domain-specific error parsing.</li>
+ *   <li>A status code {@link HttpStatus} has no constant for takes the same path, carried as
+ *       {@link ErrorContext#statusCode()} with {@link HttpStatus#UNKNOWN_ERROR} as
+ *       {@link ErrorContext#status()}: a {@code 3xx} code raises a
+ *       {@link NotModifiedException} as the {@code 3xx} constants do, and any other reaches
+ *       the {@link ClientErrorDecoder}, a {@code 2xx} code included when
+ *       {@link InternalResponseDecoder} hands one here.</li>
  *   <li>Reflectively sets the cumulative {@code retryAttempts} count on the resulting
  *       {@link ApiException} via the shared {@link Reflection} accessor.</li>
  *   <li>Records the exception via {@link ResponseCache#recordLastResponse(dev.simplified.client.response.Response)}
@@ -152,7 +158,8 @@ public final class InternalErrorDecoder implements ErrorDecoder {
         //    invokes the ErrorDecoder for every status outside 2xx, so 304 (a successful
         //    outcome of a conditional request) and other 3xx responses land here; the domain
         //    decoder would otherwise try to parse an empty body and produce a confusing
-        //    "Unknown (body missing or not JSON)" trace.
+        //    "Unknown (body missing or not JSON)" trace. The range is read off the numeric
+        //    code, so a 3xx HttpStatus has no constant for lands here as well.
         //  - 412 Precondition Failed -> PreconditionFailedException. Signals that an
         //    If-Match / If-Unmodified-Since precondition evaluated to false on the server,
         //    so the caller's cached ETag is stale and the pending mutation must be retried
@@ -160,10 +167,11 @@ public final class InternalErrorDecoder implements ErrorDecoder {
         //  - 429 Too Many Requests -> RateLimitException with server-advertised bucket
         //    metadata for exponential backoff.
         //
-        // Genuine 4xx/5xx errors still flow to the domain decoder unchanged.
+        // Every other status flows to the domain decoder unchanged, one HttpStatus has no
+        // constant for included.
         ApiException exception;
 
-        if (HttpState.REDIRECTION.containsCode(context.status().getCode())) {
+        if (HttpState.REDIRECTION.containsCode(context.statusCode())) {
             exception = new NotModifiedException(context);
         } else if (context.status() == HttpStatus.PRECONDITION_FAILED) {
             exception = new PreconditionFailedException(context);
