@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -31,6 +32,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 
 /**
  * Facade over the client's RFC 7234 private HTTP response cache and its "last response"
@@ -56,9 +58,9 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * <p>
  * A bucket is never changed in place. {@link #store} and
  * {@link #updateOn304} write a new bucket, holding the current bucket's variants plus the
- * stored or refreshed one, through {@code compute} on the cache's {@link Cache#asMap() map
- * view}, so Caffeine weighs the populated bucket and sets its lifetime from every variant it
- * holds.
+ * stored or refreshed one, or less the one a refresh removes, through {@code compute} on the
+ * cache's {@link Cache#asMap() map view}, so Caffeine weighs the populated bucket and sets its
+ * lifetime from every variant it holds.
  * <p>
  * Eviction is driven by three layered mechanisms:
  * <ul>
@@ -577,6 +579,13 @@ public final class ResponseCache {
      * The variant is addressed as {@link #lookup} matched it: by the
      * {@link CacheKey.VaryFingerprint} of the revalidated request's headers over the headers the
      * cached response's {@code Vary} names, which equals the fingerprint the variant is held under.
+     * The refreshed variant is then held under the fingerprint of {@code requestHeaders} over the
+     * headers its refreshed {@code Vary} names, which {@link #lookup} fingerprints a request by:
+     * the same key when the 304 carries no {@code Vary} or the stored one, and otherwise a new
+     * key, which the variant moves to, replacing any variant held there. A refreshed
+     * {@code Vary} that no later request could be shown to match - one {@link #store} would not
+     * store under, naming {@code *}, an internal header, or a {@code Cookie} the request did not
+     * carry - removes the variant instead, and nothing is refreshed.
      * <p>
      * The method is a no-op when no bucket or no variant is found at the given key/fingerprint -
      * the bucket expired, was evicted by weight pressure, or was invalidated or dropped between
@@ -584,6 +593,39 @@ public final class ResponseCache {
      * the instant {@link #invalidateAll()} last emptied the cache or {@link #invalidate(String)}
      * last invalidated the URL, or carries no request start, so a revalidation in flight across
      * an invalidation cannot refresh an entry stored after it.
+     *
+     * @param key the URL bucket of the cached variant
+     * @param fingerprint the fingerprint of the revalidated request's headers over the headers the
+     *                    cached response's {@code Vary} names
+     * @param requestHeaders the revalidated request's headers as it left the client, without the
+     *                       conditional headers the revalidation added
+     * @param new304Headers the headers returned on the {@code 304} revalidation response
+     * @param revalidation the network details of the {@code 304} exchange
+     * @return the refreshed entry now in the cache, or {@link Optional#empty()} if nothing was
+     *         refreshed
+     */
+    public @NotNull Optional<CacheEntry<?>> updateOn304(
+        @NotNull CacheKey.UrlKey key,
+        @NotNull CacheKey.VaryFingerprint fingerprint,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders,
+        @NotNull Map<String, ? extends Collection<String>> new304Headers,
+        @NotNull NetworkDetails revalidation
+    ) {
+        return this.refresh(key, fingerprint, new304Headers, revalidation, varyNames -> Optional.of(
+            CacheKey.VaryFingerprint.of(varyNames, requestHeaders)
+        ));
+    }
+
+    /**
+     * Refreshes a cached variant after a successful {@code 304 Not Modified} revalidation of a
+     * request known only by its fingerprint.
+     * <p>
+     * Behaves as {@link #updateOn304(CacheKey.UrlKey, CacheKey.VaryFingerprint, Map, Map, NetworkDetails)}
+     * with the request's headers read from {@code fingerprint}, which holds the request's values
+     * of the headers the cached response's {@code Vary} names and of no others. A refreshed
+     * {@code Vary} naming only headers among those holds the variant under the fingerprint it
+     * produces; one naming any other header, whose value the request carried is not known,
+     * removes the variant, and nothing is refreshed.
      *
      * @param key the URL bucket of the cached variant
      * @param fingerprint the fingerprint of the revalidated request's headers over the headers the
@@ -598,6 +640,38 @@ public final class ResponseCache {
         @NotNull CacheKey.VaryFingerprint fingerprint,
         @NotNull Map<String, ? extends Collection<String>> new304Headers,
         @NotNull NetworkDetails revalidation
+    ) {
+        Map<String, Collection<String>> known = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        fingerprint.values().forEach((name, value) -> known.put(name, List.of(value)));
+
+        return this.refresh(key, fingerprint, new304Headers, revalidation, varyNames -> known.keySet().containsAll(varyNames)
+            ? Optional.of(CacheKey.VaryFingerprint.of(varyNames, known))
+            : Optional.empty()
+        );
+    }
+
+    // ===== Internals =====
+
+    /**
+     * Refreshes the variant held under {@code fingerprint} with a {@code 304 Not Modified}'s
+     * headers and holds it under the fingerprint {@code refingerprint} answers for its refreshed
+     * {@code Vary}, or removes it when that answers none or one {@link #lookup} cannot match.
+     *
+     * @param key the URL bucket of the cached variant
+     * @param fingerprint the fingerprint the variant is held under
+     * @param new304Headers the headers returned on the {@code 304} revalidation response
+     * @param revalidation the network details of the {@code 304} exchange
+     * @param refingerprint the fingerprint of the revalidated request over the given
+     *                      {@code Vary} header names, or empty when it cannot be formed
+     * @return the refreshed entry now in the cache, or {@link Optional#empty()} if nothing was
+     *         refreshed
+     */
+    private @NotNull Optional<CacheEntry<?>> refresh(
+        @NotNull CacheKey.UrlKey key,
+        @NotNull CacheKey.VaryFingerprint fingerprint,
+        @NotNull Map<String, ? extends Collection<String>> new304Headers,
+        @NotNull NetworkDetails revalidation,
+        @NotNull Function<Set<String>, Optional<CacheKey.VaryFingerprint>> refingerprint
     ) {
         java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> current = this.cache.getIfPresent(key);
 
@@ -617,8 +691,15 @@ public final class ResponseCache {
                     if (existing == null)
                         return variants;
 
-                    refreshed.set(mergeHeaders(existing, new304Headers, revalidation));
-                    return withVariant(variants, fingerprint, refreshed.get());
+                    CacheEntry<?> merged = mergeHeaders(existing, new304Headers, revalidation);
+                    Optional<CacheKey.VaryFingerprint> rekeyed = refingerprint.apply(merged.response().varyHeaderNames())
+                        .filter(ResponseCache::isMatchable);
+
+                    if (rekeyed.isEmpty())
+                        return withoutVariant(variants, fingerprint);
+
+                    refreshed.set(merged);
+                    return withVariant(withoutVariant(variants, fingerprint), rekeyed.get(), merged);
                 });
             }
         } finally {
@@ -628,7 +709,17 @@ public final class ResponseCache {
         return Optional.ofNullable(refreshed.get());
     }
 
-    // ===== Internals =====
+    /**
+     * Lists the fingerprints the given URL bucket holds its variants under.
+     *
+     * @param key the URL bucket
+     * @return the fingerprints of the bucket's variants, or none when the cache holds no bucket
+     *         for {@code key}
+     */
+    @NotNull Set<CacheKey.VaryFingerprint> fingerprints(@NotNull CacheKey.UrlKey key) {
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants = this.cache.asMap().get(key);
+        return variants == null ? Set.of() : Set.copyOf(variants.keySet());
+    }
 
     /**
      * Tests whether an answer to a request for the given URL, sent at the given instant, may be
@@ -689,6 +780,24 @@ public final class ResponseCache {
 
         bucket.put(fingerprint, entry);
         return bucket;
+    }
+
+    /**
+     * Builds the bucket a write puts in the cache: a new map holding the given bucket's variants
+     * except the one under {@code fingerprint}.
+     *
+     * @param variants the bucket currently in the cache
+     * @param fingerprint the Vary fingerprint whose variant to leave out
+     * @return a new bucket holding {@code variants} without the one under {@code fingerprint}, or
+     *         {@code null} when it would hold none, which removes the bucket from the cache
+     */
+    private static @Nullable java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> withoutVariant(
+        @NotNull java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants,
+        @NotNull CacheKey.VaryFingerprint fingerprint
+    ) {
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> bucket = new ConcurrentHashMap<>(variants);
+        bucket.remove(fingerprint);
+        return bucket.isEmpty() ? null : bucket;
     }
 
     /**

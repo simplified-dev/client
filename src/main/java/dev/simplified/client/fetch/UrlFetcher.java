@@ -434,7 +434,7 @@ public final class UrlFetcher {
             requestHeaders
         );
         CacheEntry<?> refreshed = this.responseCache
-            .updateOn304(key, fingerprint, headersFromApache(apacheResponse), new NetworkDetails(context))
+            .updateOn304(key, fingerprint, requestHeaders, headersFromApache(apacheResponse), new NetworkDetails(context))
             .orElse(revalidating);
         EntityUtils.consumeQuietly(apacheResponse.getEntity());
         return this.serveFromCache(url, request, refreshed, false, maxBodyBytes);

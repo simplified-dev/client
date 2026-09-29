@@ -36,17 +36,6 @@ Open items in `client`. Each stays here until it is closed or accepted.
 > - Type: **RISK**
 > - Status: **OPEN**
 
-> #### A 304 carrying a different `Vary` strands its variant
-> `updateOn304` refreshes a variant under the fingerprint it was stored with and overlays the 304's
-> headers, a new `Vary` included. `lookup` fingerprints a request by the refreshed entry's `Vary`,
-> which no longer produces the key the variant is held under, so no request matches it until its
-> bucket expires. It only causes misses.
->
-> - Affected: `src/main/java/dev/simplified/client/cache/ResponseCache.java:469` - `updateOn304`,
->   `:655` - `mergeHeaders`
-> - Type: **GAP**
-> - Status: **OPEN**
-
 > #### A 304 without `Date` ages the refreshed entry from the stored `Date`
 > `mergeHeaders` keeps the stored `Date` unless the 304 sends one, and `currentAge` takes the
 > apparent age as the refreshed round trip's completion minus that `Date`. A 304 with no `Date`

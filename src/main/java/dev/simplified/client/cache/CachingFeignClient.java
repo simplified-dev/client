@@ -164,7 +164,7 @@ public final class CachingFeignClient implements Client {
             NetworkDetails revalidation = new NetworkDetails(response);
             CacheKey.UrlKey key = CacheKey.UrlKey.of(method, request.url());
             CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(cached.varyHeaderNames(), request.headers());
-            this.responseCache.updateOn304(key, fingerprint, response.headers(), revalidation);
+            this.responseCache.updateOn304(key, fingerprint, request.headers(), response.headers(), revalidation);
 
             feign.Util.ensureClosed(response.body());
 

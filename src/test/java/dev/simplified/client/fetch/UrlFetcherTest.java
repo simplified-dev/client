@@ -112,6 +112,11 @@ class UrlFetcherTest {
     private final List<SentHeaders> staticNegotiated = new CopyOnWriteArrayList<>();
 
     /**
+     * The requests {@code /revaried} has answered.
+     */
+    private final AtomicInteger revariedHits = new AtomicInteger();
+
+    /**
      * The {@code User-Agent}, {@code Accept} and {@code X-Static} values one request carried.
      *
      * @param userAgent the {@code User-Agent} values
@@ -379,6 +384,28 @@ class UrlFetcherTest {
             exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
             exchange.getResponseHeaders().add("Vary", "User-Agent, Accept, X-Static");
             exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/revaried", exchange -> {
+            this.revariedHits.incrementAndGet();
+            exchange.getResponseHeaders().add("ETag", "\"v1\"");
+
+            if (exchange.getRequestHeaders().containsKey("If-None-Match")) {
+                exchange.getResponseHeaders().add("Vary", "X-Static");
+                exchange.getResponseHeaders().add("Cache-Control", "max-age=100");
+                exchange.sendResponseHeaders(304, -1);
+                exchange.close();
+                return;
+            }
+
+            byte[] body = "revaried".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+            exchange.getResponseHeaders().add("Vary", "X-Variant");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.getResponseHeaders().add("Age", "120");
             exchange.sendResponseHeaders(200, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
@@ -758,6 +785,32 @@ class UrlFetcherTest {
         assertThat(first.getBody(), is(equalTo("checked")));
         assertThat(second.isFromCache(), is(true));
         assertThat(this.noCacheValidators, contains(List.of(), List.of("\"v1\""), List.of("\"v1\"")));
+    }
+
+    @Test
+    @DisplayName("A 304 whose Vary names another of the request's headers keeps its variant reachable under that header")
+    void notModifiedWithAnotherVaryKeepsTheVariantReachable() {
+        AtomicReference<String> variant = new AtomicReference<>("a");
+        UrlFetcher fetcher = UrlFetcher.create(
+            UrlFetcherConfig.builder(new Gson())
+                .withHeader("X-Static", "s")
+                .withDynamicHeader("X-Variant", () -> Optional.of(variant.get()))
+                .build()
+        );
+        URI uri = this.baseUri.resolve("/revaried");
+
+        Response<String> live = fetcher.get(uri);
+        Response<String> revalidated = fetcher.get(uri);
+        Response<String> replay = fetcher.get(uri);
+        variant.set("b");
+        Response<String> otherVariant = fetcher.get(uri);
+
+        assertThat(live.isFromCache(), is(false));
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(otherVariant.isFromCache(), is(true));
+        assertThat(otherVariant.getBody(), is(equalTo("revaried")));
+        assertThat(this.revariedHits.get(), is(2));
     }
 
     @Test

@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -33,6 +34,7 @@ import java.util.function.Function;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
@@ -68,6 +70,10 @@ class ResponseCacheTest {
         @RequestLine("GET /resource")
         @Headers("Cookie: {cookie}")
         Response<byte[]> cookie(@Param("cookie") String cookie);
+
+        @RequestLine("GET /resource")
+        @Headers({ "Accept: {accept}", "Accept-Language: {language}" })
+        Response<byte[]> negotiate(@Param("accept") String accept, @Param("language") String language);
 
     }
 
@@ -315,6 +321,16 @@ class ResponseCacheTest {
         String[] joined = Arrays.copyOf(fixed, fixed.length + headerPairs.length);
         System.arraycopy(headerPairs, 0, joined, fixed.length, headerPairs.length);
         return receivedAt(received, joined);
+    }
+
+    /**
+     * Returns the network details of a {@code 304 Not Modified} exchange sent and received now.
+     *
+     * @return the exchange's network details
+     */
+    private static NetworkDetails notModified() {
+        Request request = Request.create(Request.HttpMethod.GET, URL, headers(), null, StandardCharsets.UTF_8, null);
+        return new NetworkDetails(answer(request, 304, receivedNow()));
     }
 
     /**
@@ -833,6 +849,66 @@ class ResponseCacheTest {
             this.cache.lookup(HttpMethod.GET, URL, headers("Accept", "b")).orElseThrow().response().getHeaders().get("Cache-Control"),
             contains("max-age=60")
         );
+    }
+
+    @Test
+    @DisplayName("A 304 whose Vary names other headers moves its variant to the key a request is now matched by")
+    void notModifiedWithAnotherVaryRekeysTheVariant() {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, URL);
+        this.origin = request -> answer(request, 200, "Vary", "Accept", "Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.negotiated.negotiate("a", "en");
+
+        this.origin = request -> answer(request, 304, "Vary", "Accept-Language", "Cache-Control", "max-age=600", "ETag", "\"v1\"");
+        Response<byte[]> revalidated = this.negotiated.negotiate("a", "en");
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(
+            this.cache.fingerprints(key),
+            contains(CacheKey.VaryFingerprint.of(Set.of("accept-language"), headers("Accept-Language", "en")))
+        );
+
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=600");
+        Response<byte[]> replay = this.negotiated.negotiate("a", "en");
+        Response<byte[]> otherAccept = this.negotiated.negotiate("b", "en");
+
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(otherAccept.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(2));
+    }
+
+    @Test
+    @DisplayName("A 304 whose Vary no request could match removes its variant rather than holding it where nothing matches")
+    void notModifiedWithAnUnmatchableVaryRemovesTheVariant() {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, URL);
+        this.origin = request -> answer(request, 200, "Vary", "Accept", "Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.negotiated.accept("a");
+
+        this.origin = request -> answer(request, 304, "Vary", "*", "Cache-Control", "max-age=600", "ETag", "\"v1\"");
+        Response<byte[]> revalidated = this.negotiated.accept("a");
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(this.cache.fingerprints(key), is(empty()));
+    }
+
+    @Test
+    @DisplayName("A 304 addressed by a fingerprint alone moves its variant when the fingerprint holds every header its Vary names, and removes it otherwise")
+    void notModifiedByFingerprintAloneMovesOnlyWhatItKnows() {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, URL);
+        Map<String, Collection<String>> request = headers("Accept", "a", "Accept-Language", "en");
+        CacheKey.VaryFingerprint both = CacheKey.VaryFingerprint.of(Set.of("accept", "accept-language"), request);
+        CacheKey.VaryFingerprint accept = CacheKey.VaryFingerprint.of(Set.of("accept"), request);
+        storeDirectly(this.cache, request, receivedNow("Vary", "Accept, Accept-Language", "Cache-Control", "max-age=60", "ETag", "\"v1\""));
+
+        Optional<CacheEntry<?>> narrowed = this.cache.updateOn304(key, both, headers("Vary", "Accept"), notModified());
+
+        assertThat(narrowed.isPresent(), is(true));
+        assertThat(this.cache.fingerprints(key), contains(accept));
+        assertThat(this.cache.lookup(HttpMethod.GET, URL, headers("Accept", "a", "Accept-Language", "fr")).isPresent(), is(true));
+
+        Optional<CacheEntry<?>> widened = this.cache.updateOn304(key, accept, headers("Vary", "Accept, User-Agent"), notModified());
+
+        assertThat(widened.isPresent(), is(false));
+        assertThat(this.cache.fingerprints(key), is(empty()));
     }
 
     @Test
