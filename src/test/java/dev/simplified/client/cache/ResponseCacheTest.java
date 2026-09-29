@@ -386,6 +386,35 @@ class ResponseCacheTest {
     }
 
     @Test
+    @DisplayName("A response carrying no-cache beside max-age is revalidated before each reuse rather than replayed as fresh")
+    void noCacheIsRevalidatedWhileFresh() {
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60, no-cache", "ETag", "\"v1\"");
+        this.resource.get();
+
+        this.origin = request -> answer(request, 304, "Cache-Control", "max-age=60, no-cache", "ETag", "\"v1\"");
+        Response<byte[]> first = this.resource.get();
+        Response<byte[]> second = this.resource.get();
+
+        assertThat(this.sent, hasSize(3));
+        assertThat(this.sent.get(1).headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(first.isFromCache(), is(true));
+        assertThat(second.isFromCache(), is(true));
+    }
+
+    @Test
+    @DisplayName("A response carrying no-cache and no validator is fetched in full on the next request")
+    void noCacheWithoutValidatorIsFetchedAgain() {
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60, no-cache");
+        this.resource.get();
+        Response<byte[]> again = this.resource.get();
+
+        assertThat(again.isFromCache(), is(false));
+        assertThat(this.sent, hasSize(2));
+        assertThat(this.sent.getLast().headers().containsKey(ETag.IF_NONE_MATCH_HEADER), is(false));
+    }
+
+    @Test
     @DisplayName("A response carrying no request start is not stored, where one carrying it is")
     void responseWithoutRequestStartIsNotStored() {
         Request request = Request.create(Request.HttpMethod.GET, URL, headers(), null, StandardCharsets.UTF_8, null);

@@ -63,14 +63,19 @@ import java.util.TreeMap;
  *       stores its response and refreshes that response's variant by them, so a response's
  *       {@code Vary} is matched against the values the origin received.</li>
  *   <li>Resolve a rate-limit bucket id via {@link UrlFetcherConfig#getBucketResolver()}.</li>
- *   <li>Look up the URL and the request's headers in the {@link ResponseCache}; on a fresh hit,
- *       serve a synthesized {@link Response.DirectImpl} immediately. On a stale hit with an
+ *   <li>Look up the URL and the request's headers in the {@link ResponseCache}; on a hit that
+ *       {@linkplain Response.CachedImpl#canServeWithoutRevalidation(Instant) may be served
+ *       without revalidation} - fresh, and carrying no {@code no-cache} - serve a synthesized
+ *       {@link Response.DirectImpl} immediately. On any other hit with an
  *       {@code ETag} or {@code Last-Modified} validator, attach {@code If-None-Match} /
  *       {@code If-Modified-Since} and dispatch a conditional request; on
  *       {@code 304 Not Modified}, refresh the cached entry and replay the cached body under the
  *       refreshed headers, or under the stored ones when {@link ResponseCache#updateOn304}
  *       refreshed nothing; on a {@code 5xx} within the entry's {@code stale-if-error} window,
- *       replay the cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}.</li>
+ *       replay the cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}, unless the
+ *       entry carries {@code must-revalidate}, {@code proxy-revalidate} or {@code no-cache},
+ *       which {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) refuse a stale
+ *       replay}, so the {@code 5xx} raises.</li>
  *   <li>Check the local rate limit; raise {@link UrlFetchException.RateLimited} if exhausted.</li>
  *   <li>Track the request and dispatch through the shared Apache transport, recording the
  *       instant the response arrived on the request's context so the response's
@@ -318,7 +323,7 @@ public final class UrlFetcher {
 
         Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, url.toString(), requestHeaders);
 
-        if (hit.isPresent() && hit.get().response().isFresh(Instant.now()))
+        if (hit.isPresent() && hit.get().response().canServeWithoutRevalidation(Instant.now()))
             return this.serveFromCache(url, request, hit.get(), false, maxBodyBytes);
 
         if (this.rateLimitManager.isRateLimited(bucketId, policy, now))

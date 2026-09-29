@@ -28,12 +28,15 @@ import java.util.TreeMap;
  * Sits between Feign and the underlying transport, typically an {@link ApacheHttp5Client},
  * so that:
  * <ul>
- *   <li>On a fresh cache hit, a synthesized {@link feign.Response} is returned
+ *   <li>On a cache hit that {@linkplain Response.CachedImpl#canServeWithoutRevalidation(Instant)
+ *       may be served without revalidation} - fresh, and carrying no {@code no-cache} - a
+ *       synthesized {@link feign.Response} is returned
  *       immediately without touching the network. Feign's response interceptors and decoder
  *       then run on the synthesized response, re-decoding the cached raw bytes into a fresh
  *       {@link Response.Impl} and updating
  *       {@link ResponseCache#recordLastResponse(Response)} as a live response does.</li>
- *   <li>On a stale cache hit with a validator, {@code If-None-Match} and/or
+ *   <li>On any other cache hit - a stale one, or one carrying {@code no-cache} - with a
+ *       validator, {@code If-None-Match} and/or
  *       {@code If-Modified-Since} are attached to a copy of the original request before
  *       dispatching to the delegate. If the server replies with {@code 304 Not Modified},
  *       {@link ResponseCache#updateOn304} replaces the cached entry, addressed by the
@@ -47,7 +50,10 @@ import java.util.TreeMap;
  *   <li>On a stale cache hit where the origin returns {@code 5xx} within the entry's
  *       {@code stale-if-error} window, the cached bytes are served in place of the error
  *       response per <a href="https://datatracker.ietf.org/doc/html/rfc5861#section-4">RFC
- *       5861 §4</a>.</li>
+ *       5861 §4</a>, unless the entry carries {@code must-revalidate},
+ *       {@code proxy-revalidate} or {@code no-cache}, whose
+ *       {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) stale replay is refused}
+ *       and the error response is returned.</li>
  *   <li>On a successful unsafe method ({@code POST}, {@code PUT}, {@code PATCH},
  *       {@code DELETE}), the cache is invalidated for the target URL plus any
  *       {@code Location} and {@code Content-Location} redirects.</li>
@@ -145,7 +151,7 @@ public final class CachingFeignClient implements Client {
         Instant now = Instant.now();
         Response.CachedImpl<?> cached = entry.response();
 
-        if (cached.isFresh(now))
+        if (cached.canServeWithoutRevalidation(now))
             return this.synthesizeFreshHit(request, entry, now);
 
         if (!cached.canRevalidate())

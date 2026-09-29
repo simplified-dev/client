@@ -2,21 +2,6 @@
 
 Open items in `client`. Each stays here until it is closed or accepted.
 
-> #### `no-cache` and `must-revalidate` are not enforced
-> `Response.CachedImpl.isFresh` compares the entry's age with its freshness lifetime and reads no
-> other directive, and `mustRevalidate`, which answers for `must-revalidate`, `proxy-revalidate` and
-> `no-cache`, has no caller. So a response carrying `no-cache` beside a `max-age` is replayed as fresh
-> without the revalidation `no-cache` requires, on the Feign path and through `UrlFetcher` alike. A
-> stale entry carrying `must-revalidate` is still served in place of a 5xx within its
-> `stale-if-error` window, which `must-revalidate` forbids. No origin a workspace consumer calls is
-> known to send either directive beside a freshness lifetime.
->
-> - Affected: `src/main/java/dev/simplified/client/response/Response.java:745` - `CachedImpl.isFresh`,
->   `:793` - `CachedImpl.mustRevalidate`; `src/main/java/dev/simplified/client/cache/CachingFeignClient.java:148`,
->   `:168` - `serveFromCache`; `src/main/java/dev/simplified/client/fetch/UrlFetcher.java:313` - `fetch`, `:368` - `executeAndStore`
-> - Type: **BUG**
-> - Status: **OPEN**
-
 > #### An undecodable 2xx is cached and fails every replay
 > `InternalResponseDecoder` offers a buffered response to `ResponseCache.store` before its body is
 > decoded, and decoding is deferred to the first `getBody()`. A 2xx whose body does not decode is

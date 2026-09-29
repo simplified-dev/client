@@ -93,6 +93,12 @@ class UrlFetcherTest {
     private final AtomicInteger staleVariantHits = new AtomicInteger();
 
     /**
+     * The {@code If-None-Match} values each request {@code /no-cache} answered carried, in the
+     * order they arrived.
+     */
+    private final List<List<String>> noCacheValidators = new CopyOnWriteArrayList<>();
+
+    /**
      * The headers each request {@code /static-negotiated} answered carried, in the order they
      * arrived.
      */
@@ -249,6 +255,27 @@ class UrlFetcherTest {
             exchange.close();
         });
         this.server.createContext("/wobbly", exchange -> revalidatedWith(exchange, 540));
+        this.server.createContext("/unavailable-must-revalidate", exchange -> revalidatedWith(exchange, 503, "must-revalidate"));
+        this.server.createContext("/unavailable-proxy-revalidate", exchange -> revalidatedWith(exchange, 503, "proxy-revalidate"));
+        this.server.createContext("/unavailable-no-cache", exchange -> revalidatedWith(exchange, 503, "no-cache"));
+        this.server.createContext("/no-cache", exchange -> {
+            List<String> validator = exchange.getRequestHeaders().getOrDefault("If-None-Match", List.of());
+            this.noCacheValidators.add(List.copyOf(validator));
+            exchange.getResponseHeaders().add("ETag", "\"v1\"");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60, no-cache");
+
+            if (!validator.isEmpty()) {
+                exchange.sendResponseHeaders(304, -1);
+                exchange.close();
+                return;
+            }
+
+            byte[] body = "checked".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
         this.server.createContext("/withdrawn", exchange -> revalidatedWith(exchange, 460));
         this.server.createContext("/retired", exchange -> {
             this.retiredHits.incrementAndGet();
@@ -355,12 +382,26 @@ class UrlFetcherTest {
      * @throws IOException if writing the response fails
      */
     private static void revalidatedWith(HttpExchange exchange, int revalidationStatus) throws IOException {
+        revalidatedWith(exchange, revalidationStatus, "");
+    }
+
+    /**
+     * Answers as {@link #revalidatedWith(HttpExchange, int)} does, with {@code directive} added to
+     * the {@code 200}'s {@code Cache-Control} when it is not empty.
+     *
+     * @param exchange the exchange to answer
+     * @param revalidationStatus the status a conditional request is answered with
+     * @param directive the directive added to the {@code 200}'s {@code Cache-Control}, or an
+     *                  empty string for none
+     * @throws IOException if writing the response fails
+     */
+    private static void revalidatedWith(HttpExchange exchange, int revalidationStatus, String directive) throws IOException {
         boolean conditional = exchange.getRequestHeaders().containsKey("If-None-Match");
         byte[] body = (conditional ? "odd" : "steady").getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("ETag", "\"v1\"");
 
         if (!conditional)
-            exchange.getResponseHeaders().add("Cache-Control", "max-age=0, stale-if-error=60");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=0, stale-if-error=60" + (directive.isEmpty() ? "" : ", " + directive));
 
         exchange.sendResponseHeaders(conditional ? revalidationStatus : 200, body.length);
         try (OutputStream os = exchange.getResponseBody()) {
@@ -661,6 +702,38 @@ class UrlFetcherTest {
 
         assertThat(replay.getBody(), is(equalTo("steady")));
         assertThat(replay.isStaleFromCache(), is(true));
+    }
+
+    @Test
+    @DisplayName("A 5xx answering a revalidation raises, rather than replaying the stale entry, when the entry must be revalidated")
+    void serverErrorOnRevalidationOfAnEntryThatMustBeRevalidatedRaises() {
+        for (String directive : List.of("must-revalidate", "proxy-revalidate", "no-cache")) {
+            UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+            URI uri = this.baseUri.resolve("/unavailable-" + directive);
+
+            fetcher.get(uri);
+            UrlFetchException raised = assertThrows(UrlFetchException.class, () -> fetcher.get(uri), directive);
+
+            assertThat(directive, raised.getStatus(), is(HttpStatus.SERVICE_UNAVAILABLE));
+            assertThat(directive, raised.isStaleFromCache(), is(false));
+        }
+    }
+
+    @Test
+    @DisplayName("A response carrying no-cache beside max-age is revalidated before each reuse rather than replayed as fresh")
+    void noCacheIsRevalidatedWhileFresh() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/no-cache");
+
+        Response<String> live = fetcher.get(uri);
+        Response<String> first = fetcher.get(uri);
+        Response<String> second = fetcher.get(uri);
+
+        assertThat(live.isFromCache(), is(false));
+        assertThat(first.isFromCache(), is(true));
+        assertThat(first.getBody(), is(equalTo("checked")));
+        assertThat(second.isFromCache(), is(true));
+        assertThat(this.noCacheValidators, contains(List.of(), List.of("\"v1\""), List.of("\"v1\"")));
     }
 
     @Test

@@ -741,6 +741,10 @@ public interface Response<T> {
 
         /**
          * Determines whether this cached response is currently fresh per RFC 7234 §4.2.
+         * <p>
+         * Freshness alone does not let a cache replay the response:
+         * {@link #canServeWithoutRevalidation(Instant)} also reads the directives that require
+         * a fresh response to be validated first.
          *
          * @param now the reference instant
          * @return {@code true} if {@link #currentAge(Instant)} is strictly less than
@@ -748,6 +752,28 @@ public interface Response<T> {
          */
         public boolean isFresh(@NotNull Instant now) {
             return this.currentAge(now).compareTo(this.freshnessLifetime()) < 0;
+        }
+
+        /**
+         * Determines whether this cached response may answer a request without being validated
+         * with the origin first, per
+         * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4">RFC 7234
+         * Section 4</a>.
+         * <p>
+         * It may while it is {@linkplain #isFresh(Instant) fresh}, unless it carries
+         * {@code no-cache}, which requires every reuse to be validated however long the
+         * response's freshness lifetime
+         * (<a href="https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.2">RFC 7234
+         * §5.2.2.2</a>). A {@code no-cache} naming header fields is honoured as one naming
+         * none. {@code must-revalidate} binds only a stale response, so it does not bear on
+         * this answer.
+         *
+         * @param now the reference instant
+         * @return {@code true} if this response is fresh at {@code now} and carries no
+         *         {@code no-cache}
+         */
+        public boolean canServeWithoutRevalidation(@NotNull Instant now) {
+            return !this.cacheControl().noCache() && this.isFresh(now);
         }
 
         /**
@@ -759,14 +785,21 @@ public interface Response<T> {
          * The boundary is measured from the end of the freshness lifetime, not from
          * {@code now}: a response with {@code max-age=60, stale-if-error=120} may serve
          * stale for 120 seconds after the 60-second freshness window ends.
+         * <p>
+         * A response that {@linkplain #mustRevalidate() must be revalidated} is never served
+         * stale, whatever its {@code stale-if-error} window: a cache must not serve a stale
+         * response an in-protocol directive forbids it to
+         * (<a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.4">RFC 7234
+         * §4.2.4</a>), and the origin's error is returned in its place.
          *
          * @param now the reference instant
-         * @return {@code true} if {@code now} is within the stale-if-error window
+         * @return {@code true} if {@code now} is within the stale-if-error window and no
+         *         directive requires this response to be revalidated
          */
         public boolean canServeStaleOnError(@NotNull Instant now) {
             OptionalLong sie = this.staleIfError();
 
-            if (sie.isEmpty())
+            if (sie.isEmpty() || this.mustRevalidate())
                 return false;
 
             Instant responseTime = this.getDetails().getRoundTrip().completedAt();
@@ -789,7 +822,17 @@ public interface Response<T> {
         }
 
         /**
-         * Indicates whether this entry must be revalidated before reuse once stale.
+         * Indicates whether this entry must not be reused once stale without successful
+         * revalidation, which also rules out a {@code stale-if-error} replay.
+         * <p>
+         * {@code must-revalidate} binds a stale response
+         * (<a href="https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.1">RFC 7234
+         * §5.2.2.1</a>), and {@code no-cache} binds a fresh one as well, which
+         * {@link #canServeWithoutRevalidation(Instant)} reads. {@code proxy-revalidate} binds only
+         * shared caches
+         * (<a href="https://datatracker.ietf.org/doc/html/rfc7234#section-5.2.2.7">RFC 7234
+         * §5.2.2.7</a>); this private cache honours it as {@code must-revalidate}, so a response
+         * carrying it is never served stale in place of an origin error.
          *
          * @return {@code true} if {@code Cache-Control: must-revalidate},
          *         {@code proxy-revalidate}, or {@code no-cache} is set
