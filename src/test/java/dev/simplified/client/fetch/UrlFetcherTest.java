@@ -5,6 +5,7 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import dev.simplified.client.cache.ResponseCache;
+import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.UrlFetchException;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.request.Request;
@@ -37,6 +38,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class UrlFetcherTest {
@@ -683,6 +685,41 @@ class UrlFetcherTest {
         );
 
         assertThat(thrown.getMessage(), containsString("'404'"));
+    }
+
+    @Test
+    @DisplayName("ofStatus raises a context carrying a code HttpStatus has no constant for as ofUnknownStatus does")
+    void ofStatusRaisesAnUnknownCodeAsOfUnknownStatusDoes() {
+        for (int code : new int[] { 460, 498, 561, 218 }) {
+            ErrorContext context = new ErrorContext(
+                HttpStatus.UNKNOWN_ERROR,
+                code,
+                HttpMethod.GET,
+                this.baseUri.toString(),
+                Map.of(),
+                Map.of(),
+                new byte[0]
+            );
+            UrlFetchException viaStatus = UrlFetchException.ofStatus(context, NetworkDetails.EMPTY);
+            UrlFetchException viaCode = UrlFetchException.ofUnknownStatus(code, this.baseUri, Map.of(), new byte[0], NetworkDetails.EMPTY);
+
+            assertThat("code " + code, viaStatus.getClass(), is(equalTo(viaCode.getClass())));
+            assertThat("code " + code, viaStatus.getMessage(), is(equalTo(viaCode.getMessage())));
+        }
+    }
+
+    @Test
+    @DisplayName("The exception raised for a code HttpStatus has no constant for is the fetcher's last response")
+    void unknownStatusIsTheLastResponse() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        fetcher.get(this.baseUri.resolve("/fresh"));
+
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> fetcher.get(this.baseUri.resolve("/unknown-client"))
+        );
+
+        assertThat(fetcher.getLastResponse().orElseThrow(), is(sameInstance(raised)));
     }
 
     @Test

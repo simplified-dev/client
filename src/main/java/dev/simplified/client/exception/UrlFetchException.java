@@ -205,6 +205,11 @@ public class UrlFetchException extends ApiException {
      * Builds the exception a fetch raises when the origin answers with an error status - a
      * {@link ClientError} for a status {@link HttpState#CLIENT_ERROR} classifies, a
      * {@code UrlFetchException} for any other.
+     * <p>
+     * A context carrying a code {@link HttpStatus} has no constant for raises as
+     * {@link #ofUnknownStatus(int, URI, Map, byte[], NetworkDetails)} raises it: a
+     * {@link ClientError} for a {@code 4xx} code outside the Nginx range {@code 494-499}, a
+     * {@code UrlFetchException} for any other.
      *
      * @param context the HTTP context bundle carrying the error status, headers, body, and
      *                request metadata
@@ -212,7 +217,7 @@ public class UrlFetchException extends ApiException {
      * @return the exception to raise
      */
     public static @NotNull UrlFetchException ofStatus(@NotNull ErrorContext context, @NotNull NetworkDetails details) {
-        if (context.status().getState() == HttpState.CLIENT_ERROR)
+        if (isClientError(context))
             return new ClientError(context, details);
 
         return new UrlFetchException(context, details, statusMessage(context));
@@ -258,10 +263,23 @@ public class UrlFetchException extends ApiException {
             body
         );
 
-        if (statusCode >= CLIENT_ERROR_MIN && statusCode <= CLIENT_ERROR_MAX && !HttpState.NGINX_ERROR.containsCode(statusCode))
-            return new ClientError(context, details);
+        return ofStatus(context, details);
+    }
 
-        return new UrlFetchException(context, details, statusMessage(context));
+    /**
+     * Tells whether the status a context carries raises a {@link ClientError}: a status
+     * {@link HttpState#CLIENT_ERROR} classifies, or a {@code 4xx} code {@link HttpStatus} has no
+     * constant for outside the range {@link HttpState#NGINX_ERROR} holds.
+     *
+     * @param context the HTTP context bundle carrying the status the origin answered with
+     * @return {@code true} when the status raises a {@link ClientError}
+     */
+    private static boolean isClientError(@NotNull ErrorContext context) {
+        if (context.isKnownStatus())
+            return context.status().getState() == HttpState.CLIENT_ERROR;
+
+        int statusCode = context.statusCode();
+        return statusCode >= CLIENT_ERROR_MIN && statusCode <= CLIENT_ERROR_MAX && !HttpState.NGINX_ERROR.containsCode(statusCode);
     }
 
     /**

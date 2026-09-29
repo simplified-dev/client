@@ -83,8 +83,9 @@ import java.util.TreeMap;
  *       {@link UrlFetchException#ofUnknownStatus UrlFetchException.ofUnknownStatus} builds it:
  *       {@link UrlFetchException.ClientError} for a {@code 4xx} code outside the Nginx range
  *       {@code 494-499}, a {@link UrlFetchException} for any other, each carrying the code as its
- *       {@link UrlFetchException#getStatusCode() status code}. No response is recorded or
- *       stored for it.</li>
+ *       {@link UrlFetchException#getStatusCode() status code}. The exception is recorded on the
+ *       cache as the last response, as a Feign contract client records the exception it raises
+ *       for such a code, and nothing is stored for it.</li>
  *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>
  *   <li>Raise for an {@linkplain Response#isError() error} status, which is never offered to
  *       the cache: {@link UrlFetchException.ClientError} for a {@code 4xx}, a
@@ -382,8 +383,11 @@ public final class UrlFetcher {
             byte[] body = readBody(apacheResponse, url, context, maxBodyBytes, raises);
             Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
 
-            if (known.isEmpty())
-                throw UrlFetchException.ofUnknownStatus(statusCode, url, headers, body, new NetworkDetails(context));
+            if (known.isEmpty()) {
+                UrlFetchException unknown = UrlFetchException.ofUnknownStatus(statusCode, url, headers, body, new NetworkDetails(context));
+                this.responseCache.recordLastResponse(unknown);
+                throw unknown;
+            }
 
             HttpStatus status = known.get();
 
