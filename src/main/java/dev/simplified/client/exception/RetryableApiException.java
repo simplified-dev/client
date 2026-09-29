@@ -61,7 +61,7 @@ public final class RetryableApiException extends RetryableException {
         @NotNull feign.Request feignRequest
     ) {
         super(
-            apiException.getStatus().getCode(),
+            apiException.getStatusCode(),
             apiException.getMessage(),
             feignRequest.httpMethod(),
             apiException.getCause(),

@@ -63,4 +63,13 @@ class HttpDatesTest {
         assertThat(parsed.orElse(null), is(equalTo(EXPECTED)));
     }
 
+    @Test
+    @DisplayName("Formats an instant as IMF-fixdate, a single-digit day padded, which parses back to its whole second")
+    void formatsImfFixdate() {
+        String formatted = HttpDates.format(EXPECTED.plusMillis(750));
+
+        assertThat(formatted, is(equalTo("Sun, 06 Nov 1994 08:49:37 GMT")));
+        assertThat(HttpDates.parse(formatted).orElse(null), is(equalTo(EXPECTED)));
+    }
+
 }

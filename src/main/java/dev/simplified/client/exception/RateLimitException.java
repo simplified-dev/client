@@ -3,11 +3,13 @@ package dev.simplified.client.exception;
 import dev.simplified.annotations.Getter;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.pool.SubnetBucket;
+import feign.Request;
 import feign.RequestTemplate;
 import org.jetbrains.annotations.NotNull;
 
@@ -26,8 +28,8 @@ import java.util.Collections;
  *       {@link RateLimitManager} detected that
  *       the request would exceed the configured quota and blocked it before
  *       it reached the network. A synthetic primitive context is built directly
- *       from the {@link RequestTemplate} via
- *       {@link #RateLimitException(RequestTemplate, RouteDiscovery.Metadata)}.</li>
+ *       from the blocked {@link Request} via
+ *       {@link #RateLimitException(Request, RouteDiscovery.Metadata)}.</li>
  * </ul>
  * <p>
  * The {@link #serverEnforced} flag distinguishes between these two cases,
@@ -74,27 +76,41 @@ public final class RateLimitException extends ApiException {
     }
 
     /**
-     * Constructs a client-enforced rate-limit exception from a request that was blocked
-     * before being sent.
+     * Constructs a client-enforced rate-limit exception from a request template whose request
+     * was blocked before being sent.
      * <p>
-     * This constructor is invoked by the request interceptor when the local
-     * {@link RateLimitManager} determines that sending the request would exceed the
-     * configured quota. A synthetic {@link ErrorContext} carrying
-     * {@link HttpStatus#TOO_MANY_REQUESTS}, empty {@link NetworkDetails}, and the request
-     * template's method and url is built so the exception carries the same shape as a
-     * server-enforced one without fabricating an intermediate {@link feign.Response}.
+     * Builds the exception {@link #RateLimitException(Request, RouteDiscovery.Metadata)} builds
+     * for the request the template produces.
      *
      * @param template the Feign request template that was blocked
      * @param routeMetadata the route metadata providing the bucket identifier and rate-limit policy
      */
     public RateLimitException(@NotNull RequestTemplate template, @NotNull RouteDiscovery.Metadata routeMetadata) {
+        this(template.request(), routeMetadata);
+    }
+
+    /**
+     * Constructs a client-enforced rate-limit exception from a request that was blocked
+     * before being sent.
+     * <p>
+     * This constructor is invoked by {@link RateLimitingFeignClient} when the local
+     * {@link RateLimitManager} determines that sending the request would exceed the
+     * configured quota. A synthetic {@link ErrorContext} carrying
+     * {@link HttpStatus#TOO_MANY_REQUESTS}, empty {@link NetworkDetails}, and the request's
+     * method and url is built so the exception carries the same shape as a server-enforced one
+     * without fabricating an intermediate {@link feign.Response}.
+     *
+     * @param request the Feign request that was blocked
+     * @param routeMetadata the route metadata providing the bucket identifier and rate-limit policy
+     */
+    public RateLimitException(@NotNull Request request, @NotNull RouteDiscovery.Metadata routeMetadata) {
         super(
             null,
             "RateLimit",
             new ErrorContext(
                 HttpStatus.TOO_MANY_REQUESTS,
-                HttpMethod.of(template.request().httpMethod().name()),
-                template.request().url(),
+                HttpMethod.of(request.httpMethod().name()),
+                request.url(),
                 Collections.emptyMap(),
                 Collections.emptyMap(),
                 new byte[0]

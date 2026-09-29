@@ -47,6 +47,10 @@ import java.util.function.Supplier;
  * filter + {@code Concurrent} wrappers for the cleaned headers) that the dominant
  * status-only access pattern can skip entirely.
  * <p>
+ * {@link #getStatusCode()} is the numeric status. For a code {@link HttpStatus} has no constant
+ * for, such as {@code 460}, it is the code the server sent and {@link #getStatus()} is
+ * {@link HttpStatus#UNKNOWN_ERROR}; otherwise it is the code of {@link #getStatus()}.
+ * <p>
  * The {@link #response} field holds a parsed {@link ApiErrorResponse} whose
  * concrete type is determined by each {@link Client} subclass's error decoder.
  * When JSON deserialization of the error body fails, a fallback implementation
@@ -236,16 +240,30 @@ public class ApiException extends RuntimeException implements Response<Optional<
     }
 
     /**
+     * The numeric status - the code the server answered with, including one {@link HttpStatus}
+     * has no constant for, or the code of the synthetic status a failure without a server status
+     * carries.
+     */
+    public int getStatusCode() {
+        return this.context.statusCode();
+    }
+
+    /**
      * Synthesizes the exception message from the request method, URL, and status.
      * <p>
      * Produces a diagnostic line of the form
      * {@code "GET https://api.example.com/v1/resource failed with status 404 Not Found"},
-     * substituting the actual endpoint hit for the prior Feign contract-method format.
+     * substituting the actual endpoint hit for the prior Feign contract-method format, or
+     * {@code "GET https://api.example.com/v1/resource failed with unknown status 460"} for a
+     * code {@link HttpStatus} has no constant for.
      *
      * @param context the primitive context whose fields drive the message
      * @return the synthesized message text
      */
     private static @NotNull String synthesizeMessage(@NotNull ErrorContext context) {
+        if (!context.isKnownStatus())
+            return "%s %s failed with unknown status %d".formatted(context.requestMethod(), context.requestUrl(), context.statusCode());
+
         return "%s %s failed with status %d %s".formatted(
             context.requestMethod(),
             context.requestUrl(),

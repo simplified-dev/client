@@ -3,8 +3,8 @@ package dev.simplified.client.interceptor;
 import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CachingFeignClient;
-import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.route.RouteDiscovery;
 import feign.MethodMetadata;
@@ -13,24 +13,18 @@ import feign.RequestTemplate;
 import org.jetbrains.annotations.NotNull;
 
 /**
- * Feign {@link RequestInterceptor} that applies route resolution and client-side rate limit
- * enforcement to every outbound request.
+ * Feign {@link RequestInterceptor} that applies route resolution to every outbound request.
  * <p>
  * For each {@link RequestTemplate}, this interceptor performs the following steps in order:
  * <ol>
  *   <li>Resolves the target {@link RouteDiscovery.Metadata} for the invoked endpoint method
  *       via {@link RouteDiscovery}.</li>
- *   <li>Resolves the bucket the endpoint's requests count against through
- *       {@link RateLimitManager#getBucketKey(String, String)}: the quota the endpoint's latest
- *       response named, or the route's own bucket.</li>
- *   <li>Checks whether that bucket is currently rate-limited using {@link RateLimitManager}.
- *       If the limit has been reached, a {@link RateLimitException} is thrown to abort the
- *       request before it leaves the client.</li>
- *   <li>Records the request in the rate limit tracker so future calls can be evaluated
- *       against the configured quota.</li>
  *   <li>Numbers the request with {@link RateLimitManager#nextSequence()}, replacing any number
  *       an earlier attempt of the same template carried, so {@link InternalResponseInterceptor}
- *       can tell a late response from the response to a later request.</li>
+ *       can tell a late response from the response to a later request. The number rides on the
+ *       request Feign builds as an {@linkplain NetworkDetails#isInternalHeader(String) internal
+ *       header}, which the client's transport removes before the request leaves the client, so
+ *       it never reaches the origin.</li>
  *   <li>Replaces the placeholder target URL on the template with the real HTTPS URL
  *       obtained from the route metadata.</li>
  * </ol>
@@ -41,34 +35,38 @@ import org.jetbrains.annotations.NotNull;
  * the underlying Feign client below this interceptor and handles {@code If-None-Match} /
  * {@code If-Modified-Since} attachment itself.
  * <p>
+ * Client-side rate-limit enforcement lives in {@link RateLimitingFeignClient}, which wraps the
+ * transport below {@link CachingFeignClient CachingFeignClient}, so a request the cache answers
+ * is neither refused by the route's bucket nor counted against it; this interceptor runs
+ * before the cache is consulted and so neither checks nor counts a request.
+ * <p>
  * This class is instantiated internally by {@link Client} during Feign
  * builder configuration and is not intended for direct use by application code.
  *
  * @see InternalResponseInterceptor
  * @see RouteDiscovery
  * @see RateLimitManager
- * @see RateLimitException
+ * @see RateLimitingFeignClient
  * @see dev.simplified.client.cache.CachingFeignClient
  */
 @RequiredArgsConstructor
 public final class InternalRequestInterceptor implements RequestInterceptor {
 
     /**
-     * The manager responsible for tracking and enforcing per-route rate limits.
+     * The manager whose {@link RateLimitManager#nextSequence()} numbers each request.
      */
     private final @NotNull RateLimitManager rateLimitManager;
 
     /**
-     * The discovery engine that maps endpoint methods to their route metadata. Each
-     * {@link RouteDiscovery.Metadata} carries a precomputed
-     * {@linkplain RouteDiscovery.Metadata#getBucketKey() bucket key} that this interceptor hands
-     * to the manager directly - no per-request composition.
+     * The discovery engine that maps endpoint methods to their route metadata, whose
+     * {@linkplain RouteDiscovery.Metadata#getFullUrl() full URL} each request is sent to.
      */
     private final @NotNull RouteDiscovery routeDiscovery;
 
     /**
      * Internal header key used to carry the request's {@linkplain RateLimitManager#nextSequence()
-     * sequence number} from request to response interceptor.
+     * sequence number} from request to response interceptor; the transport removes it from the
+     * request it sends.
      */
     static final @NotNull String SEQUENCE_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Request-Sequence";
 
@@ -79,13 +77,6 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
     public void apply(@NotNull RequestTemplate template) {
         MethodMetadata endpoint = template.methodMetadata();
         RouteDiscovery.Metadata routeMetadata = this.routeDiscovery.getMetadata(endpoint.method());
-        String bucketKey = this.rateLimitManager.getBucketKey(routeMetadata.getBucketKey(), endpoint.configKey());
-        long now = System.currentTimeMillis();
-
-        if (this.rateLimitManager.isRateLimited(bucketKey, routeMetadata.getRateLimit(), now))
-            throw new RateLimitException(template, routeMetadata);
-
-        this.rateLimitManager.trackRequest(bucketKey, routeMetadata.getRateLimit(), now);
 
         template.removeHeader(SEQUENCE_HEADER);
         template.header(SEQUENCE_HEADER, Long.toString(this.rateLimitManager.nextSequence()));

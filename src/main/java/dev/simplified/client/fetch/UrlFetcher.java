@@ -37,6 +37,7 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -50,8 +51,8 @@ import java.util.TreeMap;
  * the contract-based Feign discipline that {@code Client} requires.
  * <p>
  * Built from a {@link UrlFetcherConfig} via {@link #create(UrlFetcherConfig)}, the fetcher
- * exposes a small typed API ({@link #get(URI)}, {@link #get(URI, Class)}, {@link #bytes(URI)})
- * that returns the same {@link Response Response&lt;T&gt;} envelopes used elsewhere in the
+ * exposes a small typed API ({@link #get(URI)}, {@link #get(URI, Class)}, {@link #bytes(URI)},
+ * each with an overload naming its own body cap) that returns the same {@link Response Response&lt;T&gt;} envelopes used elsewhere in the
  * library, enabling observability code to treat contract-call responses and ad-hoc fetches
  * uniformly.
  * <p>
@@ -62,25 +63,58 @@ import java.util.TreeMap;
  *       stores its response and refreshes that response's variant by them, so a response's
  *       {@code Vary} is matched against the values the origin received.</li>
  *   <li>Resolve a rate-limit bucket id via {@link UrlFetcherConfig#getBucketResolver()}.</li>
- *   <li>Look up the URL and the request's headers in the {@link ResponseCache}; on a fresh hit,
- *       serve a synthesized {@link Response.DirectImpl} immediately. On a stale hit with an
+ *   <li>Look up the URL, ended with the {@linkplain CacheKey#queryFingerprints(Map) stand-in} for
+ *       the static query parameters, and the request's headers in the {@link ResponseCache},
+ *       which stores the response under the same URL; on a hit that
+ *       {@linkplain Response.CachedImpl#canServeWithoutRevalidation(Instant) may be served
+ *       without revalidation} - fresh, and carrying no {@code no-cache} - serve a synthesized
+ *       {@link Response.DirectImpl} immediately. On any other hit with an
  *       {@code ETag} or {@code Last-Modified} validator, attach {@code If-None-Match} /
  *       {@code If-Modified-Since} and dispatch a conditional request; on
  *       {@code 304 Not Modified}, refresh the cached entry and replay the cached body under the
  *       refreshed headers, or under the stored ones when {@link ResponseCache#updateOn304}
  *       refreshed nothing; on a {@code 5xx} within the entry's {@code stale-if-error} window,
- *       replay the cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}.</li>
+ *       replay the cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}, unless the
+ *       entry carries {@code must-revalidate}, {@code proxy-revalidate} or {@code no-cache},
+ *       which {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) refuse a stale
+ *       replay}, so the {@code 5xx} raises.</li>
  *   <li>Check the local rate limit; raise {@link UrlFetchException.RateLimited} if exhausted.</li>
- *   <li>Track the request and dispatch through the shared Apache transport, recording the
- *       instant the response arrived on the request's context so the response's
- *       {@link NetworkDetails} carry the whole round trip.</li>
- *   <li>Read the response body capped at {@link UrlFetcherConfig#getMaxBodyBytes()};
- *       raise {@link UrlFetchException.BodyCapExceeded} if the cap is hit.</li>
+ *   <li>Track the request and dispatch through the shared Apache transport, which appends the
+ *       static query parameters themselves, recording the instant the response arrived on the
+ *       request's context so the response's {@link NetworkDetails} carry the whole round
+ *       trip.</li>
+ *   <li>Read the response body capped at the fetch's cap; raise
+ *       {@link UrlFetchException.BodyCapExceeded} if the cap is hit, except under an error
+ *       status or a code {@link HttpStatus} has no constant for, whose body is cut at the cap
+ *       so that the status is what the fetch raises.</li>
+ *   <li>Raise for a code {@link HttpStatus} has no constant for, as
+ *       {@link UrlFetchException#ofUnknownStatus UrlFetchException.ofUnknownStatus} builds it:
+ *       {@link UrlFetchException.ClientError} for a {@code 4xx} code outside the Nginx range
+ *       {@code 494-499}, a {@link UrlFetchException} for any other, each carrying the code as its
+ *       {@link UrlFetchException#getStatusCode() status code}. The exception is recorded on the
+ *       cache as the last response, as a Feign contract client records the exception it raises
+ *       for such a code, and nothing is stored for it.</li>
  *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>
- *   <li>Raise {@link UrlFetchException} for an {@linkplain Response#isError() error} status,
- *       which is never offered to the cache; otherwise offer the response to the cache for
+ *   <li>Raise for an {@linkplain Response#isError() error} status, which is never offered to
+ *       the cache: {@link UrlFetchException.ClientError} for a {@code 4xx}, a
+ *       {@link UrlFetchException} for any other; otherwise offer the response to the cache for
  *       storage and return it.</li>
  * </ol>
+ * <p>
+ * A {@code 4xx} answering a conditional request raises as well: only a {@code 5xx} is replaced
+ * by a {@code stale-if-error} replay. A cache replay whose status is an error raises the
+ * exception the live answer would have; this fetcher never stores one, so such an entry comes
+ * only from another writer to a {@linkplain UrlFetcherConfig#getSharedCache() shared cache}.
+ * <p>
+ * A fetch's cap is {@link UrlFetcherConfig#getMaxBodyBytes()} unless the call names its own, as
+ * {@link #get(URI, long)}, {@link #get(URI, Class, long)} and {@link #bytes(URI, long)} do. The
+ * cap binds every body the fetch answers with: one read off the wire, and one the cache replays
+ * on a fresh hit, a {@code 304 Not Modified} or a {@code stale-if-error} replacement. A cached
+ * body larger than the cap raises {@link UrlFetchException.BodyCapExceeded} with the replay's
+ * headers, and a fresh hit raises it without a request being sent. The entry stays cached, so a
+ * fetch with a larger cap is still answered from it. An error status raises its own exception
+ * whatever the size of its body, which that exception carries cut at the cap, so a {@code 404}
+ * page larger than the cap still raises {@link UrlFetchException.ClientError}.
  *
  * @see UrlFetcherConfig
  * @see UrlFetchException
@@ -111,13 +145,21 @@ public final class UrlFetcher {
     @Getter
     private final @NotNull RateLimitManager rateLimitManager;
 
+    /**
+     * The stand-in for the static query parameters that ends the URL each request is keyed by in
+     * the cache, or an empty string for a fetcher without any.
+     */
+    private final @NotNull String queryFingerprints;
+
     private UrlFetcher(@NotNull UrlFetcherConfig options) {
         this.options = options;
         this.responseCache = options.getSharedCache().orElseGet(() -> new ResponseCache(
             options.getTimings().maxCacheBytes(),
-            options.getTimings().cacheSafetyFallback()
+            options.getTimings().cacheSafetyFallback(),
+            options.getTimings().cacheStaleRetention()
         ));
         this.rateLimitManager = options.getSharedRateLimits().orElseGet(RateLimitManager::new);
+        this.queryFingerprints = CacheKey.queryFingerprints(options.getQueries());
         this.http = ApacheClientFactory.configure(
             options.getTimings(),
             options.getQueries(),
@@ -139,21 +181,39 @@ public final class UrlFetcher {
 
     /**
      * Fetches the given URL and returns its body decoded as a {@link String} using the
-     * charset advertised by the {@code Content-Type} header (or UTF-8 if absent).
+     * charset advertised by the {@code Content-Type} header (or UTF-8 if absent), holding the
+     * body to the {@linkplain UrlFetcherConfig#getMaxBodyBytes() configured cap}.
      *
      * @param url the URL to fetch
      * @return the typed response envelope
      */
     public @NotNull Response<String> get(@NotNull URI url) {
-        Response.DirectImpl<byte[]> raw = this.fetch(url);
-        Charset charset = charsetFromContentType(raw.getContentType().orElse(null), StandardCharsets.UTF_8);
-        return raw.withBody(() -> new String(raw.getBody(), charset));
+        return this.decodeString(this.fetch(url, this.options.getMaxBodyBytes()));
+    }
+
+    /**
+     * Fetches the given URL and returns its body decoded as {@link #get(URI)} decodes it, holding
+     * the body to {@code maxBodyBytes} in place of the configured cap.
+     * <p>
+     * The cap binds a body the cache replays as it binds one read off the wire, so a cached body
+     * larger than {@code maxBodyBytes} raises {@link UrlFetchException.BodyCapExceeded} without a
+     * request being sent.
+     *
+     * @param url the URL to fetch
+     * @param maxBodyBytes the largest body, in bytes, this fetch accepts
+     * @return the typed response envelope
+     * @throws IllegalArgumentException if {@code maxBodyBytes} is negative
+     */
+    public @NotNull Response<String> get(@NotNull URI url, long maxBodyBytes) {
+        return this.decodeString(this.fetch(url, requireCap(maxBodyBytes)));
     }
 
     /**
      * Fetches the given URL and deserializes the body into {@code type} via the configured
-     * {@link Gson Gson} instance. Body bytes are first decoded to a string
-     * using the charset advertised by the {@code Content-Type} header (or UTF-8 if absent).
+     * {@link Gson Gson} instance, holding the body to the
+     * {@linkplain UrlFetcherConfig#getMaxBodyBytes() configured cap}. Body bytes are first
+     * decoded to a string using the charset advertised by the {@code Content-Type} header (or
+     * UTF-8 if absent).
      *
      * @param url the URL to fetch
      * @param type the target type
@@ -161,19 +221,48 @@ public final class UrlFetcher {
      * @return the typed response envelope
      */
     public <T> @NotNull Response<T> get(@NotNull URI url, @NotNull Class<T> type) {
-        Response.DirectImpl<byte[]> raw = this.fetch(url);
-        Charset charset = charsetFromContentType(raw.getContentType().orElse(null), StandardCharsets.UTF_8);
-        return raw.withBody(() -> this.options.getGson().fromJson(new String(raw.getBody(), charset), type));
+        return this.decodeJson(this.fetch(url, this.options.getMaxBodyBytes()), type);
     }
 
     /**
-     * Fetches the given URL and returns its body bytes verbatim.
+     * Fetches the given URL and deserializes the body into {@code type} as
+     * {@link #get(URI, Class)} does, holding the body to {@code maxBodyBytes} in place of the
+     * configured cap, on a live read and a cache replay alike.
+     *
+     * @param url the URL to fetch
+     * @param type the target type
+     * @param maxBodyBytes the largest body, in bytes, this fetch accepts
+     * @param <T> the target type parameter
+     * @return the typed response envelope
+     * @throws IllegalArgumentException if {@code maxBodyBytes} is negative
+     */
+    public <T> @NotNull Response<T> get(@NotNull URI url, @NotNull Class<T> type, long maxBodyBytes) {
+        return this.decodeJson(this.fetch(url, requireCap(maxBodyBytes)), type);
+    }
+
+    /**
+     * Fetches the given URL and returns its body bytes verbatim, holding the body to the
+     * {@linkplain UrlFetcherConfig#getMaxBodyBytes() configured cap}.
      *
      * @param url the URL to fetch
      * @return the typed response envelope
      */
     public @NotNull Response<byte[]> bytes(@NotNull URI url) {
-        return this.fetch(url);
+        return this.fetch(url, this.options.getMaxBodyBytes());
+    }
+
+    /**
+     * Fetches the given URL and returns its body bytes verbatim, holding the body to
+     * {@code maxBodyBytes} in place of the configured cap, on a live read and a cache replay
+     * alike.
+     *
+     * @param url the URL to fetch
+     * @param maxBodyBytes the largest body, in bytes, this fetch accepts
+     * @return the typed response envelope
+     * @throws IllegalArgumentException if {@code maxBodyBytes} is negative
+     */
+    public @NotNull Response<byte[]> bytes(@NotNull URI url, long maxBodyBytes) {
+        return this.fetch(url, requireCap(maxBodyBytes));
     }
 
     // ===== Observability =====
@@ -236,17 +325,17 @@ public final class UrlFetcher {
 
     // ===== Core fetch path =====
 
-    private @NotNull Response.DirectImpl<byte[]> fetch(@NotNull URI url) {
-        Request request = new Request.Impl(HttpMethod.GET, url.toString());
+    private @NotNull Response.DirectImpl<byte[]> fetch(@NotNull URI url, long maxBodyBytes) {
+        Request request = new Request.Impl(HttpMethod.GET, CacheKey.withQuery(url.toString(), this.queryFingerprints));
         Map<String, Collection<String>> requestHeaders = this.requestHeaders();
         String bucketId = this.options.getBucketResolver().apply(url);
         RateLimit policy = this.options.getDefaultRateLimit();
         long now = System.currentTimeMillis();
 
-        Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, url.toString(), requestHeaders);
+        Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, request.getUrl(), requestHeaders);
 
-        if (hit.isPresent() && hit.get().response().isFresh(Instant.now()))
-            return this.serveFromCache(request, hit.get(), false);
+        if (hit.isPresent() && hit.get().response().canServeWithoutRevalidation(Instant.now()))
+            return this.serveFromCache(url, request, hit.get(), false, maxBodyBytes);
 
         if (this.rateLimitManager.isRateLimited(bucketId, policy, now))
             throw new UrlFetchException.RateLimited(url, bucketId, policy);
@@ -254,7 +343,7 @@ public final class UrlFetcher {
         this.rateLimitManager.trackRequest(bucketId, policy, now);
 
         CacheEntry<?> revalidating = hit.filter(e -> e.response().canRevalidate()).orElse(null);
-        return this.executeAndStore(url, request, requestHeaders, revalidating);
+        return this.executeAndStore(url, request, requestHeaders, revalidating, maxBodyBytes);
     }
 
     /**
@@ -280,7 +369,8 @@ public final class UrlFetcher {
         @NotNull URI url,
         @NotNull Request request,
         @NotNull Map<String, Collection<String>> requestHeaders,
-        @Nullable CacheEntry<?> revalidating
+        @Nullable CacheEntry<?> revalidating,
+        long maxBodyBytes
     ) {
         HttpGet get = new HttpGet(url);
         requestHeaders.forEach((name, values) -> values.forEach(value -> get.addHeader(name, value)));
@@ -296,17 +386,26 @@ public final class UrlFetcher {
             int statusCode = apacheResponse.getCode();
 
             if (statusCode == HttpStatus.NOT_MODIFIED.getCode() && revalidating != null)
-                return this.serveOn304(request, requestHeaders, apacheResponse, context, revalidating);
+                return this.serveOn304(url, request, requestHeaders, apacheResponse, context, revalidating, maxBodyBytes);
 
             if (HttpState.SERVER_ERROR.containsCode(statusCode) && revalidating != null
                 && revalidating.response().canServeStaleOnError(Instant.now())) {
                 EntityUtils.consumeQuietly(apacheResponse.getEntity());
-                return this.serveFromCache(request, revalidating, true);
+                return this.serveFromCache(url, request, revalidating, true, maxBodyBytes);
             }
 
-            byte[] body = readBody(apacheResponse, url, context, this.options.getMaxBodyBytes());
-            HttpStatus status = HttpStatus.of(statusCode);
+            Optional<HttpStatus> known = HttpStatus.findByCode(statusCode);
+            boolean raises = known.map(HttpStatus::getState).map(HttpState::isError).orElse(true);
+            byte[] body = readBody(apacheResponse, url, context, maxBodyBytes, raises);
             Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
+
+            if (known.isEmpty()) {
+                UrlFetchException unknown = UrlFetchException.ofUnknownStatus(statusCode, url, headers, body, new NetworkDetails(context));
+                this.responseCache.recordLastResponse(unknown);
+                throw unknown;
+            }
+
+            HttpStatus status = known.get();
 
             Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
                 status,
@@ -319,14 +418,7 @@ public final class UrlFetcher {
             this.responseCache.recordLastResponse(response);
 
             if (response.isError())
-                throw new UrlFetchException(
-                    new ErrorContext(status, HttpMethod.GET, url.toString(), headers, Collections.emptyMap(), body),
-                    new NetworkDetails(context),
-                    "Origin returned %d %s for URL '%s'",
-                    status.getCode(),
-                    status.getMessage(),
-                    url
-                );
+                throw statusFailure(request, status, headers, body, new NetworkDetails(context));
 
             this.responseCache.store(response, body, requestHeaders);
             return response;
@@ -338,11 +430,13 @@ public final class UrlFetcher {
     }
 
     private @NotNull Response.DirectImpl<byte[]> serveOn304(
+        @NotNull URI url,
         @NotNull Request request,
         @NotNull Map<String, Collection<String>> requestHeaders,
         @NotNull CloseableHttpResponse apacheResponse,
         @NotNull HttpClientContext context,
-        @NotNull CacheEntry<?> revalidating
+        @NotNull CacheEntry<?> revalidating,
+        long maxBodyBytes
     ) {
         CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, request.getUrl());
         CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(
@@ -350,16 +444,34 @@ public final class UrlFetcher {
             requestHeaders
         );
         CacheEntry<?> refreshed = this.responseCache
-            .updateOn304(key, fingerprint, headersFromApache(apacheResponse), new NetworkDetails(context))
+            .updateOn304(key, fingerprint, requestHeaders, headersFromApache(apacheResponse), new NetworkDetails(context))
             .orElse(revalidating);
         EntityUtils.consumeQuietly(apacheResponse.getEntity());
-        return this.serveFromCache(request, refreshed, false);
+        return this.serveFromCache(url, request, refreshed, false, maxBodyBytes);
     }
 
+    /**
+     * Answers a fetch with a cached entry, holding its body to the fetch's cap as a live read
+     * holds the body it reads.
+     *
+     * @param url the URL fetched
+     * @param request the request the entry answers
+     * @param entry the cached entry to replay
+     * @param servedStale whether the entry replaces a {@code 5xx} within its
+     *                    {@code stale-if-error} window
+     * @param maxBodyBytes the largest body, in bytes, the fetch accepts
+     * @return the replayed response
+     * @throws UrlFetchException.BodyCapExceeded if the cached status is not an error and the
+     *                                           cached body is larger than {@code maxBodyBytes}
+     * @throws UrlFetchException if the cached status is an error, carrying the body cut at
+     *                           {@code maxBodyBytes}
+     */
     private @NotNull Response.DirectImpl<byte[]> serveFromCache(
+        @NotNull URI url,
         @NotNull Request request,
         @NotNull CacheEntry<?> entry,
-        boolean servedStale
+        boolean servedStale,
+        long maxBodyBytes
     ) {
         Response.CachedImpl<?> cached = entry.response();
         Instant now = Instant.now();
@@ -373,6 +485,11 @@ public final class UrlFetcher {
         if (servedStale)
             headers.put(ResponseCache.CACHE_STALE_HEADER, List.of("true"));
 
+        boolean error = cached.getStatus().getState().isError();
+
+        if (!error && entry.body().length > maxBodyBytes)
+            throw new UrlFetchException.BodyCapExceeded(url, NetworkDetails.EMPTY, headers, maxBodyBytes);
+
         Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
             cached.getStatus(),
             request,
@@ -381,16 +498,111 @@ public final class UrlFetcher {
             entry::body
         );
         this.responseCache.recordLastResponse(response);
+
+        if (error)
+            throw statusFailure(request, cached.getStatus(), headers, cutAt(entry.body(), maxBodyBytes), NetworkDetails.EMPTY);
+
         return response;
     }
 
     // ===== Helpers =====
 
+    /**
+     * Retypes a fetched envelope's body to a {@link String}, decoded with the charset its
+     * {@code Content-Type} advertises, or UTF-8.
+     *
+     * @param raw the fetched envelope
+     * @return the envelope with a string body
+     */
+    private @NotNull Response<String> decodeString(@NotNull Response.DirectImpl<byte[]> raw) {
+        Charset charset = charsetFromContentType(raw.getContentType().orElse(null), StandardCharsets.UTF_8);
+        return raw.withBody(() -> new String(raw.getBody(), charset));
+    }
+
+    /**
+     * Retypes a fetched envelope's body to {@code type}, deserialized by the configured
+     * {@link Gson} from the string {@link #decodeString} would give.
+     *
+     * @param raw the fetched envelope
+     * @param type the target type
+     * @param <T> the target type parameter
+     * @return the envelope with a typed body
+     */
+    private <T> @NotNull Response<T> decodeJson(@NotNull Response.DirectImpl<byte[]> raw, @NotNull Class<T> type) {
+        Charset charset = charsetFromContentType(raw.getContentType().orElse(null), StandardCharsets.UTF_8);
+        return raw.withBody(() -> this.options.getGson().fromJson(new String(raw.getBody(), charset), type));
+    }
+
+    /**
+     * Checks a body cap a caller names for one fetch.
+     *
+     * @param maxBodyBytes the cap in bytes
+     * @return {@code maxBodyBytes}
+     * @throws IllegalArgumentException if {@code maxBodyBytes} is negative
+     */
+    private static long requireCap(long maxBodyBytes) {
+        if (maxBodyBytes < 0)
+            throw new IllegalArgumentException(String.format("Body cap must not be negative, got '%s'", maxBodyBytes));
+
+        return maxBodyBytes;
+    }
+
+    /**
+     * Builds the exception a fetch raises for an error status, whether the origin answered it or
+     * the cache replayed it.
+     *
+     * @param request the request the status answers
+     * @param status the error status
+     * @param headers the response headers
+     * @param body the response body
+     * @param details the network timing snapshot of the exchange
+     * @return a {@link UrlFetchException.ClientError} for a client error status, otherwise a
+     *         {@link UrlFetchException}
+     */
+    private static @NotNull UrlFetchException statusFailure(
+        @NotNull Request request,
+        @NotNull HttpStatus status,
+        @NotNull Map<String, Collection<String>> headers,
+        byte @NotNull [] body,
+        @NotNull NetworkDetails details
+    ) {
+        return UrlFetchException.ofStatus(
+            new ErrorContext(status, request.getMethod(), request.getUrl(), headers, Collections.emptyMap(), body),
+            details
+        );
+    }
+
+    /**
+     * Cuts a body at a cap.
+     *
+     * @param body the body
+     * @param maxBytes the cap in bytes
+     * @return {@code body} when it fits the cap, otherwise its first {@code maxBytes} bytes
+     */
+    private static byte @NotNull [] cutAt(byte @NotNull [] body, long maxBytes) {
+        return body.length <= maxBytes ? body : Arrays.copyOf(body, (int) maxBytes);
+    }
+
+    /**
+     * Reads a response's body, holding it to a cap.
+     *
+     * @param apacheResponse the response whose body is read
+     * @param url the URL fetched
+     * @param context the request's context, for the network details of a refusal
+     * @param maxBytes the largest body, in bytes, the fetch accepts
+     * @param cutAtCap whether a body past the cap is cut at it rather than refused, as the body
+     *                 of an error status is
+     * @return the body, empty when the response carries none
+     * @throws UrlFetchException.BodyCapExceeded if the body is larger than {@code maxBytes} and
+     *                                           {@code cutAtCap} is not set
+     * @throws IOException if reading the body fails
+     */
     private static byte @NotNull [] readBody(
         @NotNull CloseableHttpResponse apacheResponse,
         @NotNull URI url,
         @NotNull HttpClientContext context,
-        long maxBytes
+        long maxBytes,
+        boolean cutAtCap
     ) throws IOException {
         HttpEntity entity = apacheResponse.getEntity();
         if (entity == null)
@@ -407,6 +619,11 @@ public final class UrlFetcher {
             while ((read = in.read(buffer)) != -1) {
                 total += read;
                 if (total > maxBytes) {
+                    if (cutAtCap) {
+                        out.write(buffer, 0, (int) (read - (total - maxBytes)));
+                        break;
+                    }
+
                     Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
                     NetworkDetails details = new NetworkDetails(context);
                     throw new UrlFetchException.BodyCapExceeded(url, details, headers, maxBytes);

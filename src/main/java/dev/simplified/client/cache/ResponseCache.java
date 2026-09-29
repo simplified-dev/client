@@ -10,6 +10,7 @@ import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import dev.simplified.client.util.HttpDates;
 import dev.simplified.collection.Concurrent;
 import dev.simplified.collection.ConcurrentList;
 import dev.simplified.collection.ConcurrentMap;
@@ -18,7 +19,11 @@ import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -29,6 +34,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 
 /**
  * Facade over the client's RFC 7234 private HTTP response cache and its "last response"
@@ -45,25 +51,31 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.1">RFC 7234 §4.1</a>. A
  * variant is held under the {@link CacheKey.VaryFingerprint fingerprint} of the request that
  * produced it - that request's values of the headers its response's {@code Vary} names - and
- * answers a later request only when that request carries the same values. Callers pass a
+ * answers a later request only when that request carries the same values; of several variants
+ * one request matches, the most recent by {@code Date} answers. Callers pass a
  * request's headers as the request leaves the client, the client's configured static and
- * dynamic headers included, to {@link #store}, {@link #lookup} and {@link #updateOn304} alike. A
+ * dynamic headers included - each as its value, or, as {@link CachingFeignClient} passes them, as
+ * its {@linkplain CacheKey#fingerprint(String) fingerprint} - to {@link #store}, {@link #lookup}
+ * and {@link #updateOn304} alike. A
  * response that varies on a header the transport sets below the cache with a value those
  * headers do not fix is not stored.
  * <p>
  * A bucket is never changed in place. {@link #store} and
  * {@link #updateOn304} write a new bucket, holding the current bucket's variants plus the
- * stored or refreshed one, through {@code compute} on the cache's {@link Cache#asMap() map
- * view}, so Caffeine weighs the populated bucket and sets its lifetime from every variant it
- * holds.
+ * stored or refreshed one, or less the one a refresh removes, through {@code compute} on the
+ * cache's {@link Cache#asMap() map view}, so Caffeine weighs the populated bucket and sets its
+ * lifetime from every variant it holds.
  * <p>
  * Eviction is driven by three layered mechanisms:
  * <ul>
  *   <li><b>Per-bucket lifetime</b> - {@link ResponseCacheExpiry} ends each bucket's lifetime,
- *       counted from the write that created or last replaced it, after the longest
- *       {@link Response.CachedImpl#freshnessLifetime() freshness lifetime} plus
- *       {@code stale-if-error} window among its variants, clamped to the
- *       constructor-supplied safety fallback</li>
+ *       counted from the write that created or last replaced it, once none of its variants can
+ *       answer a request any longer: a variant is held for its
+ *       {@link Response.CachedImpl#freshnessLifetime() freshness lifetime} plus the longer of
+ *       the {@code stale-if-error} window it may be served under and, when it carries an
+ *       {@code ETag} or {@code Last-Modified} validator, the constructor-supplied stale
+ *       retention, so a stale variant is still there for a conditional request to revalidate.
+ *       The lifetime is clamped to the constructor-supplied safety fallback</li>
  *   <li><b>Weight-based eviction</b> - {@link ResponseCacheWeigher} sums raw-body bytes,
  *       header bytes, and an object-graph overhead per variant, with a total cap of
  *       the constructor-supplied max cache bytes</li>
@@ -71,12 +83,17 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  *       (and any {@code Location} / {@code Content-Location} redirects) per
  *       <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.4">RFC 7234 §4.4</a>,
  *       and {@link #invalidateAll()} drops every entry</li>
+ *   <li><b>Undecodable bodies</b> - {@link #discard} removes the variants that would answer a
+ *       request with a body that did not decode, so a replay of it fails once rather than
+ *       until the entry expires</li>
  * </ul>
  * <p>
- * A drop by {@link #invalidateAll()} also holds against answers still in flight:
- * {@link #store} keeps a response, and {@link #updateOn304} applies a
- * {@code 304 Not Modified}, only when its request was sent after the last drop, so an answer to
- * a request sent before it cannot put the dropped state back.
+ * An invalidation also holds against answers still in flight: {@link #store} keeps a response,
+ * and {@link #updateOn304} applies a {@code 304 Not Modified}, only when its request was sent
+ * after {@link #invalidateAll()} last dropped every entry and after {@link #invalidate(String)}
+ * last invalidated its URL, so an answer to a request sent before either cannot put the
+ * invalidated state back. A {@code GET} in flight across the {@code PUT} or {@code POST} that
+ * invalidated its URL therefore does not store what it read before the mutation.
  * <p>
  * In addition to the cache itself, this facade owns the client's single-slot
  * "last response" observability reference, exposing it via {@link #getLastResponse()}.
@@ -154,10 +171,45 @@ public final class ResponseCache {
      * {@code 304 Not Modified} revalidation, its values naming the headers the 304 carried.
      * <p>
      * The replay carries the stored headers overlaid with the 304's, so each named header holds
-     * the value the server sent with the 304 and every other header is replayed from the cache.
+     * the value the server sent with the 304 and every other header is replayed from the cache,
+     * but for a {@code Date} the 304 did not carry, which holds the instant the 304 was received.
      * Named with {@link NetworkDetails#INTERNAL_HEADER_PREFIX} as an internal header.
      */
     public static final @NotNull String REVALIDATED_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Revalidated";
+
+    /**
+     * How long, in milliseconds, an entry carrying an {@code ETag} or {@code Last-Modified}
+     * validator is kept past its freshness when no retention is given - one hour.
+     * <p>
+     * A stale entry held this long answers a request made within the hour through a conditional
+     * request, whose {@code 304 Not Modified} carries no body, rather than a full one; an hour
+     * covers a client polling an origin every few minutes with room to spare, while an entry no
+     * request has revalidated for that long gives up its weight to entries in use. The
+     * {@linkplain #ResponseCache(long, long) safety fallback} caps it.
+     */
+    public static final long DEFAULT_STALE_RETENTION_MILLIS = Duration.ofHours(1).toMillis();
+
+    /**
+     * The most URLs {@link #invalidatedAt} records before {@link #invalidate(String)} folds them
+     * into {@link #refusedThrough}.
+     * <p>
+     * A fold keeps the guard every record gave, and more: an answer to any request sent before
+     * it is refused, whatever its URL, so the requests in flight at the moment of a fold are
+     * answered but not stored. A fold falls once in this many invalidations of distinct URLs,
+     * which bounds the records a client that mutates many URLs holds.
+     */
+    static final int INVALIDATION_RECORD_LIMIT = 1024;
+
+    /**
+     * Orders the variants of one URL from the least to the most recent: by the
+     * {@linkplain Response.CachedImpl#date() date} each response was generated, then by the
+     * instant each was received, then by the headers and values of the fingerprint each is held
+     * under, which no two variants of one bucket share.
+     */
+    private static final @NotNull Comparator<Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>>> RECENCY = Comparator
+        .<Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>>, Instant>comparing(variant -> variant.getValue().response().date())
+        .thenComparing(variant -> variant.getValue().response().getDetails().getRoundTrip().completedAt())
+        .thenComparing(variant -> ordering(variant.getKey()));
 
     /**
      * The Caffeine-backed two-level cache of URL bucket -> Vary variants.
@@ -170,21 +222,31 @@ public final class ResponseCache {
     private final @NotNull AtomicReference<Response<?>> lastResponse = new AtomicReference<>();
 
     /**
-     * Orders {@link #invalidateAll()} against {@link #store} and
-     * {@link #updateOn304}: a drop holds the write lock while it records {@link #emptiedAt} and
-     * empties the cache, and a store or refresh holds the read lock while it compares its
-     * request's start with {@link #emptiedAt} and writes the bucket.
+     * Orders {@link #invalidateAll()} and {@link #invalidate(String)} against {@link #store} and
+     * {@link #updateOn304}: an invalidation holds the write lock while it records when it ran in
+     * {@link #refusedThrough} or {@link #invalidatedAt}, and a store or refresh holds the read
+     * lock while it compares its request's start with both and writes the bucket.
      */
     private final @NotNull ReadWriteLock dropLock = new ReentrantReadWriteLock();
 
     /**
-     * The instant {@link #invalidateAll()} last emptied the cache, or {@link Instant#EPOCH} before
-     * it has; read and written only under {@link #dropLock}.
+     * The instant at or before which an answer to any request is refused - when
+     * {@link #invalidateAll()} last emptied the cache, or {@link #invalidate(String)} last folded
+     * its records into it - or {@link Instant#EPOCH} before either has; read and written only
+     * under {@link #dropLock}.
      */
-    private @NotNull Instant emptiedAt = Instant.EPOCH;
+    private @NotNull Instant refusedThrough = Instant.EPOCH;
 
     /**
-     * Constructs a new response cache with the given byte cap and safety fallback.
+     * The instant {@link #invalidate(String)} last invalidated each URL, keyed by canonical URL,
+     * holding at most {@link #INVALIDATION_RECORD_LIMIT} URLs; read and written only under
+     * {@link #dropLock}.
+     */
+    private final @NotNull Map<String, Instant> invalidatedAt = new HashMap<>();
+
+    /**
+     * Constructs a new response cache with the given byte cap and safety fallback, keeping an
+     * entry carrying a validator for {@link #DEFAULT_STALE_RETENTION_MILLIS} past its freshness.
      * <p>
      * Caffeine is configured with weight-based eviction capped at {@code maxCacheBytes},
      * a custom {@link ResponseCacheExpiry} whose safety fallback is
@@ -197,7 +259,41 @@ public final class ResponseCache {
      *                                   freshness
      */
     public ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis) {
-        this(maxCacheBytes, cacheSafetyFallbackMillis, Ticker.systemTicker());
+        this(maxCacheBytes, cacheSafetyFallbackMillis, DEFAULT_STALE_RETENTION_MILLIS);
+    }
+
+    /**
+     * Constructs a new response cache with the given byte cap, safety fallback and stale
+     * retention.
+     * <p>
+     * Configured as {@link #ResponseCache(long, long)} is, with a {@link ResponseCacheExpiry}
+     * that keeps an entry carrying an {@code ETag} or {@code Last-Modified} validator for
+     * {@code staleRetentionMillis} past its freshness, so a conditional request can revalidate
+     * it.
+     *
+     * @param maxCacheBytes the maximum total weight of all cached variants in bytes
+     * @param cacheSafetyFallbackMillis the absolute upper bound on any entry's lifetime, in
+     *                                  milliseconds, regardless of response-advertised freshness
+     * @param staleRetentionMillis how long, in milliseconds, an entry carrying a validator is
+     *                             kept past its freshness; zero keeps none past its freshness and
+     *                             {@code stale-if-error} window
+     */
+    public ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, long staleRetentionMillis) {
+        this(maxCacheBytes, cacheSafetyFallbackMillis, staleRetentionMillis, Ticker.systemTicker());
+    }
+
+    /**
+     * Constructs a new response cache whose bucket lifetimes are measured on the given ticker,
+     * keeping an entry carrying a validator for {@link #DEFAULT_STALE_RETENTION_MILLIS} past its
+     * freshness.
+     *
+     * @param maxCacheBytes the maximum total weight of all cached variants in bytes
+     * @param cacheSafetyFallbackMillis the absolute upper bound on any entry's lifetime, in
+     *                                  milliseconds
+     * @param ticker the time source Caffeine measures bucket lifetimes against
+     */
+    ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, @NotNull Ticker ticker) {
+        this(maxCacheBytes, cacheSafetyFallbackMillis, DEFAULT_STALE_RETENTION_MILLIS, ticker);
     }
 
     /**
@@ -206,13 +302,18 @@ public final class ResponseCache {
      * @param maxCacheBytes the maximum total weight of all cached variants in bytes
      * @param cacheSafetyFallbackMillis the absolute upper bound on any entry's lifetime, in
      *                                  milliseconds
+     * @param staleRetentionMillis how long, in milliseconds, an entry carrying a validator is
+     *                             kept past its freshness
      * @param ticker the time source Caffeine measures bucket lifetimes against
      */
-    ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, @NotNull Ticker ticker) {
+    ResponseCache(long maxCacheBytes, long cacheSafetyFallbackMillis, long staleRetentionMillis, @NotNull Ticker ticker) {
         this.cache = Caffeine.newBuilder()
             .maximumWeight(maxCacheBytes)
             .weigher(new ResponseCacheWeigher())
-            .expireAfter(new ResponseCacheExpiry(Duration.ofMillis(cacheSafetyFallbackMillis)))
+            .expireAfter(new ResponseCacheExpiry(
+                Duration.ofMillis(cacheSafetyFallbackMillis),
+                Duration.ofMillis(staleRetentionMillis)
+            ))
             .ticker(ticker)
             .recordStats()
             .build();
@@ -268,11 +369,14 @@ public final class ResponseCache {
      * {@link Response.CachedImpl#varyHeaderNames() Vary} names - equals the values of the same
      * headers in {@code requestHeaders}, per
      * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.1">RFC 7234 §4.1</a>. A
-     * variant whose response has no {@code Vary} matches every request. When variants stored
-     * under different {@code Vary} header sets both match, which one is returned is unspecified.
-     * Returns {@link Optional#empty()} if no bucket or variant matches. Freshness and
-     * revalidation decisions are the caller's responsibility (typically
-     * {@link CachingFeignClient}).
+     * variant whose response has no {@code Vary} matches every request. When several variants
+     * match - variants stored under different {@code Vary} header sets, after an origin changed
+     * the headers it varies a URL on - the most recent answers: the one whose response's
+     * {@linkplain Response.CachedImpl#date() date} is the latest, then the one received last,
+     * then the one whose fingerprint orders last by header name and value, so the answer never
+     * depends on the order the bucket holds its variants in. Returns {@link Optional#empty()} if
+     * no bucket or variant matches. Freshness and revalidation decisions are the caller's
+     * responsibility (typically {@link CachingFeignClient}).
      *
      * @param method the HTTP method of the lookup request
      * @param url the raw URL of the lookup request (will be canonicalized internally)
@@ -291,20 +395,18 @@ public final class ResponseCache {
         if (variants == null || variants.isEmpty())
             return Optional.empty();
 
-        for (Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>> variant : variants.entrySet()) {
-            Set<String> varyNames = variant.getValue().response().varyHeaderNames();
-
-            if (CacheKey.VaryFingerprint.of(varyNames, requestHeaders).equals(variant.getKey()))
-                return Optional.of(variant.getValue());
-        }
-
-        return Optional.empty();
+        return variants.entrySet()
+            .stream()
+            .filter(variant -> answers(variant, requestHeaders))
+            .max(RECENCY)
+            .map(Map.Entry::getValue);
     }
 
     /**
      * Stores a decoded response and its captured body bytes in the cache if it passes the
      * RFC 7234 §3 storage predicate and its request was sent after the last
-     * {@link #invalidateAll()}. No-ops when any rule below rejects the response.
+     * {@link #invalidateAll()} and the last {@link #invalidate(String)} of its URL. No-ops when
+     * any rule below rejects the response.
      * <p>
      * Storage rules:
      * <ul>
@@ -324,8 +426,10 @@ public final class ResponseCache {
      *   <li>response carries the {@link #CACHE_HIT_HEADER} marker (replay from this cache)
      *       -> skip</li>
      *   <li>the start of the response's {@linkplain NetworkDetails#getRoundTrip() round trip}
-     *       is not after the instant {@link #invalidateAll()} last emptied the cache -> skip,
-     *       so an answer to a request in flight across a drop cannot re-enter the cache</li>
+     *       is not after the instant {@link #invalidateAll()} last emptied the cache, or the
+     *       instant {@link #invalidate(String)} last invalidated the response's URL -> skip, so
+     *       an answer to a request in flight across an invalidation cannot re-enter the
+     *       cache</li>
      *   <li>the response carries no request start, which {@link NetworkDetails} reads as
      *       {@link Instant#EPOCH} -> skip: nothing shows its request was sent after the last
      *       drop, and {@link Response.CachedImpl#currentAge(Instant)} measures an entry's age
@@ -337,10 +441,12 @@ public final class ResponseCache {
      * compares a later request's values with. It joins its URL's bucket through
      * {@code compute}, which writes a new bucket holding the current bucket's variants and this
      * one, replacing any variant with the same fingerprint. Caffeine weighs the new bucket and
-     * sets its lifetime from every variant it holds, so a bucket whose longest freshness
-     * lifetime plus {@code stale-if-error} window is zero - a response with neither explicit
-     * freshness nor a {@code stale-if-error} window - is expired as it is written and is never
-     * answered by {@link #lookup}.
+     * sets its lifetime from every variant it holds (see {@link ResponseCacheExpiry}). A
+     * response carrying a validator is held past its freshness, even one with no explicit
+     * freshness, so a later request revalidates it. A bucket none of whose variants could answer
+     * a request - a response with no validator and neither explicit freshness nor a
+     * {@code stale-if-error} window it may be served under, or one carrying {@code no-cache} and
+     * no validator - is expired as it is written and is never answered by {@link #lookup}.
      * <p>
      * Streaming responses skip this overload entirely - the decoder pipeline routes them
      * around the cache because their bodies cannot be replayed.
@@ -375,7 +481,7 @@ public final class ResponseCache {
         lock.lock();
 
         try {
-            if (sent.isAfter(this.emptiedAt))
+            if (this.sentAfterInvalidation(key.url(), sent))
                 this.cache.asMap().compute(key, (k, variants) -> withVariant(variants, fingerprint, entry));
         } finally {
             lock.unlock();
@@ -397,10 +503,25 @@ public final class ResponseCache {
     }
 
     /**
-     * Invalidates every variant stored under the given URL, for every HTTP method.
+     * Invalidates every variant stored under the given URL, for every HTTP method, and records
+     * the instant it did so.
      * <p>
      * Called by {@link CachingFeignClient} after unsafe-method successes for the target
      * URL plus any {@code Location} and {@code Content-Location} redirects, per RFC 7234 §4.4.
+     * <p>
+     * {@link #store} refuses a response for the URL, and {@link #updateOn304} a
+     * {@code 304 Not Modified}, whose request was sent at or before that instant, so an answer to
+     * a request in flight across the invalidation - a {@code GET} sent before the mutation that
+     * invalidated its URL completed - cannot put the state from before the mutation back; a
+     * request whose start falls in the same clock tick as the invalidation counts as sent before
+     * it. The instant is recorded before any variant is removed, so a store or refresh racing
+     * the invalidation either writes before the record, and its entry is removed, or compares
+     * its request's start with the record, and is refused when that request was sent before.
+     * <p>
+     * The instants are recorded per canonical URL, up to {@link #INVALIDATION_RECORD_LIMIT}
+     * URLs. An invalidation of a URL beyond that folds every record into one instant, at or
+     * after each of them, that refuses an answer to any request sent before it; the records
+     * are then dropped.
      *
      * @param url the URL whose cached entries should be removed; may be {@code null} to
      *            make propagation from optional response headers painless at call sites
@@ -410,6 +531,20 @@ public final class ResponseCache {
             return;
 
         String canonical = CacheKey.UrlKey.canonicalizeUrl(url);
+        Lock lock = this.dropLock.writeLock();
+        lock.lock();
+
+        try {
+            Instant now = Instant.now();
+
+            if (this.invalidatedAt.size() >= INVALIDATION_RECORD_LIMIT && !this.invalidatedAt.containsKey(canonical))
+                this.foldInvalidations(now);
+            else
+                this.invalidatedAt.put(canonical, now);
+        } finally {
+            lock.unlock();
+        }
+
         this.cache.asMap().keySet().removeIf(key -> key.url().equals(canonical));
     }
 
@@ -421,18 +556,57 @@ public final class ResponseCache {
      * a request in flight across the drop cannot put the dropped state back; a request whose
      * start falls in the same clock tick as the drop counts as sent before it. A store or refresh
      * racing the drop either writes before it, and its entry is dropped, or compares its
-     * request's start after it, and is refused when that request was sent before.
+     * request's start after it, and is refused when that request was sent before. The instants
+     * {@link #invalidate(String)} recorded per URL are folded into the drop's.
      */
     public void invalidateAll() {
         Lock lock = this.dropLock.writeLock();
         lock.lock();
 
         try {
-            this.emptiedAt = Instant.now();
+            this.foldInvalidations(Instant.now());
             this.cache.invalidateAll();
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * Removes every cached variant that would answer the given request with the given body.
+     * <p>
+     * Called by {@link InternalResponseDecoder} when a body it buffered, read off the wire or
+     * replayed from this cache, does not decode: the bytes decode no better on the next replay,
+     * so the variant is removed and the next request for it reaches the origin. A variant is
+     * removed when {@link #lookup} would match it to a request carrying {@code requestHeaders}
+     * and its stored body holds the same bytes as {@code body}; a variant holding other bytes -
+     * one a later answer stored in its place - is kept. Records no invalidation, so an answer
+     * already in flight is stored as usual.
+     *
+     * @param method the HTTP method of the request
+     * @param url the raw URL of the request (will be canonicalized internally)
+     * @param requestHeaders the request's headers as it left the client
+     * @param body the body bytes that did not decode
+     */
+    public void discard(
+        @NotNull HttpMethod method,
+        @NotNull String url,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders,
+        byte @NotNull [] body
+    ) {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(method, url);
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> current = this.cache.asMap().get(key);
+
+        if (current == null || current.entrySet().stream().noneMatch(variant -> replays(variant, requestHeaders, body)))
+            return;
+
+        this.cache.asMap().computeIfPresent(key, (k, variants) -> {
+            java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> bucket = new ConcurrentHashMap<>(variants);
+
+            if (!bucket.entrySet().removeIf(variant -> replays(variant, requestHeaders, body)))
+                return variants;
+
+            return bucket.isEmpty() ? null : bucket;
+        });
     }
 
     /**
@@ -451,12 +625,53 @@ public final class ResponseCache {
      * The variant is addressed as {@link #lookup} matched it: by the
      * {@link CacheKey.VaryFingerprint} of the revalidated request's headers over the headers the
      * cached response's {@code Vary} names, which equals the fingerprint the variant is held under.
+     * The refreshed variant is then held under the fingerprint of {@code requestHeaders} over the
+     * headers its refreshed {@code Vary} names, which {@link #lookup} fingerprints a request by:
+     * the same key when the 304 carries no {@code Vary} or the stored one, and otherwise a new
+     * key, which the variant moves to, replacing any variant held there. A refreshed
+     * {@code Vary} that no later request could be shown to match - one {@link #store} would not
+     * store under, naming {@code *}, an internal header, or a {@code Cookie} the request did not
+     * carry - removes the variant instead, and nothing is refreshed.
      * <p>
      * The method is a no-op when no bucket or no variant is found at the given key/fingerprint -
      * the bucket expired, was evicted by weight pressure, or was invalidated or dropped between
      * the lookup and the revalidation - and when the conditional request was sent at or before
-     * the instant {@link #invalidateAll()} last emptied the cache, or carries no request start,
-     * so a revalidation in flight across a drop cannot refresh an entry stored after it.
+     * the instant {@link #invalidateAll()} last emptied the cache or {@link #invalidate(String)}
+     * last invalidated the URL, or carries no request start, so a revalidation in flight across
+     * an invalidation cannot refresh an entry stored after it.
+     *
+     * @param key the URL bucket of the cached variant
+     * @param fingerprint the fingerprint of the revalidated request's headers over the headers the
+     *                    cached response's {@code Vary} names
+     * @param requestHeaders the revalidated request's headers as it left the client, without the
+     *                       conditional headers the revalidation added
+     * @param new304Headers the headers returned on the {@code 304} revalidation response
+     * @param revalidation the network details of the {@code 304} exchange
+     * @return the refreshed entry now in the cache, or {@link Optional#empty()} if nothing was
+     *         refreshed
+     */
+    public @NotNull Optional<CacheEntry<?>> updateOn304(
+        @NotNull CacheKey.UrlKey key,
+        @NotNull CacheKey.VaryFingerprint fingerprint,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders,
+        @NotNull Map<String, ? extends Collection<String>> new304Headers,
+        @NotNull NetworkDetails revalidation
+    ) {
+        return this.refresh(key, fingerprint, new304Headers, revalidation, varyNames -> Optional.of(
+            CacheKey.VaryFingerprint.of(varyNames, requestHeaders)
+        ));
+    }
+
+    /**
+     * Refreshes a cached variant after a successful {@code 304 Not Modified} revalidation of a
+     * request known only by its fingerprint.
+     * <p>
+     * Behaves as {@link #updateOn304(CacheKey.UrlKey, CacheKey.VaryFingerprint, Map, Map, NetworkDetails)}
+     * with the request's headers read from {@code fingerprint}, which holds the request's values
+     * of the headers the cached response's {@code Vary} names and of no others. A refreshed
+     * {@code Vary} naming only headers among those holds the variant under the fingerprint it
+     * produces; one naming any other header, whose value the request carried is not known,
+     * removes the variant, and nothing is refreshed.
      *
      * @param key the URL bucket of the cached variant
      * @param fingerprint the fingerprint of the revalidated request's headers over the headers the
@@ -472,6 +687,38 @@ public final class ResponseCache {
         @NotNull Map<String, ? extends Collection<String>> new304Headers,
         @NotNull NetworkDetails revalidation
     ) {
+        Map<String, Collection<String>> known = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        fingerprint.values().forEach((name, value) -> known.put(name, List.of(value)));
+
+        return this.refresh(key, fingerprint, new304Headers, revalidation, varyNames -> known.keySet().containsAll(varyNames)
+            ? Optional.of(CacheKey.VaryFingerprint.of(varyNames, known))
+            : Optional.empty()
+        );
+    }
+
+    // ===== Internals =====
+
+    /**
+     * Refreshes the variant held under {@code fingerprint} with a {@code 304 Not Modified}'s
+     * headers and holds it under the fingerprint {@code refingerprint} answers for its refreshed
+     * {@code Vary}, or removes it when that answers none or one {@link #lookup} cannot match.
+     *
+     * @param key the URL bucket of the cached variant
+     * @param fingerprint the fingerprint the variant is held under
+     * @param new304Headers the headers returned on the {@code 304} revalidation response
+     * @param revalidation the network details of the {@code 304} exchange
+     * @param refingerprint the fingerprint of the revalidated request over the given
+     *                      {@code Vary} header names, or empty when it cannot be formed
+     * @return the refreshed entry now in the cache, or {@link Optional#empty()} if nothing was
+     *         refreshed
+     */
+    private @NotNull Optional<CacheEntry<?>> refresh(
+        @NotNull CacheKey.UrlKey key,
+        @NotNull CacheKey.VaryFingerprint fingerprint,
+        @NotNull Map<String, ? extends Collection<String>> new304Headers,
+        @NotNull NetworkDetails revalidation,
+        @NotNull Function<Set<String>, Optional<CacheKey.VaryFingerprint>> refingerprint
+    ) {
         java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> current = this.cache.getIfPresent(key);
 
         if (current == null || !current.containsKey(fingerprint))
@@ -483,15 +730,22 @@ public final class ResponseCache {
         lock.lock();
 
         try {
-            if (sent.isAfter(this.emptiedAt)) {
+            if (this.sentAfterInvalidation(key.url(), sent)) {
                 this.cache.asMap().computeIfPresent(key, (k, variants) -> {
                     CacheEntry<?> existing = variants.get(fingerprint);
 
                     if (existing == null)
                         return variants;
 
-                    refreshed.set(mergeHeaders(existing, new304Headers, revalidation));
-                    return withVariant(variants, fingerprint, refreshed.get());
+                    CacheEntry<?> merged = mergeHeaders(existing, new304Headers, revalidation);
+                    Optional<CacheKey.VaryFingerprint> rekeyed = refingerprint.apply(merged.response().varyHeaderNames())
+                        .filter(ResponseCache::isMatchable);
+
+                    if (rekeyed.isEmpty())
+                        return withoutVariant(variants, fingerprint);
+
+                    refreshed.set(merged);
+                    return withVariant(withoutVariant(variants, fingerprint), rekeyed.get(), merged);
                 });
             }
         } finally {
@@ -501,7 +755,53 @@ public final class ResponseCache {
         return Optional.ofNullable(refreshed.get());
     }
 
-    // ===== Internals =====
+    /**
+     * Lists the fingerprints the given URL bucket holds its variants under.
+     *
+     * @param key the URL bucket
+     * @return the fingerprints of the bucket's variants, or none when the cache holds no bucket
+     *         for {@code key}
+     */
+    @NotNull Set<CacheKey.VaryFingerprint> fingerprints(@NotNull CacheKey.UrlKey key) {
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants = this.cache.asMap().get(key);
+        return variants == null ? Set.of() : Set.copyOf(variants.keySet());
+    }
+
+    /**
+     * Tests whether an answer to a request for the given URL, sent at the given instant, may be
+     * written to the cache: the request was sent after {@link #refusedThrough} and after the
+     * URL's record in {@link #invalidatedAt}, if it has one.
+     * <p>
+     * Called under the read lock of {@link #dropLock}.
+     *
+     * @param url the canonical URL the answer is written under
+     * @param sent the instant the request was sent
+     * @return {@code true} if the request was sent after every invalidation covering {@code url}
+     */
+    private boolean sentAfterInvalidation(@NotNull String url, @NotNull Instant sent) {
+        Instant invalidated = this.invalidatedAt.get(url);
+        return sent.isAfter(this.refusedThrough) && (invalidated == null || sent.isAfter(invalidated));
+    }
+
+    /**
+     * Folds every per-URL invalidation record into {@link #refusedThrough}, which becomes the
+     * latest of itself, {@code now} and each record, and drops the records.
+     * <p>
+     * Called under the write lock of {@link #dropLock}.
+     *
+     * @param now the instant of the invalidation that folds the records
+     */
+    private void foldInvalidations(@NotNull Instant now) {
+        Instant latest = now.isAfter(this.refusedThrough) ? now : this.refusedThrough;
+
+        for (Instant invalidated : this.invalidatedAt.values()) {
+            if (invalidated.isAfter(latest))
+                latest = invalidated;
+        }
+
+        this.refusedThrough = latest;
+        this.invalidatedAt.clear();
+    }
 
     /**
      * Builds the bucket a write puts in the cache: a new map holding the given bucket's variants,
@@ -526,6 +826,71 @@ public final class ResponseCache {
 
         bucket.put(fingerprint, entry);
         return bucket;
+    }
+
+    /**
+     * Builds the bucket a write puts in the cache: a new map holding the given bucket's variants
+     * except the one under {@code fingerprint}.
+     *
+     * @param variants the bucket currently in the cache
+     * @param fingerprint the Vary fingerprint whose variant to leave out
+     * @return a new bucket holding {@code variants} without the one under {@code fingerprint}, or
+     *         {@code null} when it would hold none, which removes the bucket from the cache
+     */
+    private static @Nullable java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> withoutVariant(
+        @NotNull java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> variants,
+        @NotNull CacheKey.VaryFingerprint fingerprint
+    ) {
+        java.util.concurrent.ConcurrentMap<CacheKey.VaryFingerprint, CacheEntry<?>> bucket = new ConcurrentHashMap<>(variants);
+        bucket.remove(fingerprint);
+        return bucket.isEmpty() ? null : bucket;
+    }
+
+    /**
+     * Tests whether a variant may answer a request: the request's values of the headers the
+     * variant's {@code Vary} names equal the fingerprint the variant is held under.
+     *
+     * @param variant the variant and the fingerprint it is held under
+     * @param requestHeaders the request's headers as it leaves the client
+     * @return {@code true} if the variant may answer the request
+     */
+    private static boolean answers(
+        @NotNull Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>> variant,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders
+    ) {
+        return CacheKey.VaryFingerprint.of(variant.getValue().response().varyHeaderNames(), requestHeaders).equals(variant.getKey());
+    }
+
+    /**
+     * Tests whether a variant would answer a request with the given body: it
+     * {@linkplain #answers may answer the request} and its stored body holds the same bytes.
+     *
+     * @param variant the variant and the fingerprint it is held under
+     * @param requestHeaders the request's headers as it leaves the client
+     * @param body the body bytes
+     * @return {@code true} if the variant would replay {@code body} to the request
+     */
+    private static boolean replays(
+        @NotNull Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>> variant,
+        @NotNull Map<String, ? extends Collection<String>> requestHeaders,
+        byte @NotNull [] body
+    ) {
+        return answers(variant, requestHeaders) && Arrays.equals(variant.getValue().body(), body);
+    }
+
+    /**
+     * Renders a fingerprint as the key {@link #RECENCY} orders variants by when neither their
+     * dates nor their receipts tell them apart: each header name the fingerprint holds, in
+     * order, with the request's value of it, every name and value closed by a {@code NUL}, which
+     * no header name or value carries.
+     *
+     * @param fingerprint the fingerprint a variant is held under
+     * @return the fingerprint's headers and values as one string
+     */
+    private static @NotNull String ordering(@NotNull CacheKey.VaryFingerprint fingerprint) {
+        StringBuilder ordering = new StringBuilder();
+        fingerprint.values().forEach((name, value) -> ordering.append(name).append('\0').append(value).append('\0'));
+        return ordering.toString();
     }
 
     /**
@@ -640,6 +1005,13 @@ public final class ResponseCache {
      * §4.3.4</a>: the merged view reports the 304 exchange's network details, and the stored
      * {@code Age} is kept only when the 304 carries its own, so the refreshed entry's
      * {@linkplain Response.CachedImpl#currentAge(Instant) age} is counted from the revalidation.
+     * The stored {@code Date} is replaced as well: by the 304's own, or, when the 304 carries
+     * none, by the instant the 304 was received, formatted as an HTTP date, as
+     * <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.2">RFC 7231
+     * §7.1.1.2</a> asks of a cache storing a response that has no {@code Date}. The apparent age
+     * is therefore measured from the revalidation too, never from the response first stored. The
+     * stored {@code Date} is kept only when the 304 carries none and the exchange records no
+     * instant it was received.
      * <p>
      * {@link CachingFeignClient} answers the revalidation from the same merge, so the replay
      * matches the refreshed entry.
@@ -661,6 +1033,11 @@ public final class ResponseCache {
         TreeMap<String, ConcurrentList<String>> merged = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         merged.putAll(existingResponse.getHeaders());
         merged.remove("Age");
+
+        Instant received = revalidation.getRoundTrip().completedAt();
+
+        if (!received.equals(Instant.EPOCH))
+            merged.put("Date", Concurrent.newUnmodifiableList(HttpDates.format(received)));
 
         for (Map.Entry<String, ? extends Collection<String>> entry : new304Headers.entrySet()) {
             Collection<String> values = entry.getValue();

@@ -3,13 +3,14 @@ package dev.simplified.client;
 import com.google.gson.Gson;
 import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
+import dev.simplified.client.cache.CacheKey;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.InternalErrorDecoder;
 import dev.simplified.client.decoder.InternalResponseDecoder;
-import dev.simplified.client.exception.ApiDecodeException;
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.RetryableApiException;
 import dev.simplified.client.factory.ApacheClientFactory;
 import dev.simplified.client.factory.TimedConnectionOperator;
@@ -17,9 +18,11 @@ import dev.simplified.client.factory.TimedTlsSocketStrategy;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
+import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.route.DynamicRoute;
@@ -31,19 +34,16 @@ import dev.simplified.util.time.Stopwatch;
 import feign.Feign;
 import feign.RequestTemplate;
 import feign.Target;
+import feign.codec.DecodeException;
 import feign.hc5.ApacheHttp5Client;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 /**
  * Feign-backed HTTP client providing connection pooling, rate limiting, route discovery,
@@ -62,12 +62,13 @@ import java.util.function.Supplier;
  * conditional revalidation and {@code getLastResponse()} observability, builds a pooling
  * Apache {@link ApacheHttp5Client} with {@link TimedConnectionOperator} and
  * {@link TimedTlsSocketStrategy} for DNS, TCP, and TLS timing instrumentation,
- * wraps the Apache client in a {@link CachingFeignClient} that serves RFC 7234 cache hits
- * transparently, assembles a Feign proxy that wires together encoding, decoding, request
- * and response interceptors, and the configured error decoder, and finally wraps the
- * resulting Feign proxy in a JDK dynamic proxy that unwraps {@link RetryableApiException}
- * so callers see the original typed {@link ApiException} rather than Feign's internal
- * retry wrapper.
+ * wraps the Apache client in a {@link RateLimitingFeignClient} that enforces the client-side
+ * rate limit on each request sent, and that in a {@link CachingFeignClient} that serves
+ * RFC 7234 cache hits transparently, assembles a Feign proxy that wires together encoding,
+ * decoding, request and response interceptors, and the configured error decoder, and finally
+ * wraps the resulting Feign proxy in a JDK dynamic proxy that unwraps
+ * {@link RetryableApiException} so callers see the original typed {@link ApiException} rather
+ * than Feign's internal retry wrapper.
  * <p>
  * To produce a derived client that shares most of an existing client's configuration, call
  * {@link #mutate()} to obtain a {@link ClientConfig.Builder} seeded from the current options,
@@ -134,9 +135,10 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * Constructs a new client from the given configuration bundle and pre-built Feign transport.
      * <p>
      * Discovers routes for the target contract interface, initializes the rate-limit manager,
-     * instantiates the response cache from {@link Timings#maxCacheBytes()} and
-     * {@link Timings#cacheSafetyFallback()}, wraps the supplied transport in a
-     * {@link CachingFeignClient}, and assembles the Feign proxy through an exception-unwrapping
+     * instantiates the response cache from {@link Timings#maxCacheBytes()},
+     * {@link Timings#cacheSafetyFallback()} and {@link Timings#cacheStaleRetention()}, wraps the supplied transport in a
+     * {@link RateLimitingFeignClient} and that in a {@link CachingFeignClient}, and assembles
+     * the Feign proxy through an exception-unwrapping
      * dynamic proxy. The constructor fires DNS and HEAD-probe prewarms on virtual threads so
      * the first real request finds a warm pool; prewarm failures never propagate.
      *
@@ -155,7 +157,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
         this.rateLimitManager = options.getSharedRateLimitManager().orElseGet(RateLimitManager::new);
         this.responseCache = new ResponseCache(
             options.getTimings().maxCacheBytes(),
-            options.getTimings().cacheSafetyFallback()
+            options.getTimings().cacheSafetyFallback(),
+            options.getTimings().cacheStaleRetention()
         );
         this.gson = options.getGson();
         this.contract = this.wrapContractProxy(this.build());
@@ -330,16 +333,24 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * Builds a Feign proxy implementing the contract interface {@code C}.
      * <p>
      * The proxy is configured with the internal Apache HTTP client wrapped in a
-     * {@link CachingFeignClient} so that RFC 7234 fresh-hit short-circuiting, conditional
-     * revalidation, and unsafe-method invalidation happen transparently below Feign. Its
-     * {@link ConfiguredHeadersTarget target} adds the configured static and dynamic headers to
-     * each request Feign builds, so the cache sees the headers the transport sends. The
+     * {@link RateLimitingFeignClient}, which enforces and counts the client-side rate limit on
+     * each request sent, and that in a {@link CachingFeignClient} so that RFC 7234 fresh-hit
+     * short-circuiting, conditional revalidation, and unsafe-method invalidation happen
+     * transparently below Feign; a request the cache answers never reaches the rate limit. The
+     * {@link CachingFeignClient} also adds the configured static and dynamic headers to each
+     * request it sends, keying the cache by their fingerprints, so the request Feign builds - the
+     * one Feign logs and an {@link ErrorContext} records - carries none of their values. Its
+     * {@link StaticQueryTarget target} ends the URL of each request Feign builds with the
+     * stand-in for the configured static queries, which the transport appends to the request it
+     * sends, so the cache keys a request by them without holding their values. The
      * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
      * {@linkplain ClientConfig#getDecoderFactory() decoder factory} from the options are
      * each invoked once with the configured {@link Gson Gson}.
      * {@link feign.Feign.Builder#doNotCloseAfterDecode()} is set so that
      * {@link InternalResponseDecoder} can manage response body lifecycle for
-     * {@link InputStream} return types.
+     * {@link InputStream} return types, and {@link feign.Feign.Builder#decodeVoid()} so that a
+     * {@code void} contract method reaches it too, raising for a status code {@link HttpStatus}
+     * has no constant for as every other return type does.
      * <p>
      * The returned proxy is subsequently wrapped by {@link #wrapContractProxy(Contract)} to
      * strip internal exception wrappers before they reach callers.
@@ -347,20 +358,33 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * @return a Feign-generated proxy instance of type {@code C}
      */
     private @NotNull C build() {
-        feign.Client cachingClient = new CachingFeignClient(this.internalClient, this.responseCache);
+        feign.Client rateLimitedClient = new RateLimitingFeignClient(
+            this.internalClient,
+            this.getRateLimitManager(),
+            this.getRouteDiscovery()
+        );
+        feign.Client cachingClient = new CachingFeignClient(
+            rateLimitedClient,
+            this.responseCache,
+            this.options.getHeaders(),
+            this.options.getDynamicHeaders(),
+            this.options.getQueries()
+        );
+        InternalErrorDecoder errorDecoder = new InternalErrorDecoder(
+            this.options.getErrorDecoder(),
+            this.getRouteDiscovery(),
+            this.responseCache
+        );
 
         return Feign.builder()
             .client(cachingClient)
             .encoder(this.options.getEncoderFactory().apply(this.gson))
             .decoder(new InternalResponseDecoder(
                 this.options.getDecoderFactory().apply(this.gson),
-                this.responseCache
+                this.responseCache,
+                errorDecoder
             ))
-            .errorDecoder(new InternalErrorDecoder(
-                this.options.getErrorDecoder(),
-                this.getRouteDiscovery(),
-                this.responseCache
-            ))
+            .errorDecoder(errorDecoder)
             .requestInterceptor(new InternalRequestInterceptor(
                 this.getRateLimitManager(),
                 this.getRouteDiscovery()
@@ -377,7 +401,8 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                 true
             ))
             .doNotCloseAfterDecode()
-            .target(new ConfiguredHeadersTarget<>(this.options));
+            .decodeVoid()
+            .target(new StaticQueryTarget<>(this.options));
     }
 
     /**
@@ -387,7 +412,9 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * this client internally wraps typed {@link ApiException} instances in
      * {@link RetryableApiException}. This proxy intercepts all method invocations and, if the
      * underlying call throws a {@link RetryableApiException}, extracts and re-throws the original
-     * {@link ApiException} so that callers see the correctly typed exception.
+     * {@link ApiException} so that callers see the correctly typed exception. An
+     * {@link ApiException} the {@link InternalResponseDecoder} raises reaches the proxy wrapped in
+     * Feign's {@link DecodeException}, and is re-thrown unwrapped the same way.
      *
      * @param <T> the contract proxy type
      * @param target the Feign-generated contract proxy to wrap
@@ -408,9 +435,11 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                     if (cause instanceof RetryableApiException retryable)
                         throw retryable.getWrappedException();
 
-                    // Unwrap decode failures wrapped by InvocationContext
-                    if (cause.getCause() instanceof ApiDecodeException decodeEx)
-                        throw decodeEx;
+                    // Unwrap an ApiException the decoder raised, which InvocationContext wraps
+                    // in a DecodeException - a decode failure, or a status HttpStatus has no
+                    // constant for
+                    if (cause instanceof DecodeException && cause.getCause() instanceof ApiException apiEx)
+                        throw apiEx;
 
                     throw cause;
                 }
@@ -419,37 +448,35 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     }
 
     /**
-     * Feign target that adds the client's configured headers to every request it builds.
+     * Feign target that ends the URL of each request it builds with the stand-in for the client's
+     * static query parameters.
      * <p>
-     * A request carries its contract's headers, then each configured static header, then the
-     * present value of each dynamic header, whose supplier is read once for that request. Feign
-     * sends the request through {@link CachingFeignClient} and hands it to the decoder with its
-     * answer, so {@link ResponseCache} looks up, stores and revalidates a variant by the header
-     * values the transport sends, a rotated dynamic value included.
+     * The stand-in is {@link CacheKey#queryFingerprints(Map)}: each static query's name with the
+     * fingerprint of its value. The request Feign builds, logs and hands the decoder therefore
+     * carries the static queries it is sent with, so {@link ResponseCache} looks it up and stores
+     * its answer under a URL they are part of, without holding their values.
+     * {@link CachingFeignClient} removes the stand-in from the request it sends, and the transport
+     * appends the static queries themselves.
      *
      * @param <C> the contract interface type
      */
-    private static final class ConfiguredHeadersTarget<C extends Contract> extends Target.HardCodedTarget<C> {
+    private static final class StaticQueryTarget<C extends Contract> extends Target.HardCodedTarget<C> {
 
         /**
-         * The static headers every request carries.
+         * The stand-in for the static query parameters, or an empty string for a client without
+         * any.
          */
-        private final @NotNull Map<String, String> headers;
+        private final @NotNull String queryFingerprints;
 
         /**
-         * The dynamic headers a request carries when their supplier yields a value.
-         */
-        private final @NotNull Map<String, Supplier<Optional<String>>> dynamicHeaders;
-
-        /**
-         * Constructs a target for the contract of the given options, adding their headers.
+         * Constructs a target for the contract of the given options, standing in for their static
+         * query parameters.
          *
          * @param options the client's configuration
          */
-        ConfiguredHeadersTarget(@NotNull ClientConfig<C> options) {
+        StaticQueryTarget(@NotNull ClientConfig<C> options) {
             super(options.getTarget(), "https://placeholder");
-            this.headers = options.getHeaders();
-            this.dynamicHeaders = options.getDynamicHeaders();
+            this.queryFingerprints = CacheKey.queryFingerprints(options.getQueries());
         }
 
         /** {@inheritDoc} */
@@ -457,20 +484,13 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
         public feign.Request apply(RequestTemplate input) {
             feign.Request request = super.apply(input);
 
-            if (this.headers.isEmpty() && this.dynamicHeaders.isEmpty())
+            if (this.queryFingerprints.isEmpty())
                 return request;
-
-            Map<String, Collection<String>> headers = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-            request.headers().forEach((name, values) -> headers.put(name, new ArrayList<>(values)));
-            this.headers.forEach((name, value) -> headers.computeIfAbsent(name, key -> new ArrayList<>()).add(value));
-            this.dynamicHeaders.forEach((name, supplier) -> supplier.get()
-                .ifPresent(value -> headers.computeIfAbsent(name, key -> new ArrayList<>()).add(value))
-            );
 
             return feign.Request.create(
                 request.httpMethod(),
-                request.url(),
-                headers,
+                CacheKey.withQuery(request.url(), this.queryFingerprints),
+                request.headers(),
                 request.body(),
                 request.charset(),
                 request.requestTemplate()

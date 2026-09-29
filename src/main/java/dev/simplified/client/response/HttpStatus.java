@@ -8,6 +8,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Enumeration of HTTP response status codes, providing a strongly-typed representation of
@@ -571,6 +572,20 @@ public enum HttpStatus {
             throw new IllegalArgumentException("Invalid HTTP status code: " + code);
 
         return status;
+    }
+
+    /**
+     * Finds the {@link HttpStatus} constant for the given numeric HTTP status code.
+     * <p>
+     * Performs the same O(1) lookup as {@link #of(int)}, answering {@link Optional#empty()} for
+     * a code {@link #of(int)} refuses.
+     *
+     * @param code the numeric HTTP status code to look up
+     * @return the {@link HttpStatus} constant matching {@code code}, or {@link Optional#empty()}
+     *         if no constant is defined for {@code code}
+     */
+    public static @NotNull Optional<HttpStatus> findByCode(int code) {
+        return Optional.ofNullable(BY_CODE.get(code));
     }
 
 }

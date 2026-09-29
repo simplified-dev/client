@@ -5,6 +5,7 @@ import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
 import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.ClientConfig;
+import dev.simplified.client.cache.CacheKey;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.UrlFetchException;
 import dev.simplified.client.ratelimit.RateLimit;
@@ -69,7 +70,10 @@ public final class UrlFetcherConfig {
     private final @NotNull Timings timings;
 
     /**
-     * The maximum response body size in bytes; reads beyond this cap raise {@link UrlFetchException.BodyCapExceeded}.
+     * The maximum response body size in bytes for a fetch that names no cap of its own; a body
+     * beyond it raises {@link UrlFetchException.BodyCapExceeded}. A fetch through
+     * {@link UrlFetcher#get(URI, long)}, {@link UrlFetcher#get(URI, Class, long)} or
+     * {@link UrlFetcher#bytes(URI, long)} is held to the cap it names instead.
      */
     private final long maxBodyBytes;
 
@@ -99,7 +103,9 @@ public final class UrlFetcherConfig {
     private final @NotNull Optional<Inet6Address> inet6Address;
 
     /**
-     * The static query parameters appended to every outbound request.
+     * The static query parameters appended to every outbound request. The response cache keys
+     * each request by their {@linkplain CacheKey#queryFingerprints(Map) stand-in}, so fetchers
+     * sharing a cache with different static queries never answer each other's requests.
      */
     private final @NotNull ConcurrentMap<String, String> queries;
 
@@ -204,7 +210,7 @@ public final class UrlFetcherConfig {
         }
 
         /**
-         * Sets the maximum response body size in bytes.
+         * Sets the maximum response body size in bytes for a fetch that names no cap of its own.
          *
          * @param maxBodyBytes the cap in bytes
          * @return this builder
@@ -271,6 +277,12 @@ public final class UrlFetcherConfig {
 
         /**
          * Adds a single static query parameter.
+         * <p>
+         * The transport appends the parameter to each request the fetcher sends. The response
+         * cache keys a request by the parameter too, through a
+         * {@linkplain CacheKey#queryFingerprints(Map) stand-in} for its value, so a fetcher
+         * {@linkplain #withSharedCache(ResponseCache) sharing a cache} with another configured
+         * with a different value is never answered with the other's response.
          *
          * @param name the query parameter name
          * @param value the query parameter value

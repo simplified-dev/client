@@ -5,6 +5,7 @@ import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.ETag;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
+import dev.simplified.client.util.HttpDates;
 import feign.Feign;
 import feign.Headers;
 import feign.Param;
@@ -16,11 +17,17 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -29,6 +36,7 @@ import java.util.function.Function;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
@@ -47,6 +55,9 @@ class ResponseCacheTest {
         @RequestLine("GET /resource")
         Response<byte[]> get();
 
+        @RequestLine("PUT /resource")
+        Response<byte[]> put();
+
     }
 
     /**
@@ -62,11 +73,22 @@ class ResponseCacheTest {
         @Headers("Cookie: {cookie}")
         Response<byte[]> cookie(@Param("cookie") String cookie);
 
+        @RequestLine("GET /resource")
+        @Headers({ "Accept: {accept}", "Accept-Language: {language}" })
+        Response<byte[]> negotiate(@Param("accept") String accept, @Param("language") String language);
+
     }
 
     private static final String URL = "https://127.0.0.1:0/resource";
 
     private static final byte[] BODY = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+
+    /**
+     * Formats an instant as the IMF-fixdate an origin sends in {@code Date}.
+     */
+    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter
+        .ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US)
+        .withZone(ZoneOffset.UTC);
 
     /**
      * The time Caffeine measures bucket lifetimes against, advanced by hand.
@@ -108,6 +130,28 @@ class ResponseCacheTest {
             ))
             .decoder(new InternalResponseDecoder(new Decoder.Default(), this.cache))
             .target(contract, "https://127.0.0.1:0");
+    }
+
+    /**
+     * Answers a conditional request {@code 304 Not Modified} and any other {@code 200}, both
+     * carrying the given headers.
+     *
+     * @param headerPairs the answer's headers, as alternating names and values
+     * @return the origin
+     */
+    private static Function<Request, feign.Response> revalidating(String... headerPairs) {
+        return request -> answer(request, header(request, ETag.IF_NONE_MATCH_HEADER).isEmpty() ? 200 : 304, headerPairs);
+    }
+
+    /**
+     * Returns the given headers followed by a request start and a response received both set to
+     * now, as a live answer carries them.
+     *
+     * @param headerPairs the headers, as alternating names and values
+     * @return the headers with the round trip added
+     */
+    private static String[] receivedNow(String... headerPairs) {
+        return receivedAt(Instant.now(), headerPairs);
     }
 
     private static Map<String, Collection<String>> headers(String... pairs) {
@@ -192,7 +236,11 @@ class ResponseCacheTest {
     }
 
     private Optional<CacheEntry<?>> lookup() {
-        return this.cache.lookup(HttpMethod.GET, URL, Map.of());
+        return lookup(this.cache);
+    }
+
+    private static Optional<CacheEntry<?>> lookup(ResponseCache cache) {
+        return cache.lookup(HttpMethod.GET, URL, Map.of());
     }
 
     /**
@@ -202,8 +250,106 @@ class ResponseCacheTest {
      * @param headerPairs the answer's headers, as alternating names and values
      */
     private void storeDirectly(String... headerPairs) {
+        storeDirectly(this.cache, headerPairs);
+    }
+
+    /**
+     * Offers an answer to a {@code GET} of the test resource straight to the given cache, as the
+     * decoder offers a live one.
+     *
+     * @param cache the cache to offer the answer to
+     * @param headerPairs the answer's headers, as alternating names and values
+     */
+    private static void storeDirectly(ResponseCache cache, String... headerPairs) {
+        storeDirectly(cache, headers(), headerPairs);
+    }
+
+    /**
+     * Offers an answer to a {@code GET} of the test resource carrying the given request headers
+     * straight to the given cache, as the decoder offers a live one.
+     *
+     * @param cache the cache to offer the answer to
+     * @param requestHeaders the headers of the request the answer responds to
+     * @param headerPairs the answer's headers, as alternating names and values
+     */
+    private static void storeDirectly(ResponseCache cache, Map<String, Collection<String>> requestHeaders, String... headerPairs) {
+        Request request = Request.create(Request.HttpMethod.GET, URL, requestHeaders, null, StandardCharsets.UTF_8, null);
+        cache.store(new Response.Impl<>(answer(request, 200, headerPairs), () -> BODY), BODY, request.headers());
+    }
+
+    /**
+     * Returns the given headers followed by a request start and a response received both set to
+     * the given instant.
+     *
+     * @param received the instant the answer was sent for and received
+     * @param headerPairs the headers, as alternating names and values
+     * @return the headers with the round trip added
+     */
+    private static String[] receivedAt(Instant received, String... headerPairs) {
+        String[] stamped = Arrays.copyOf(headerPairs, headerPairs.length + 4);
+        stamped[headerPairs.length] = NetworkDetails.REQUEST_START;
+        stamped[headerPairs.length + 1] = received.toString();
+        stamped[headerPairs.length + 2] = NetworkDetails.RESPONSE_RECEIVED;
+        stamped[headerPairs.length + 3] = received.toString();
+        return stamped;
+    }
+
+    /**
+     * Returns the headers of an answer varying on {@code Accept}, tagged {@code "accept"}, carrying
+     * the given further headers and received at the given instant.
+     *
+     * @param received the instant the answer was received
+     * @param headerPairs the answer's further headers, as alternating names and values
+     * @return the answer's headers
+     */
+    private static String[] varyingOnAccept(Instant received, String... headerPairs) {
+        return varying("Accept", "\"accept\"", received, headerPairs);
+    }
+
+    /**
+     * Returns the headers of an answer varying on {@code Accept-Language}, tagged
+     * {@code "language"}, carrying the given further headers and received at the given instant.
+     *
+     * @param received the instant the answer was received
+     * @param headerPairs the answer's further headers, as alternating names and values
+     * @return the answer's headers
+     */
+    private static String[] varyingOnLanguage(Instant received, String... headerPairs) {
+        return varying("Accept-Language", "\"language\"", received, headerPairs);
+    }
+
+    private static String[] varying(String vary, String etag, Instant received, String... headerPairs) {
+        String[] fixed = { "Vary", vary, "ETag", etag, "Cache-Control", "max-age=60" };
+        String[] joined = Arrays.copyOf(fixed, fixed.length + headerPairs.length);
+        System.arraycopy(headerPairs, 0, joined, fixed.length, headerPairs.length);
+        return receivedAt(received, joined);
+    }
+
+    /**
+     * Returns the network details of a {@code 304 Not Modified} exchange sent and received now.
+     *
+     * @return the exchange's network details
+     */
+    private static NetworkDetails notModified() {
         Request request = Request.create(Request.HttpMethod.GET, URL, headers(), null, StandardCharsets.UTF_8, null);
-        this.cache.store(new Response.Impl<>(answer(request, 200, headerPairs), () -> BODY), BODY, request.headers());
+        return new NetworkDetails(answer(request, 304, receivedNow()));
+    }
+
+    /**
+     * Stores the given answers, in order, in a new cache, each answering one request carrying
+     * both {@code Accept} and {@code Accept-Language}, and looks that request up.
+     *
+     * @param variants the headers of each answer, as alternating names and values
+     * @return the {@code ETag} of the variant the lookup answers with
+     */
+    private Collection<String> answering(String[]... variants) {
+        ResponseCache cache = new ResponseCache(1L << 20, 3_600_000L, this.ticks::get);
+        Map<String, Collection<String>> request = headers("Accept", "a", "Accept-Language", "en");
+
+        for (String[] variant : variants)
+            storeDirectly(cache, request, variant);
+
+        return cache.lookup(HttpMethod.GET, URL, request).orElseThrow().response().getHeaders().get("ETag");
     }
 
     @Test
@@ -270,6 +416,39 @@ class ResponseCacheTest {
     }
 
     @Test
+    @DisplayName("A 304 carrying no Date dates the refreshed entry when it was received, so the request after it is a fresh hit")
+    void notModifiedWithoutDateIsDatedWhenReceived() {
+        Instant stored = Instant.now().minusSeconds(100);
+        this.storeDirectly(receivedAt(stored, "Cache-Control", "max-age=60", "Date", HTTP_DATE.format(stored), "ETag", "\"v1\""));
+
+        this.origin = request -> answer(request, 304, "Cache-Control", "max-age=60", "ETag", "\"v1\"");
+        Instant sent = Instant.now();
+        Response<byte[]> revalidated = this.resource.get();
+        Response<byte[]> replay = this.resource.get();
+        Instant dated = HttpDates.parseFromHeaders(this.lookup().orElseThrow().response().getHeaders(), "Date").orElseThrow();
+
+        assertThat(this.sent, hasSize(1));
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(revalidated.getHeaders().get("Age"), contains("0"));
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(dated.isBefore(sent.truncatedTo(ChronoUnit.SECONDS)), is(false));
+    }
+
+    @Test
+    @DisplayName("A 304 carrying its own Date dates the refreshed entry by it")
+    void notModifiedWithDateKeepsIt() {
+        Instant stored = Instant.now().minusSeconds(100);
+        String revalidatedAt = HTTP_DATE.format(stored.plusSeconds(90));
+        this.storeDirectly(receivedAt(stored, "Cache-Control", "max-age=60", "Date", HTTP_DATE.format(stored), "ETag", "\"v1\""));
+
+        this.origin = request -> answer(request, 304, "Cache-Control", "max-age=60", "Date", revalidatedAt, "ETag", "\"v1\"");
+        Response<byte[]> revalidated = this.resource.get();
+
+        assertThat(revalidated.getHeaders().get("Date"), contains(revalidatedAt));
+        assertThat(this.lookup().orElseThrow().response().getHeaders().get("Date"), contains(revalidatedAt));
+    }
+
+    @Test
     @DisplayName("A 304 to a request sent before invalidateAll does not refresh the entry stored after it")
     void revalidationInFlightAcrossTheDropIsRefused() {
         this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
@@ -298,6 +477,101 @@ class ResponseCacheTest {
         assertThat(revalidated.isFromCache(), is(true));
         assertThat(stored.getHeaders().get("ETag"), contains("\"v2\""));
         assertThat(stored.getHeaders().get("Cache-Control"), contains("max-age=60"));
+    }
+
+    @Test
+    @DisplayName("A GET in flight across a PUT to its URL does not store what it read, and a GET sent after the PUT does")
+    void getInFlightAcrossAMutationIsNotStored() {
+        AtomicReference<Instant> mutated = new AtomicReference<>();
+        this.origin = request -> {
+            if (request.httpMethod() == Request.HttpMethod.PUT)
+                return answer(request, 200);
+
+            if (mutated.get() == null) {
+                this.resource.put();
+                mutated.set(Instant.now());
+            }
+
+            return answer(request, 200, "Cache-Control", "max-age=60");
+        };
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(false));
+
+        // a request stamped in the same clock tick as the invalidation counts as sent before it
+        while (!Instant.now().isAfter(mutated.get()))
+            Thread.onSpinWait();
+
+        this.resource.get();
+        Response<byte[]> replay = this.resource.get();
+
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(3));
+        assertThat(this.sent.get(1).httpMethod(), is(Request.HttpMethod.PUT));
+    }
+
+    @Test
+    @DisplayName("An invalidation of another URL does not refuse an answer in flight across it")
+    void invalidationOfAnotherUrlDoesNotRefuse() {
+        this.origin = request -> {
+            this.cache.invalidate("https://127.0.0.1:0/other");
+            return answer(request, 200, "Cache-Control", "max-age=60");
+        };
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(true));
+    }
+
+    @Test
+    @DisplayName("A 304 to a request sent before invalidate(url) does not refresh the entry stored after it")
+    void revalidationInFlightAcrossAnInvalidationIsRefused() {
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.resource.get();
+
+        this.origin = request -> {
+            this.cache.invalidate(URL);
+            Instant invalidated = Instant.now();
+
+            // a request stamped in the same clock tick as the invalidation counts as sent before it
+            while (!Instant.now().isAfter(invalidated))
+                Thread.onSpinWait();
+
+            this.storeDirectly(receivedNow("Cache-Control", "max-age=60", "ETag", "\"v2\""));
+            return answer(request, 304, "Cache-Control", "max-age=600", "ETag", "\"v1\"");
+        };
+        Response<byte[]> revalidated = this.resource.get();
+        Response.CachedImpl<?> stored = this.lookup().orElseThrow().response();
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(stored.getHeaders().get("ETag"), contains("\"v2\""));
+        assertThat(stored.getHeaders().get("Cache-Control"), contains("max-age=60"));
+    }
+
+    @Test
+    @DisplayName("Invalidations past the record limit fold into one instant that still refuses the answers in flight")
+    void foldedInvalidationsStillRefuseAnswersInFlight() {
+        AtomicReference<Instant> folded = new AtomicReference<>();
+        this.origin = request -> {
+            this.cache.invalidate(URL);
+
+            for (int i = 0; i < ResponseCache.INVALIDATION_RECORD_LIMIT; i++)
+                this.cache.invalidate("https://127.0.0.1:0/other/" + i);
+
+            folded.set(Instant.now());
+            return answer(request, 200, "Cache-Control", "max-age=60");
+        };
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(false));
+
+        // a request stamped in the same clock tick as the fold counts as sent before it
+        while (!Instant.now().isAfter(folded.get()))
+            Thread.onSpinWait();
+
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60");
+        this.resource.get();
+
+        assertThat(this.resource.get().isFromCache(), is(true));
     }
 
     @Test
@@ -376,6 +650,99 @@ class ResponseCacheTest {
     }
 
     @Test
+    @DisplayName("A stale entry carrying a validator is still held after its freshness, and a 304 revalidates it")
+    void staleEntryWithValidatorIsHeldForRevalidation() {
+        this.origin = revalidating("Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.resource.get();
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(120));
+
+        Response<byte[]> revalidated = this.resource.get();
+
+        assertThat(this.sent, hasSize(2));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(revalidated.getBody(), is(BODY));
+    }
+
+    @Test
+    @DisplayName("A response carrying a validator and no freshness is held and revalidated, rather than expired as it is written")
+    void validatorWithoutFreshnessIsHeldForRevalidation() {
+        this.origin = revalidating("ETag", "\"v1\"");
+        this.resource.get();
+
+        assertThat(this.lookup().isPresent(), is(true));
+
+        Response<byte[]> revalidated = this.resource.get();
+
+        assertThat(this.sent, hasSize(2));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(revalidated.isFromCache(), is(true));
+    }
+
+    @Test
+    @DisplayName("An entry held for revalidation expires once the stale retention has passed after its freshness, and a zero retention holds none")
+    void staleRetentionIsBounded() {
+        ResponseCache retaining = new ResponseCache(1L << 20, 3_600_000L, TimeUnit.MINUTES.toMillis(10), this.ticks::get);
+        ResponseCache retainingNothing = new ResponseCache(1L << 20, 3_600_000L, 0L, this.ticks::get);
+        storeDirectly(retaining, receivedNow("Cache-Control", "max-age=60", "ETag", "\"v1\""));
+        storeDirectly(retainingNothing, receivedNow("Cache-Control", "max-age=60", "ETag", "\"v1\""));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(61));
+
+        assertThat(lookup(retaining).isPresent(), is(true));
+        assertThat(lookup(retainingNothing).isPresent(), is(false));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(598));
+
+        assertThat(lookup(retaining).isPresent(), is(true));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(2));
+
+        assertThat(lookup(retaining).isPresent(), is(false));
+    }
+
+    @Test
+    @DisplayName("The safety fallback caps the stale retention")
+    void safetyFallbackCapsTheStaleRetention() {
+        ResponseCache capped = new ResponseCache(1L << 20, TimeUnit.MINUTES.toMillis(5), TimeUnit.HOURS.toMillis(1), this.ticks::get);
+        storeDirectly(capped, receivedNow("Cache-Control", "max-age=60", "ETag", "\"v1\""));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(299));
+
+        assertThat(lookup(capped).isPresent(), is(true));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(2));
+
+        assertThat(lookup(capped).isPresent(), is(false));
+    }
+
+    @Test
+    @DisplayName("An entry with no validator is held for its freshness and the stale-if-error window it may be served under, and no longer")
+    void entryWithoutValidatorIsHeldForItsFreshnessAndStaleIfError() {
+        this.storeDirectly(receivedNow("Cache-Control", "max-age=60, stale-if-error=30"));
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(89));
+
+        assertThat(this.lookup().isPresent(), is(true));
+
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(2));
+
+        assertThat(this.lookup().isPresent(), is(false));
+    }
+
+    @Test
+    @DisplayName("A stale-if-error window a directive forbids holds no entry, and no-cache without a validator holds none at all")
+    void forbiddenStaleWindowsHoldNothing() {
+        this.storeDirectly(receivedNow("Cache-Control", "max-age=60, must-revalidate, stale-if-error=600"));
+        this.ticks.addAndGet(TimeUnit.SECONDS.toNanos(61));
+
+        assertThat(this.lookup().isPresent(), is(false));
+
+        this.storeDirectly(receivedNow("Cache-Control", "max-age=60, no-cache, stale-if-error=600"));
+
+        assertThat(this.lookup().isPresent(), is(false));
+    }
+
+    @Test
     @DisplayName("s-maxage does not lengthen a response's freshness in this private cache")
     void sharedMaxAgeIsIgnored() {
         this.origin = request -> answer(request, 200, "Cache-Control", "public, max-age=60, s-maxage=300", "Age", "90");
@@ -383,6 +750,35 @@ class ResponseCacheTest {
 
         assertThat(this.resource.get().isFromCache(), is(false));
         assertThat(this.sent, hasSize(2));
+    }
+
+    @Test
+    @DisplayName("A response carrying no-cache beside max-age is revalidated before each reuse rather than replayed as fresh")
+    void noCacheIsRevalidatedWhileFresh() {
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60, no-cache", "ETag", "\"v1\"");
+        this.resource.get();
+
+        this.origin = request -> answer(request, 304, "Cache-Control", "max-age=60, no-cache", "ETag", "\"v1\"");
+        Response<byte[]> first = this.resource.get();
+        Response<byte[]> second = this.resource.get();
+
+        assertThat(this.sent, hasSize(3));
+        assertThat(this.sent.get(1).headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
+        assertThat(first.isFromCache(), is(true));
+        assertThat(second.isFromCache(), is(true));
+    }
+
+    @Test
+    @DisplayName("A response carrying no-cache and no validator is fetched in full on the next request")
+    void noCacheWithoutValidatorIsFetchedAgain() {
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=60, no-cache");
+        this.resource.get();
+        Response<byte[]> again = this.resource.get();
+
+        assertThat(again.isFromCache(), is(false));
+        assertThat(this.sent, hasSize(2));
+        assertThat(this.sent.getLast().headers().containsKey(ETag.IF_NONE_MATCH_HEADER), is(false));
     }
 
     @Test
@@ -462,6 +858,34 @@ class ResponseCacheTest {
     }
 
     @Test
+    @DisplayName("discard removes the variant that would replay the given body to the request, and keeps one holding other bytes or answering another request")
+    void discardRemovesOnlyTheVariantReplayingTheBody() {
+        this.origin = request -> answer(
+            request,
+            200,
+            header(request, "Accept").getBytes(StandardCharsets.UTF_8),
+            "Vary", "Accept",
+            "Cache-Control", "max-age=60"
+        );
+
+        this.negotiated.accept("a");
+        this.negotiated.accept("b");
+
+        this.cache.discard(HttpMethod.GET, URL, headers("Accept", "a"), "b".getBytes(StandardCharsets.UTF_8));
+        this.cache.discard(HttpMethod.GET, URL, headers("Accept", "b"), "a".getBytes(StandardCharsets.UTF_8));
+        Response<byte[]> keptA = this.negotiated.accept("a");
+
+        this.cache.discard(HttpMethod.GET, URL, headers("Accept", "a"), "a".getBytes(StandardCharsets.UTF_8));
+        Response<byte[]> discardedA = this.negotiated.accept("a");
+        Response<byte[]> keptB = this.negotiated.accept("b");
+
+        assertThat(keptA.isFromCache(), is(true));
+        assertThat(discardedA.isFromCache(), is(false));
+        assertThat(keptB.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(3));
+    }
+
+    @Test
     @DisplayName("A 304 refreshes the variant it revalidates and leaves the URL's other variant as stored")
     void notModifiedRefreshesTheVariantRevalidated() {
         this.origin = ResponseCacheTest::negotiatedAnswer;
@@ -488,6 +912,100 @@ class ResponseCacheTest {
             this.cache.lookup(HttpMethod.GET, URL, headers("Accept", "b")).orElseThrow().response().getHeaders().get("Cache-Control"),
             contains("max-age=60")
         );
+    }
+
+    @Test
+    @DisplayName("A 304 whose Vary names other headers moves its variant to the key a request is now matched by")
+    void notModifiedWithAnotherVaryRekeysTheVariant() {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, URL);
+        this.origin = request -> answer(request, 200, "Vary", "Accept", "Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.negotiated.negotiate("a", "en");
+
+        this.origin = request -> answer(request, 304, "Vary", "Accept-Language", "Cache-Control", "max-age=600", "ETag", "\"v1\"");
+        Response<byte[]> revalidated = this.negotiated.negotiate("a", "en");
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(
+            this.cache.fingerprints(key),
+            contains(CacheKey.VaryFingerprint.of(Set.of("accept-language"), headers("Accept-Language", "en")))
+        );
+
+        this.origin = request -> answer(request, 200, "Cache-Control", "max-age=600");
+        Response<byte[]> replay = this.negotiated.negotiate("a", "en");
+        Response<byte[]> otherAccept = this.negotiated.negotiate("b", "en");
+
+        assertThat(replay.isFromCache(), is(true));
+        assertThat(otherAccept.isFromCache(), is(true));
+        assertThat(this.sent, hasSize(2));
+    }
+
+    @Test
+    @DisplayName("A 304 whose Vary no request could match removes its variant rather than holding it where nothing matches")
+    void notModifiedWithAnUnmatchableVaryRemovesTheVariant() {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, URL);
+        this.origin = request -> answer(request, 200, "Vary", "Accept", "Cache-Control", "max-age=60", "Age", "120", "ETag", "\"v1\"");
+        this.negotiated.accept("a");
+
+        this.origin = request -> answer(request, 304, "Vary", "*", "Cache-Control", "max-age=600", "ETag", "\"v1\"");
+        Response<byte[]> revalidated = this.negotiated.accept("a");
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(this.cache.fingerprints(key), is(empty()));
+    }
+
+    @Test
+    @DisplayName("A 304 addressed by a fingerprint alone moves its variant when the fingerprint holds every header its Vary names, and removes it otherwise")
+    void notModifiedByFingerprintAloneMovesOnlyWhatItKnows() {
+        CacheKey.UrlKey key = CacheKey.UrlKey.of(HttpMethod.GET, URL);
+        Map<String, Collection<String>> request = headers("Accept", "a", "Accept-Language", "en");
+        CacheKey.VaryFingerprint both = CacheKey.VaryFingerprint.of(Set.of("accept", "accept-language"), request);
+        CacheKey.VaryFingerprint accept = CacheKey.VaryFingerprint.of(Set.of("accept"), request);
+        storeDirectly(this.cache, request, receivedNow("Vary", "Accept, Accept-Language", "Cache-Control", "max-age=60", "ETag", "\"v1\""));
+
+        Optional<CacheEntry<?>> narrowed = this.cache.updateOn304(key, both, headers("Vary", "Accept"), notModified());
+
+        assertThat(narrowed.isPresent(), is(true));
+        assertThat(this.cache.fingerprints(key), contains(accept));
+        assertThat(this.cache.lookup(HttpMethod.GET, URL, headers("Accept", "a", "Accept-Language", "fr")).isPresent(), is(true));
+
+        Optional<CacheEntry<?>> widened = this.cache.updateOn304(key, accept, headers("Vary", "Accept, User-Agent"), notModified());
+
+        assertThat(widened.isPresent(), is(false));
+        assertThat(this.cache.fingerprints(key), is(empty()));
+    }
+
+    @Test
+    @DisplayName("Of variants stored under different Vary sets that both match a request, the one with the latest Date answers")
+    void latestDateAnswersAmongMatchingVariants() {
+        Instant now = Instant.now();
+        String latest = HTTP_DATE.format(now);
+        String earlier = HTTP_DATE.format(now.minusSeconds(60));
+
+        assertThat(this.answering(varyingOnAccept(now, "Date", latest), varyingOnLanguage(now, "Date", earlier)), contains("\"accept\""));
+        assertThat(this.answering(varyingOnAccept(now, "Date", earlier), varyingOnLanguage(now, "Date", latest)), contains("\"language\""));
+    }
+
+    @Test
+    @DisplayName("A matching variant with no Date is dated by when it was received")
+    void variantWithoutDateIsDatedByItsReceipt() {
+        Instant now = Instant.now();
+        Instant earlier = now.minusSeconds(60);
+
+        assertThat(this.answering(varyingOnAccept(earlier, "Date", HTTP_DATE.format(earlier)), varyingOnLanguage(now)), contains("\"language\""));
+        assertThat(this.answering(varyingOnAccept(now, "Date", HTTP_DATE.format(now)), varyingOnLanguage(earlier)), contains("\"accept\""));
+    }
+
+    @Test
+    @DisplayName("Matching variants with the same Date are told apart by when each was received, and then by their fingerprints")
+    void matchingVariantsWithOneDateAreOrderedDeterministically() {
+        Instant now = Instant.now();
+        Instant earlier = now.minusMillis(500);
+        String date = HTTP_DATE.format(now);
+
+        assertThat(this.answering(varyingOnAccept(now, "Date", date), varyingOnLanguage(earlier, "Date", date)), contains("\"accept\""));
+        assertThat(this.answering(varyingOnAccept(earlier, "Date", date), varyingOnLanguage(now, "Date", date)), contains("\"language\""));
+        assertThat(this.answering(varyingOnAccept(now, "Date", date), varyingOnLanguage(now, "Date", date)), contains("\"language\""));
+        assertThat(this.answering(varyingOnLanguage(now, "Date", date), varyingOnAccept(now, "Date", date)), contains("\"language\""));
     }
 
     @Test

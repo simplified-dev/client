@@ -5,9 +5,11 @@ import dev.simplified.annotations.AccessLevel;
 import dev.simplified.annotations.Getter;
 import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Proxy;
+import dev.simplified.client.cache.CacheKey;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.JsonApiException;
 import dev.simplified.client.exception.NotModifiedException;
 import dev.simplified.client.ratelimit.RateLimitManager;
@@ -98,12 +100,14 @@ public final class ClientConfig<C extends Contract> {
     private final @NotNull ClientErrorDecoder errorDecoder;
 
     /**
-     * The static query parameters appended to every outbound HTTP request.
+     * The static query parameters appended to every outbound HTTP request. The transport appends
+     * them to the request it sends; the request Feign builds, and the URL the response cache keys
+     * it by, end with their {@linkplain CacheKey#queryFingerprints(Map) stand-in} instead.
      */
     private final @NotNull ConcurrentMap<String, String> queries;
 
     /**
-     * The static headers added to each request the client builds from its contract. The
+     * The static headers added to each request the client sends from its contract. The
      * connection warm-up probe does not carry them, nor does the header-less {@code GET} the
      * transport sends to follow a {@code 301}/{@code 302} answer to a {@code POST} or a
      * {@code 303} answer to any method but {@code GET} and {@code HEAD}.
@@ -335,6 +339,11 @@ public final class ClientConfig<C extends Contract> {
 
         /**
          * Adds a single static query parameter.
+         * <p>
+         * The transport appends the parameter to each request it sends. The response cache keys a
+         * request by the parameter too, through a
+         * {@linkplain CacheKey#queryFingerprints(Map) stand-in} for its value, so the request
+         * Feign builds carries no value of it.
          *
          * @param name the query parameter name
          * @param value the query parameter value
@@ -359,8 +368,11 @@ public final class ClientConfig<C extends Contract> {
         /**
          * Adds a single static header.
          * <p>
-         * The header is added to each request the client builds from its contract, where the
-         * response cache sees it. A request carrying {@code Authorization} or {@code Cookie}
+         * The header is added to each request the client sends from its contract, below the
+         * request Feign builds, so neither that request nor the {@link ErrorContext} of an error
+         * response carries its value; the response cache keys the request by a
+         * {@linkplain CacheKey#fingerprint(String) fingerprint} of it. A request carrying
+         * {@code Authorization} or {@code Cookie}
          * does not follow a redirect to another host or port: the {@code 3xx} is the response,
          * raised as a {@link NotModifiedException} like any other {@code 3xx}. Neither the
          * connection warm-up probe nor the header-less {@code GET} the transport sends to follow
@@ -391,8 +403,9 @@ public final class ClientConfig<C extends Contract> {
         /**
          * Adds a single dynamic header whose value is evaluated lazily on each request.
          * <p>
-         * The supplier is invoked once for each request the client builds from its contract; if
-         * it returns {@link Optional#empty()}, the header is omitted for that request. The
+         * The supplier is invoked once for each request the client makes from its contract, one
+         * the cache answers included; if it returns {@link Optional#empty()}, the header is
+         * omitted for that request. The
          * header reaches the same requests, and affects redirects the same way, as a static
          * header added by {@link #withHeader(String, String)}.
          *

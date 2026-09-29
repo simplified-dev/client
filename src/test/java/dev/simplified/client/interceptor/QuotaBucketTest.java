@@ -3,17 +3,21 @@ package dev.simplified.client.interceptor;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.gson.GsonSettings;
 import feign.MethodMetadata;
+import feign.Request;
 import feign.RequestLine;
 import feign.RequestTemplate;
 import feign.Response;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -80,7 +84,7 @@ class QuotaBucketTest {
 
     /**
      * One endpoint of a client on the shared manager, driven through that client's own request
-     * and response interceptors.
+     * interceptor, rate-limiting transport and response interceptor.
      */
     private final class Endpoint {
 
@@ -103,25 +107,34 @@ class QuotaBucketTest {
         }
 
         /**
-         * Sends a request through the request interceptor and answers it with the given headers.
+         * Sends a request through the request interceptor and the rate-limiting transport, and
+         * answers it with the given headers.
          *
-         * @return {@code false} if the request interceptor refused the request
+         * @return {@code false} if the rate-limiting transport refused the request
          */
         private boolean send(String... answer) {
             RequestTemplate template = this.metadata.template().resolve(Map.of()).methodMetadata(this.metadata);
+            this.requests.apply(template);
+
+            RateLimitingFeignClient transport = new RateLimitingFeignClient(
+                (request, options) -> Response.builder()
+                    .status(200)
+                    .reason("OK")
+                    .request(request)
+                    .headers(headers(answer))
+                    .build(),
+                QuotaBucketTest.this.manager,
+                this.discovery
+            );
+            Response response;
 
             try {
-                this.requests.apply(template);
+                response = transport.execute(template.request(), new Request.Options());
             } catch (RateLimitException ex) {
                 return false;
+            } catch (IOException ex) {
+                throw new UncheckedIOException(ex);
             }
-
-            Response response = Response.builder()
-                .status(200)
-                .reason("OK")
-                .request(template.request())
-                .headers(headers(answer))
-                .build();
 
             this.responses.recordServerLimit(response, System.currentTimeMillis());
             return true;

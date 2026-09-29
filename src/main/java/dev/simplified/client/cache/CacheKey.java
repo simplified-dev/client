@@ -8,13 +8,20 @@ import dev.simplified.collection.ConcurrentMap;
 import dev.simplified.collection.tuple.pair.Pair;
 import org.jetbrains.annotations.NotNull;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.TreeMap;
 
 /**
@@ -35,11 +42,87 @@ import java.util.TreeMap;
  * {@link Concurrent#toUnmodifiableTreeMap(java.util.Comparator) toUnmodifiableSortedMap}
  * collector, inheriting content-based equality through the
  * {@code dev.simplified.collection.atomic.AtomicMap#equals(Object)} delegate.
+ * <p>
+ * {@link #fingerprint(String)} computes the stand-in a key holds for a value configured on a
+ * client, and {@link #queryFingerprints(Map)} the stand-in a {@code UrlKey} holds for a client's
+ * static query parameters, so a key never holds a configured value itself.
  *
  * @see ResponseCache
  */
 @NoArgsConstructor(access = AccessLevel.PRIVATE)
 public final class CacheKey {
+
+    /**
+     * The key {@link #fingerprint(String)} signs values under, drawn at random once per JVM.
+     */
+    private static final @NotNull SecretKeySpec FINGERPRINT_KEY = randomKey();
+
+    /**
+     * Computes the stand-in a cache key holds for a value configured on a client, in place of the
+     * value itself.
+     * <p>
+     * The fingerprint is an HMAC-SHA256 of the value under a key drawn at random once per JVM,
+     * encoded as unpadded Base64url. Within one JVM equal values have equal fingerprints, so a
+     * variant keyed by the fingerprint of a value answers every request carrying that value, and
+     * nothing that prints a fingerprint discloses the value.
+     *
+     * @param value the configured value
+     * @return the value's fingerprint
+     */
+    public static @NotNull String fingerprint(@NotNull String value) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(FINGERPRINT_KEY);
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(mac.doFinal(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (GeneralSecurityException ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    /**
+     * Renders the stand-in a cache key holds for a client's static query parameters: each
+     * parameter's URL-encoded name and the {@linkplain #fingerprint(String) fingerprint} of its
+     * value, joined as a query string in the order of their names.
+     * <p>
+     * A client appends it, with {@link #withQuery(String, String)}, to the URL it keys each request
+     * by, while its transport appends the parameters themselves to the request it sends, so
+     * requests sent with different static queries are keyed apart, requests sent with the same
+     * ones alike, and no key holds a static query's value.
+     *
+     * @param queries the static query parameters
+     * @return the stand-in query string, empty when there are no parameters
+     */
+    public static @NotNull String queryFingerprints(@NotNull Map<String, String> queries) {
+        StringJoiner joined = new StringJoiner("&");
+        new TreeMap<>(queries).forEach((name, value) -> joined.add(URLEncoder.encode(name, StandardCharsets.UTF_8) + "=" + fingerprint(value)));
+        return joined.toString();
+    }
+
+    /**
+     * Appends a query string to a URL, after the URL's own query when it has one.
+     *
+     * @param url the URL
+     * @param query the query string to append, without a leading {@code ?} or {@code &}
+     * @return {@code url} when {@code query} is empty, otherwise {@code url} followed by
+     *         {@code ?}, or {@code &} when it has a query, and {@code query}
+     */
+    public static @NotNull String withQuery(@NotNull String url, @NotNull String query) {
+        if (query.isEmpty())
+            return url;
+
+        return url + (url.indexOf('?') < 0 ? "?" : "&") + query;
+    }
+
+    /**
+     * Draws the key {@link #fingerprint(String)} signs values under.
+     *
+     * @return a random 256-bit HMAC-SHA256 key
+     */
+    private static @NotNull SecretKeySpec randomKey() {
+        byte[] key = new byte[32];
+        new SecureRandom().nextBytes(key);
+        return new SecretKeySpec(key, "HmacSHA256");
+    }
 
     /**
      * Canonical identifier for an HTTP response keyed by method and canonicalized URL.

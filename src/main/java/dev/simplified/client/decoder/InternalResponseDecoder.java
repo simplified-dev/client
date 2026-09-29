@@ -1,19 +1,26 @@
 package dev.simplified.client.decoder;
 
-import dev.simplified.annotations.RequiredArgsConstructor;
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiDecodeException;
+import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.ErrorContext;
+import dev.simplified.client.request.HttpMethod;
+import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.util.BodyBuffering;
 import feign.FeignException;
+import feign.MethodMetadata;
+import feign.RequestTemplate;
 import feign.Util;
+import feign.codec.DecodeException;
 import feign.codec.Decoder;
 import feign.codec.DefaultDecoder;
+import feign.codec.ErrorDecoder;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -52,10 +59,11 @@ import java.util.function.Supplier;
  * For non-streaming types, a {@link Response.Impl} envelope is built around the original
  * anchor (used for status / headers / request) plus a body supplier that closes over the
  * captured bytes; the typed body is materialized on demand via the envelope's
- * {@link Response.Impl#getBody()}. The envelope, the captured bytes and the headers of the
- * request Feign sent for it - the contract's headers and the client's configured ones - are
- * then offered to {@link ResponseCache#store}, which applies the RFC 7234 §3 storage predicate
- * and either stores the entry, as the variant for those request headers, or drops it. The
+ * {@link Response.Impl#getBody()}. The envelope, the captured bytes and the headers the cache
+ * keys the request by - {@link CachingFeignClient#keyHeaders(feign.Response)}: the contract's
+ * headers and the fingerprint of each of the client's configured values - are then offered to
+ * {@link ResponseCache#store}, which applies the RFC 7234 §3 storage predicate and either stores
+ * the entry, as the variant for those request headers, or drops it. The
  * envelope is always passed to {@link ResponseCache#recordLastResponse(Response)} regardless
  * of caching decisions so that {@link Client#getLastResponse() Client.getLastResponse()}
  * observes every outcome.
@@ -66,11 +74,34 @@ import java.util.function.Supplier;
  * {@link ResponseCache#CACHE_HIT_HEADER} marker and skips re-storing them to avoid TTL
  * extension on cache hits.
  * <p>
- * If the declared return type is {@code Response<T>} (a parameterized type), the full
- * envelope is returned to the caller and body decoding is deferred until the caller invokes
- * {@link Response#getBody()}. Otherwise the body is materialized eagerly here so the
- * unwrapped object can be returned to Feign; decode failures surface as
- * {@link ApiDecodeException} on this synchronous path.
+ * If the declared return type is {@code Response<T>} (a parameterized type), the envelope is
+ * offered to the cache and returned to the caller, and body decoding is deferred until the
+ * caller invokes {@link Response#getBody()}, so a caller reading only the status or headers
+ * never decodes. Otherwise the body is materialized eagerly here so the unwrapped object can be
+ * returned to Feign, and the envelope is offered to the cache only once its body has decoded;
+ * decode failures surface as {@link ApiDecodeException} on this synchronous path.
+ * <p>
+ * A body that fails to decode, live or replayed and eagerly or on a deferred
+ * {@link Response#getBody()}, is {@linkplain ResponseCache#discard discarded} from the cache
+ * with every variant that would replay the same bytes to the same request, so the next request
+ * reaches the origin rather than failing on the same bytes until the entry expires. The
+ * failure is recognised where the body is decoded, so a stored body is never decoded only to
+ * test it.
+ * <p>
+ * A response whose status code {@link HttpStatus} has no constant for - a {@code 2xx} such as
+ * {@code 218}, since Feign hands every other class to its error decoder - is not decoded. It
+ * is handed to the {@link InternalErrorDecoder}, which raises it as it raises an error status,
+ * so the contract method raises the client's {@link ApiException} carrying the code as
+ * {@link ApiException#getStatusCode()} and {@link HttpStatus#UNKNOWN_ERROR} as
+ * {@link ApiException#getStatus()}. The exception is recorded as the last response, as an
+ * error status's is, and nothing is stored for it. A decoder built without an error decoder
+ * hands such a response to Feign's {@link ErrorDecoder.Default}, as a Feign builder given no
+ * error decoder raises an error status.
+ * <p>
+ * A {@code void} return type decodes to {@code null} and records nothing, and a response to it
+ * whose status code {@link HttpStatus} has no constant for raises as it does for any other
+ * return type. The Feign builder hands this decoder a {@code void} return type only under
+ * {@link feign.Feign.Builder#decodeVoid()}, which {@link Client} sets.
  * <p>
  * This decoder requires {@link feign.Feign.Builder#doNotCloseAfterDecode()} to be set
  * on the Feign builder so that {@link InputStream} responses are not prematurely closed
@@ -85,7 +116,6 @@ import java.util.function.Supplier;
  * @see NetworkDetails
  * @see Response
  */
-@RequiredArgsConstructor
 public final class InternalResponseDecoder implements Decoder {
 
     /**
@@ -104,10 +134,62 @@ public final class InternalResponseDecoder implements Decoder {
     private final @NotNull ResponseCache responseCache;
 
     /**
+     * The error decoder that raises a response whose status code {@link HttpStatus} has no
+     * constant for - the client's {@link InternalErrorDecoder}, or Feign's
+     * {@link ErrorDecoder.Default} for a decoder built without one.
+     */
+    private final @NotNull ErrorDecoder errorDecoder;
+
+    /**
+     * Constructs a new {@code InternalResponseDecoder} that hands a response whose status code
+     * {@link HttpStatus} has no constant for to Feign's {@link ErrorDecoder.Default}.
+     *
+     * @param delegate the inner decoder that performs JSON deserialization
+     * @param responseCache the shared response cache used for observability and storage
+     */
+    public InternalResponseDecoder(@NotNull Decoder delegate, @NotNull ResponseCache responseCache) {
+        this(delegate, responseCache, new ErrorDecoder.Default());
+    }
+
+    /**
+     * Constructs a new {@code InternalResponseDecoder} that hands a response whose status code
+     * {@link HttpStatus} has no constant for to {@code errorDecoder}.
+     *
+     * @param delegate the inner decoder that performs JSON deserialization
+     * @param responseCache the shared response cache used for observability and storage
+     * @param errorDecoder the error decoder that raises a response whose status code
+     *                     {@link HttpStatus} has no constant for, the client's
+     *                     {@link InternalErrorDecoder}
+     */
+    public InternalResponseDecoder(
+        @NotNull Decoder delegate,
+        @NotNull ResponseCache responseCache,
+        @NotNull ErrorDecoder errorDecoder
+    ) {
+        this.delegate = delegate;
+        this.responseCache = responseCache;
+        this.errorDecoder = errorDecoder;
+    }
+
+    /**
      * {@inheritDoc}
      */
     @Override
     public Object decode(@NotNull feign.Response feignResponse, @NotNull Type type) throws IOException, FeignException {
+        if (HttpStatus.findByCode(feignResponse.status()).isEmpty()) {
+            Exception raised = this.errorDecoder.decode(methodKey(feignResponse.request()), feignResponse);
+
+            if (raised instanceof RuntimeException unchecked)
+                throw unchecked;
+
+            throw new DecodeException(feignResponse.status(), raised.getMessage(), feignResponse.request(), raised);
+        }
+
+        if (type == void.class || type == Void.class) {
+            Util.ensureClosed(feignResponse.body());
+            return null;
+        }
+
         Type bodyType = type;
         boolean shouldWrap = false;
 
@@ -145,35 +227,82 @@ public final class InternalResponseDecoder implements Decoder {
                 Type finalBodyType = bodyType;
                 byte[] capturedBody = bodyData;
                 bodyDecoder = () -> {
-                    feign.Response synthetic = feignResponse.toBuilder().body(capturedBody).build();
                     try {
-                        return this.delegate.decode(synthetic, finalBodyType);
-                    } catch (IOException ioex) {
-                        throw new UncheckedIOException(ioex);
-                    } catch (FeignException fex) {
-                        throw fex;
-                    } catch (Exception ex) {
-                        throw new ApiDecodeException(ex, ErrorContext.fromFeign(synthetic, capturedBody));
+                        return this.decodeBody(feignResponse, capturedBody, finalBodyType);
+                    } catch (RuntimeException ex) {
+                        feign.Request request = feignResponse.request();
+                        this.responseCache.discard(HttpMethod.of(request.httpMethod().name()), request.url(), CachingFeignClient.keyHeaders(feignResponse), capturedBody);
+                        throw ex;
                     }
                 };
             }
 
             Response.Impl<Object> response = new Response.Impl<>(feignResponse, bodyDecoder);
             this.responseCache.recordLastResponse(response);
-            this.responseCache.store(response, bodyData, feignResponse.request().headers());
 
-            if (shouldWrap)
+            if (shouldWrap) {
+                this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
                 return response;
+            }
+
+            Object body;
 
             try {
-                return response.getBody();
+                body = response.getBody();
             } catch (ApiDecodeException ex) {
                 this.responseCache.recordLastResponse(ex);
                 throw ex;
             }
+
+            this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
+            return body;
         } finally {
             Util.ensureClosed(feignResponse.body());
         }
+    }
+
+    /**
+     * Decodes buffered body bytes through the inner decoder.
+     *
+     * @param feignResponse the response the bytes were read from, supplying status, headers and
+     *                      request
+     * @param body the buffered body bytes
+     * @param bodyType the type to decode the body into
+     * @return the decoded body
+     * @throws UncheckedIOException if the inner decoder fails reading the bytes
+     * @throws FeignException if the inner decoder raises one
+     * @throws ApiDecodeException if the inner decoder fails in any other way
+     */
+    private @Nullable Object decodeBody(@NotNull feign.Response feignResponse, byte @NotNull [] body, @NotNull Type bodyType) {
+        feign.Response synthetic = feignResponse.toBuilder().body(body).build();
+
+        try {
+            return this.delegate.decode(synthetic, bodyType);
+        } catch (IOException ioex) {
+            throw new UncheckedIOException(ioex);
+        } catch (FeignException fex) {
+            throw fex;
+        } catch (Exception ex) {
+            throw new ApiDecodeException(ex, ErrorContext.fromFeign(synthetic, body));
+        }
+    }
+
+    /**
+     * Names the contract method a request was built from, as Feign names it to an error
+     * decoder.
+     *
+     * @param request the request
+     * @return the Feign config key of the request's contract method, or the request's method and
+     *         URL for a request built without one
+     */
+    private static @NotNull String methodKey(@NotNull feign.Request request) {
+        RequestTemplate template = request.requestTemplate();
+        MethodMetadata endpoint = template != null ? template.methodMetadata() : null;
+
+        if (endpoint != null)
+            return endpoint.configKey();
+
+        return request.httpMethod() + " " + request.url();
     }
 
 }

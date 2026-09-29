@@ -1,6 +1,7 @@
 package dev.simplified.client.request;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.cache.ResponseCache;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.core5.util.TimeValue;
@@ -23,10 +24,11 @@ import java.util.concurrent.TimeUnit;
  *       route in the {@link PoolingHttpClientConnectionManager}.</li>
  *   <li><b>Client-level caching</b> - entries in the RFC 7234 response cache are evicted by
  *       per-entry freshness ({@code Cache-Control: max-age} / {@code Expires}) extended by
- *       any {@code stale-if-error} window, with a hard ceiling
- *       of {@link #cacheSafetyFallback()} so nothing survives eternally. Total cache weight
- *       is bounded by {@link #maxCacheBytes()}, summing raw-body bytes, header bytes, and
- *       per-entry overhead.</li>
+ *       the longer of any {@code stale-if-error} window and, for an entry carrying an
+ *       {@code ETag} or {@code Last-Modified} validator, {@link #cacheStaleRetention()}, with a
+ *       hard ceiling of {@link #cacheSafetyFallback()} so nothing survives eternally. Total
+ *       cache weight is bounded by {@link #maxCacheBytes()}, summing raw-body bytes, header
+ *       bytes, and per-entry overhead.</li>
  * </ul>
  *
  * @param connectionTimeToLive maximum lifetime of a pooled HTTP connection in milliseconds, before it is permanently
@@ -75,6 +77,13 @@ import java.util.concurrent.TimeUnit;
  *                            response-advertised freshness. Applied inside the custom expiry so that entries carrying
  *                            {@code Cache-Control: immutable, max-age=99999999} cannot survive eternally.
  *                            Default: 86,400,000 (24 hours).
+ * @param cacheStaleRetention how long in milliseconds a cache entry carrying an {@code ETag} or {@code Last-Modified}
+ *                            validator is kept past its freshness, so the request after it went stale sends a
+ *                            conditional request and a {@code 304 Not Modified} refreshes it rather than the body being
+ *                            fetched again; a response with a validator and no freshness lifetime is kept this long for
+ *                            revalidation. Zero keeps no entry past its freshness and {@code stale-if-error} window.
+ *                            Capped by {@code cacheSafetyFallback}. Default: 3,600,000 (1 hour), which is
+ *                            {@link ResponseCache#DEFAULT_STALE_RETENTION_MILLIS}.
  * @see Client
  */
 public record Timings(
@@ -86,8 +95,48 @@ public record Timings(
     int maxConnections,
     int maxConnectionsPerRoute,
     long maxCacheBytes,
-    long cacheSafetyFallback
+    long cacheSafetyFallback,
+    long cacheStaleRetention
 ) {
+
+    /**
+     * Constructs a new {@code Timings} with the given parameters and a
+     * {@link #cacheStaleRetention()} of {@link ResponseCache#DEFAULT_STALE_RETENTION_MILLIS}.
+     *
+     * @param connectionTimeToLive maximum lifetime of a pooled HTTP connection in milliseconds
+     * @param connectionIdleTimeout maximum duration in milliseconds a pooled connection may sit idle
+     * @param connectionKeepAlive default keep-alive duration in milliseconds for persistent connections
+     * @param connectTimeout maximum time in milliseconds to wait for a TCP connection to be established
+     * @param socketTimeout maximum time in milliseconds of inactivity between consecutive data packets
+     * @param maxConnections maximum total concurrent HTTP connections across all routes
+     * @param maxConnectionsPerRoute maximum concurrent HTTP connections per individual route
+     * @param maxCacheBytes maximum total weight of all cached response variants, in bytes
+     * @param cacheSafetyFallback absolute upper bound on any cache entry's lifetime in milliseconds
+     */
+    public Timings(
+        long connectionTimeToLive,
+        long connectionIdleTimeout,
+        long connectionKeepAlive,
+        long connectTimeout,
+        long socketTimeout,
+        int maxConnections,
+        int maxConnectionsPerRoute,
+        long maxCacheBytes,
+        long cacheSafetyFallback
+    ) {
+        this(
+            connectionTimeToLive,
+            connectionIdleTimeout,
+            connectionKeepAlive,
+            connectTimeout,
+            socketTimeout,
+            maxConnections,
+            maxConnectionsPerRoute,
+            maxCacheBytes,
+            cacheSafetyFallback,
+            ResponseCache.DEFAULT_STALE_RETENTION_MILLIS
+        );
+    }
 
     /**
      * Creates a {@code Timings} instance populated with sensible default values.
@@ -103,6 +152,7 @@ public record Timings(
      *   <li>{@link #maxConnectionsPerRoute() maxConnectionsPerRoute} - 50</li>
      *   <li>{@link #maxCacheBytes() maxCacheBytes} - 16,777,216 (16 MiB)</li>
      *   <li>{@link #cacheSafetyFallback() cacheSafetyFallback} - 86,400,000 ms (24 hours)</li>
+     *   <li>{@link #cacheStaleRetention() cacheStaleRetention} - 3,600,000 ms (1 hour)</li>
      * </ul>
      *
      * @return a new {@code Timings} with default configuration values
@@ -117,7 +167,8 @@ public record Timings(
             200,
             50,
             16L * 1024 * 1024,
-            Duration.ofHours(24).toMillis()
+            Duration.ofHours(24).toMillis(),
+            ResponseCache.DEFAULT_STALE_RETENTION_MILLIS
         );
     }
 

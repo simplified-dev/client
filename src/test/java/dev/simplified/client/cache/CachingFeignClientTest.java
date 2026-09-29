@@ -75,6 +75,69 @@ class CachingFeignClientTest {
         return client.serveFromCache(request(), new Request.Options(), HttpMethod.GET, entry);
     }
 
+    /**
+     * Serves the entry through a client whose origin answers every request with the given
+     * status and no headers.
+     */
+    private static feign.Response serveAnswering(CacheEntry<?> entry, int status) throws IOException {
+        CachingFeignClient client = new CachingFeignClient(
+            (request, options) -> feign.Response.builder()
+                .status(status)
+                .reason("Origin")
+                .request(request)
+                .headers(headers())
+                .body(new byte[0])
+                .build(),
+            new ResponseCache(1L << 20, 3_600_000L)
+        );
+
+        return client.serveFromCache(request(), new Request.Options(), HttpMethod.GET, entry);
+    }
+
+    /**
+     * A cached entry received ten seconds ago under the given {@code Cache-Control} and an
+     * {@code ETag}.
+     */
+    private static CacheEntry<byte[]> receivedTenSecondsAgo(String cacheControl) {
+        String past = Instant.now().minusSeconds(10).toString();
+
+        return entry(
+            request(),
+            "Cache-Control", cacheControl,
+            "ETag", "\"v1\"",
+            NetworkDetails.REQUEST_START, past,
+            NetworkDetails.RESPONSE_RECEIVED, past
+        );
+    }
+
+    @Test
+    @DisplayName("A stale entry replaces a 5xx within its stale-if-error window, unless a directive requires it be revalidated")
+    void staleIfErrorYieldsToRevalidationDirectives() throws IOException {
+        feign.Response replaced = serveAnswering(receivedTenSecondsAgo("max-age=0, stale-if-error=600"), 503);
+
+        assertThat(replaced.status(), is(200));
+        assertThat(replaced.headers().get(ResponseCache.CACHE_STALE_HEADER), contains("true"));
+
+        for (String directive : List.of("must-revalidate", "proxy-revalidate", "no-cache")) {
+            feign.Response refused = serveAnswering(receivedTenSecondsAgo("max-age=0, stale-if-error=600, " + directive), 503);
+
+            assertThat(directive, refused.status(), is(503));
+            assertThat(directive, refused.headers().get(ResponseCache.CACHE_STALE_HEADER), is(nullValue()));
+        }
+    }
+
+    @Test
+    @DisplayName("A fresh entry carrying no-cache is revalidated rather than replayed, where a fresh must-revalidate entry is replayed")
+    void freshNoCacheEntryIsRevalidated() throws IOException {
+        feign.Response noCache = serve(receivedTenSecondsAgo("max-age=3600, no-cache"), "ETag", "\"v1\"");
+        feign.Response mustRevalidate = serve(receivedTenSecondsAgo("max-age=3600, must-revalidate"), "ETag", "\"v1\"");
+
+        assertThat(noCache.headers().get(ResponseCache.CACHE_HIT_HEADER), contains("true"));
+        assertThat(noCache.headers().get(ResponseCache.REVALIDATED_HEADER), contains(equalToIgnoringCase("ETag")));
+        assertThat(mustRevalidate.headers().get(ResponseCache.CACHE_HIT_HEADER), contains("true"));
+        assertThat(mustRevalidate.headers().get(ResponseCache.REVALIDATED_HEADER), is(nullValue()));
+    }
+
     @Test
     @DisplayName("A 304 replay carries the 304's headers over the stored ones and names them")
     void notModifiedReplayCarriesTheLiveHeaders() throws IOException {
