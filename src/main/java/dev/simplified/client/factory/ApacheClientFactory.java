@@ -159,32 +159,8 @@ public final class ApacheClientFactory {
         @NotNull Optional<Inet6Address> inet6Address,
         @NotNull TlsSocketStrategy tlsDelegate
     ) {
-        HttpClientConnectionOperator timedOperator = new TimedConnectionOperator(
-            null,
-            SystemDefaultDnsResolver.INSTANCE,
-            RegistryBuilder.<TlsSocketStrategy>create()
-                .register(URIScheme.HTTPS.id, new TimedTlsSocketStrategy(tlsDelegate))
-                .build()
-        );
-
-        PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(
-            timedOperator,
-            PoolConcurrencyPolicy.LAX,
-            PoolReusePolicy.LIFO,
-            TimeValue.ofMilliseconds(timings.connectionTimeToLive()),
-            null
-        );
-        connectionManager.setMaxTotal(timings.maxConnections());
-        connectionManager.setDefaultMaxPerRoute(timings.maxConnectionsPerRoute());
-        connectionManager.setDefaultConnectionConfig(
-            ConnectionConfig.custom()
-                .setConnectTimeout(Timeout.ofMilliseconds(timings.connectTimeout()))
-                .setSocketTimeout(Timeout.ofMilliseconds(timings.socketTimeout()))
-                .build()
-        );
-
         HttpClientBuilder builder = HttpClientBuilder.create()
-            .setConnectionManager(connectionManager)
+            .setConnectionManager(connectionManager(timings, timedOperator(tlsDelegate)))
             .setDefaultRequestConfig(
                 RequestConfig.custom()
                     .setResponseTimeout(Timeout.ofMilliseconds(timings.socketTimeout()))
@@ -224,6 +200,56 @@ public final class ApacheClientFactory {
 
         inet6Address.ifPresent(localAddress -> builder.setRoutePlanner(bindingTo(localAddress)));
         return builder;
+    }
+
+    /**
+     * Builds the operator every pooled connection opens through, timing DNS resolution and the TCP
+     * connect, and on HTTPS routes the TLS handshake through a {@link TimedTlsSocketStrategy}
+     * around the given strategy.
+     *
+     * @param tlsDelegate the TLS socket strategy applied to HTTPS routes
+     * @return the timed connection operator
+     */
+    private static @NotNull HttpClientConnectionOperator timedOperator(@NotNull TlsSocketStrategy tlsDelegate) {
+        return new TimedConnectionOperator(
+            null,
+            SystemDefaultDnsResolver.INSTANCE,
+            RegistryBuilder.<TlsSocketStrategy>create()
+                .register(URIScheme.HTTPS.id, new TimedTlsSocketStrategy(tlsDelegate))
+                .build()
+        );
+    }
+
+    /**
+     * Builds the connection pool the client draws connections from, sized, aged and timed by the
+     * given {@link Timings}: at most {@link Timings#maxConnections()} connections and
+     * {@link Timings#maxConnectionsPerRoute()} per route, each living
+     * {@link Timings#connectionTimeToLive()} and opened with the connect and socket timeouts.
+     *
+     * @param timings the pool sizing, time-to-live and timeout configuration
+     * @param operator the operator every connection opens through
+     * @return the connection manager
+     */
+    private static @NotNull PoolingHttpClientConnectionManager connectionManager(
+        @NotNull Timings timings,
+        @NotNull HttpClientConnectionOperator operator
+    ) {
+        PoolingHttpClientConnectionManager connectionManager = new PoolingHttpClientConnectionManager(
+            operator,
+            PoolConcurrencyPolicy.LAX,
+            PoolReusePolicy.LIFO,
+            TimeValue.ofMilliseconds(timings.connectionTimeToLive()),
+            null
+        );
+        connectionManager.setMaxTotal(timings.maxConnections());
+        connectionManager.setDefaultMaxPerRoute(timings.maxConnectionsPerRoute());
+        connectionManager.setDefaultConnectionConfig(
+            ConnectionConfig.custom()
+                .setConnectTimeout(Timeout.ofMilliseconds(timings.connectTimeout()))
+                .setSocketTimeout(Timeout.ofMilliseconds(timings.socketTimeout()))
+                .build()
+        );
+        return connectionManager;
     }
 
     /**
