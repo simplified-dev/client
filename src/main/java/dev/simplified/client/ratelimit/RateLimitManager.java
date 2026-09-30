@@ -411,6 +411,34 @@ public class RateLimitManager {
     }
 
     /**
+     * Returns the policy the specified bucket enforces: the one it was created with, or the one a
+     * server response last replaced it with.
+     * <p>
+     * Does <em>not</em> create a missing bucket.
+     *
+     * @param bucketId the route identifier to query
+     * @return the bucket's policy, or empty if no bucket exists for the given identifier
+     */
+    public @NotNull Optional<RateLimit> getRateLimit(@NotNull String bucketId) {
+        return Optional.ofNullable(this.buckets.get(bucketId))
+            .map(bucket -> bucket.getRateLimit().get());
+    }
+
+    /**
+     * Returns the window the specified bucket holds, as {@link RateLimitBucket#getWindow()} returns
+     * it.
+     * <p>
+     * Does <em>not</em> create a missing bucket.
+     *
+     * @param bucketId the route identifier to query
+     * @return the bucket's window, or empty if no bucket exists for the given identifier
+     */
+    public @NotNull Optional<RateLimitBucket.Window> getWindow(@NotNull String bucketId) {
+        return Optional.ofNullable(this.buckets.get(bucketId))
+            .map(RateLimitBucket::getWindow);
+    }
+
+    /**
      * Removes all buckets from this manager, discarding all tracked state, including the quotas
      * routes and endpoints resolve to.
      */

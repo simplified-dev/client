@@ -5,6 +5,7 @@ import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.IPv6Prefix;
 import dev.simplified.client.subnet.SubnetRotation;
 import dev.simplified.client.subnet.SubnetSelectionStrategy;
@@ -16,6 +17,7 @@ import java.net.Inet6Address;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
@@ -24,6 +26,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
+import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class FanOutBucketPoolTest {
@@ -52,10 +55,32 @@ class FanOutBucketPoolTest {
         RateLimitManager shared = new RateLimitManager();
         ClientConfig<TestContract> base = ClientConfig.builder(TestContract.class, GsonSettings.builder().build()).build();
         FanOutBucketPool<TestContract> pool = (FanOutBucketPool<TestContract>) SubnetBucketPool.create(
-            rotation, shared, ANCHOR_ROUTE,
+            rotation, shared, new RouteDiscovery(base).getDefaultRoute(),
             base, UnaryOperator.identity(), availability
         );
         return new PoolHandle(pool, shared);
+    }
+
+    /**
+     * Builds a round-robin pool over {@link TwoRouteContract} fanning a /127 out to two /128 buckets.
+     */
+    private static FanOutBucketPool<TwoRouteContract> twoRoutePool(
+        RouteDiscovery.Metadata anchor,
+        Predicate<Client<TwoRouteContract>> availability
+    ) {
+        SubnetRotation rotation = SubnetRotation.builder()
+            .sourcePrefix("2001:db8::/127")
+            .bucketPrefixLength(128)
+            .strategy(SubnetSelectionStrategy.ROUND_ROBIN)
+            .build();
+        return (FanOutBucketPool<TwoRouteContract>) SubnetBucketPool.create(
+            rotation, new RateLimitManager(), anchor,
+            TwoRoutes.options(), UnaryOperator.identity(), availability
+        );
+    }
+
+    private static IPv6Prefix subnetOf(Client<?> client, int bucketLen) {
+        return IPv6Prefix.of(client.getOptions().getInet6Address().orElseThrow().getAddress(), bucketLen);
     }
 
     /**
@@ -206,6 +231,101 @@ class FanOutBucketPoolTest {
         RateLimitException ex = assertThrows(RateLimitException.class, p::selectClient);
         assertThat(ex.isServerEnforced(), is(false));
         assertThat(ex.getBucketId().contains("/126"), is(true));
+    }
+
+    @Test
+    @DisplayName("A bucket spent between the pool's saturation check and its selection refuses under its subnet rather than building a second client")
+    void checkThenSelectRaceRefuses() {
+        AtomicBoolean spendAfterCheck = new AtomicBoolean(false);
+        FanOutBucketPool<TwoRouteContract> p = twoRoutePool(TwoRoutes.anchorRoute(), client -> {
+            boolean open = TwoRoutes.open(client);
+
+            // Another request spends the bucket right after the pool's check passes it.
+            if (open && spendAfterCheck.getAndSet(false))
+                TwoRoutes.exhaust(client, TwoRoutes.SECOND);
+
+            return open;
+        });
+
+        Client<TwoRouteContract> first = p.selectClient();
+        p.selectClient();
+        spendAfterCheck.set(true);
+
+        // Round-robin returns to the first bucket: its check passes, then its selection is refused.
+        RateLimitException refusal = assertThrows(RateLimitException.class, p::selectClient);
+
+        assertThat(refusal.isServerEnforced(), is(false));
+        assertThat(refusal.getBucketId(), is(subnetOf(first, 128).toString()));
+        assertThat(refusal.getRateLimit(), is(sameInstance(TwoRoutes.policyOf(first, TwoRoutes.SECOND))));
+        assertThat(p.activeBuckets().count(), is(2L));
+        assertThat(p.activeBuckets().mapToInt(SubnetBucket::getClientCount).sum(), is(2));
+    }
+
+    @Test
+    @DisplayName("With every bucket saturated on the second route, the refusal names the source prefix and carries the second route's policy")
+    void saturationCarriesExhaustedRoutePolicy() {
+        FanOutBucketPool<TwoRouteContract> p = twoRoutePool(TwoRoutes.anchorRoute(), TwoRoutes::open);
+
+        TwoRoutes.exhaust(p.selectClient(), TwoRoutes.SECOND);
+        TwoRoutes.exhaust(p.selectClient(), TwoRoutes.SECOND);
+        RateLimitException refusal = assertThrows(RateLimitException.class, p::selectClient);
+
+        assertThat(refusal.getBucketId(), is(IPv6Prefix.parse("2001:db8::/127").toString()));
+        assertThat(refusal.getRateLimit().getLimit(), is(TwoRoutes.SECOND_LIMIT));
+        assertThat(refusal.getRateLimit().getResetSeconds(), is(TwoRoutes.SECOND_WINDOW));
+    }
+
+    @Test
+    @DisplayName("With every bucket saturated and no route exhausted, the refusal carries the anchor route's policy")
+    void saturationCarriesAnchorPolicy() {
+        AtomicBoolean available = new AtomicBoolean(true);
+        RouteDiscovery.Metadata anchor = TwoRoutes.anchorRoute();
+        FanOutBucketPool<TwoRouteContract> p = twoRoutePool(anchor, client -> available.get() && TwoRoutes.open(client));
+
+        p.selectClient();
+        p.selectClient();
+        available.set(false);
+        RateLimitException refusal = assertThrows(RateLimitException.class, p::selectClient);
+
+        assertThat(refusal.getBucketId(), is(IPv6Prefix.parse("2001:db8::/127").toString()));
+        assertThat(refusal.getRateLimit(), is(sameInstance(anchor.getRateLimit())));
+        assertThat(refusal.getRateLimit().getLimit(), is(TwoRoutes.ANCHOR_LIMIT));
+    }
+
+    @Test
+    @DisplayName("With every bucket spent under a server's policy on a route declaring no limit, the refusal carries the server's policy")
+    void saturationOfUnlimitedRouteCarriesServerPolicy() {
+        PoolHandle p = pool("2001:db8::/127", 128, SubnetSelectionStrategy.ROUND_ROBIN, c -> !c.isRateLimited());
+        long now = System.currentTimeMillis();
+
+        for (int i = 0; i < 2; i++) {
+            Client<TestContract> client = p.selectClient();
+            TwoRoutes.answer(client, client.getRouteDiscovery().getDefaultRoute(), 5, 0, 60, now);
+        }
+
+        RateLimitException refusal = assertThrows(RateLimitException.class, p::selectClient);
+
+        assertThat(refusal.getBucketId(), is(IPv6Prefix.parse("2001:db8::/127").toString()));
+        assertThat(refusal.getRateLimit().isUnlimited(), is(false));
+        assertThat(refusal.getRateLimit().getLimit(), is(5L));
+        assertThat(refusal.getRateLimit().getResetEpochMillis(), is(now + 60_000L));
+    }
+
+    @Test
+    @DisplayName("With every bucket saturated and no route exhausted, the refusal carries the policy a client holds for its type-level route over the declared one")
+    void saturationCarriesHeldAnchorPolicy() {
+        AtomicBoolean available = new AtomicBoolean(true);
+        FanOutBucketPool<TwoRouteContract> p = twoRoutePool(TwoRoutes.anchorRoute(), client -> available.get() && TwoRoutes.open(client));
+        Client<TwoRouteContract> first = p.selectClient();
+        long now = System.currentTimeMillis();
+
+        p.selectClient();
+        TwoRoutes.answer(first, first.getRouteDiscovery().getDefaultRoute(), 50, 10, 90, now);
+        available.set(false);
+        RateLimitException refusal = assertThrows(RateLimitException.class, p::selectClient);
+
+        assertThat(refusal.getRateLimit().getLimit(), is(50L));
+        assertThat(refusal.getRateLimit().getResetEpochMillis(), is(now + 90_000L));
     }
 
 }

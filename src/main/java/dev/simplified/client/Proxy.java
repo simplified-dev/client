@@ -89,7 +89,10 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
      * the proxy's one client.
      *
      * @return the contract proxy of the selected client
-     * @throws RateLimitException if no client of the pool can serve a request
+     * @throws RateLimitException if no client of the pool can serve a request, or if the one subnet
+     *     bucket a rotation spreading its clients over several chose was spent between the pool's
+     *     saturation check and its selection - naming that bucket's subnet, while another bucket
+     *     may serve a retry
      */
     @Override
     public @NotNull C getContract() {
@@ -104,7 +107,10 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
      * returned by every later one.
      *
      * @return an available client
-     * @throws RateLimitException if no client of the pool can serve a request
+     * @throws RateLimitException if no client of the pool can serve a request, or if the one subnet
+     *     bucket a rotation spreading its clients over several chose was spent between the pool's
+     *     saturation check and its selection - naming that bucket's subnet, while another bucket
+     *     may serve a retry
      */
     public @NotNull Client<C> getClient() {
         return this.pool.selectClient();
@@ -130,7 +136,8 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * Sets the operator applied to the base options builder when constructing a new client.
          * <p>
          * The operator receives a fresh {@link ClientConfig.Builder} seeded from the base
-         * options on each call to {@link #getClient()} that needs to add a new pool member.
+         * options each time the pool builds a client: once per subnet bucket for a proxy with a
+         * rotation, once in all for a proxy without one.
          * The bucket's random source-address binding is applied <em>after</em> this mutator,
          * so the mutator cannot override the address selected by the rotation layer.
          * <p>
@@ -171,7 +178,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * prefix length:
          * <ul>
          *   <li>source &lt; bucket -&gt; fan-out across all contained subnets</li>
-         *   <li>source == bucket -&gt; single bucket, address-only rotation</li>
+         *   <li>source == bucket -&gt; single bucket, one client at a random address inside it</li>
          *   <li>source &gt; bucket -&gt; pass-through (rotation gains nothing)</li>
          * </ul>
          *
@@ -301,9 +308,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          */
         public @NotNull Proxy<C> build() {
             RateLimitManager sharedManager = new RateLimitManager();
-            String anchorRouteId = new RouteDiscovery(this.baseOptions)
-                .getDefaultRoute()
-                .getRoute();
+            RouteDiscovery.Metadata anchorRoute = new RouteDiscovery(this.baseOptions).getDefaultRoute();
 
             // Every client the pool builds carries the one shared manager, so all of them count
             // against one tracker. The mutator is read once here, so a later call on this builder
@@ -316,7 +321,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
             ClientPool<C> pool = ClientPool.create(
                 this.rotation,
                 sharedManager,
-                anchorRouteId,
+                anchorRoute,
                 this.baseOptions,
                 sharing,
                 this.availability

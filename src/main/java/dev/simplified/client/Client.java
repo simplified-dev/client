@@ -17,6 +17,8 @@ import dev.simplified.client.factory.TimedConnectionOperator;
 import dev.simplified.client.factory.TimedTlsSocketStrategy;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
+import dev.simplified.client.ratelimit.RateLimit;
+import dev.simplified.client.ratelimit.RateLimitBucket;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.AsyncAccess;
@@ -39,10 +41,12 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 /**
  * Feign-backed HTTP client providing connection pooling, rate limiting, route discovery,
@@ -314,6 +318,63 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
         return this.routeDiscovery.findByRoute(provider.getRoute())
             .map(metadata -> this.rateLimitManager.getRemaining(this.bucketKeyOf(metadata)))
             .orElse(Long.MAX_VALUE);
+    }
+
+    /**
+     * Returns the policy enforced by the type-level default rate-limit bucket, resolved as
+     * {@link #isRateLimited()} resolves it.
+     * <p>
+     * That is the policy the bucket was created with, or the one a server response last replaced
+     * it with, reset instant included - not necessarily the one the type-level
+     * {@link Route @Route} declares.
+     *
+     * @return the policy the type-level default bucket enforces, or empty while no bucket exists
+     *     for it
+     */
+    public @NotNull Optional<RateLimit> getRateLimit() {
+        return this.rateLimitManager.getRateLimit(this.bucketKeyOf(this.routeDiscovery.getDefaultRoute()));
+    }
+
+    /**
+     * Finds the policy of an exhausted rate-limit bucket among those the contract's routes count
+     * against.
+     * <p>
+     * Resolves the bucket of the type-level default route and of every method-level route as
+     * {@link #isRateLimited()} resolves the default route's: the quota the route's latest response
+     * named, or the route's own bucket. Among the buckets that are exhausted, the one whose window
+     * ends last is chosen, the type-level route's winning a tie, so a caller backing off on its
+     * policy waits no less than the longest-lived of them. The policy is the one that bucket
+     * enforces rather than the one its route declares: a route that declares no limit, whose
+     * bucket a server's headers gave a policy and then spent, reports the server's policy with its
+     * reset instant. A bucket under an {@linkplain RateLimit#unlimited unlimited} policy is
+     * never exhausted, so the policy found is never one. A {@link Proxy} that refuses this client
+     * carries the found policy as the one that was spent.
+     *
+     * @return the policy of the exhausted bucket whose window ends last, or empty when no route's
+     *     bucket is exhausted
+     */
+    public @NotNull Optional<RateLimit> findRateLimitedPolicy() {
+        return Stream.concat(
+                Stream.of(this.routeDiscovery.getDefaultRoute()),
+                this.routeDiscovery.getMethodRoutes().values().stream()
+            )
+            .map(this::bucketKeyOf)
+            .filter(this.rateLimitManager::isRateLimited)
+            .max(Comparator.comparingLong(this::windowEndOf))
+            .flatMap(this.rateLimitManager::getRateLimit);
+    }
+
+    /**
+     * Reads when the window of a bucket ends.
+     *
+     * @param bucketKey the bucket to read
+     * @return the epoch-millisecond timestamp the bucket's window ends at, or
+     *     {@link Long#MIN_VALUE} when no bucket exists for the key
+     */
+    private long windowEndOf(@NotNull String bucketKey) {
+        return this.rateLimitManager.getWindow(bucketKey)
+            .map(RateLimitBucket.Window::end)
+            .orElse(Long.MIN_VALUE);
     }
 
     /**

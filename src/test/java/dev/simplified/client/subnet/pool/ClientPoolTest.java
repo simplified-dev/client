@@ -3,6 +3,7 @@ package dev.simplified.client.subnet.pool;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.SubnetRotation;
 import dev.simplified.gson.GsonSettings;
 import org.junit.jupiter.api.DisplayName;
@@ -24,7 +25,8 @@ class ClientPoolTest {
     private static ClientPool<TestContract> pool(Optional<SubnetRotation> rotation) {
         ClientConfig<TestContract> base = ClientConfig.builder(TestContract.class, GsonSettings.builder().build()).build();
         Predicate<Client<TestContract>> availability = client -> true;
-        return ClientPool.create(rotation, new RateLimitManager(), "127.0.0.1:0", base, UnaryOperator.identity(), availability);
+        RouteDiscovery.Metadata anchor = new RouteDiscovery(base).getDefaultRoute();
+        return ClientPool.create(rotation, new RateLimitManager(), anchor, base, UnaryOperator.identity(), availability);
     }
 
     private static ClientPool<TestContract> pool(int srcLen, int bucketLen) {

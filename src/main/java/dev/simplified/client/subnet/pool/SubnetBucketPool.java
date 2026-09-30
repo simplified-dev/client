@@ -5,6 +5,7 @@ import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.Contract;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.SubnetRotation;
 import org.jetbrains.annotations.NotNull;
 
@@ -22,11 +23,13 @@ import java.util.stream.Stream;
  *   <li>{@link FanOutBucketPool} - source is larger than a single bucket
  *       (sparse fan-out across many contained subnets).</li>
  *   <li>{@link SingleBucketPool} - source equals one bucket (no /bucket-level
- *       rotation, only addresses-within-bucket).</li>
+ *       rotation; one client bound to a random address inside the source).</li>
  *   <li>{@link PassThroughBucketPool} - source is smaller than a bucket (rotation
  *       gains nothing at this dimension; like the single bucket, it refuses a
  *       request once its bucket is saturated).</li>
  * </ul>
+ * Each bucket holds one client, so a pool refuses a saturated bucket rather than
+ * building a second client inside it.
  *
  * @param <C> the contract interface type
  * @see SubnetRotation
@@ -58,7 +61,9 @@ public sealed interface SubnetBucketPool<C extends Contract> extends ClientPool<
      *
      * @return an available client bound to an address within a non-saturated
      *         bucket's subnet
-     * @throws RateLimitException if no bucket has remaining budget
+     * @throws RateLimitException if no bucket has remaining budget, or if the bucket
+     *         chosen was spent between the pool's saturation check and its selection -
+     *         naming that bucket's subnet, while another bucket may serve a retry
      */
     @NotNull Client<C> selectClient() throws RateLimitException;
 
@@ -67,27 +72,29 @@ public sealed interface SubnetBucketPool<C extends Contract> extends ClientPool<
      *
      * @param <C> the contract interface type
      * @param rotation the immutable rotation configuration
-     * @param sharedManager the shared rate-limit manager every spawned client will read and write
-     * @param anchorRouteId the route bucket id used as the "default" route for count-based bucket
-     *                      selection (typically the contract's type-level route)
-     * @param baseOptions the shared base options derived by every spawned client
+     * @param sharedManager the shared rate-limit manager every built client will read and write
+     * @param anchorRoute the route used as the "default" route for count-based bucket selection
+     *                    (typically the contract's type-level route), whose declared policy a
+     *                    refusal carries when the refused client reports no exhausted bucket
+     *                    and holds no bucket for the route
+     * @param baseOptions the shared base options derived by every built client
      * @param mutator the per-client mutator applied before address binding
-     * @param availability the predicate used to filter existing pooled clients
+     * @param availability the predicate a bucket's client passes when it can serve a request
      * @return a pool implementation matching the prefix-band of {@code rotation}
      */
     static <C extends Contract> @NotNull SubnetBucketPool<C> create(
         @NotNull SubnetRotation rotation,
         @NotNull RateLimitManager sharedManager,
-        @NotNull String anchorRouteId,
+        @NotNull RouteDiscovery.Metadata anchorRoute,
         @NotNull ClientConfig<C> baseOptions,
         @NotNull UnaryOperator<ClientConfig.Builder<C>> mutator,
         @NotNull Predicate<Client<C>> availability
     ) {
         int srcLen = rotation.sourcePrefix().length();
         int bucketLen = rotation.bucketPrefixLength();
-        if (srcLen < bucketLen) return new FanOutBucketPool<>(rotation, sharedManager, anchorRouteId, baseOptions, mutator, availability);
-        if (srcLen == bucketLen) return new SingleBucketPool<>(rotation, anchorRouteId, baseOptions, mutator, availability);
-        return new PassThroughBucketPool<>(rotation, anchorRouteId, baseOptions, mutator, availability);
+        if (srcLen < bucketLen) return new FanOutBucketPool<>(rotation, sharedManager, anchorRoute, baseOptions, mutator, availability);
+        if (srcLen == bucketLen) return new SingleBucketPool<>(rotation, anchorRoute, baseOptions, mutator, availability);
+        return new PassThroughBucketPool<>(rotation, anchorRoute, baseOptions, mutator, availability);
     }
 
 }

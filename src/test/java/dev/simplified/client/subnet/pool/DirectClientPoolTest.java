@@ -4,6 +4,7 @@ import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimitManager;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.gson.GsonSettings;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -29,8 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Tests that a {@link DirectClientPool} builds its one client on the first selection and never a
- * second, however many callers select it at once, that the client sends from the host's default address under the injected manager, and
- * that a rejected client is refused rather than replaced.
+ * second, however many callers select it at once, that the client sends from the host's default address under the injected manager,
+ * that a rejected client is refused rather than replaced, and that the refusal carries the policy the client holds for the bucket
+ * it spent - a server's in place of a route's declared lack of one - or the anchor route's when it spent none.
  */
 class DirectClientPoolTest {
 
@@ -61,9 +63,22 @@ class DirectClientPoolTest {
             return builder.withRateLimitManager(this.shared);
         };
         Predicate<Client<TestContract>> availability = client -> this.available.get();
-        ClientPool<TestContract> pool = ClientPool.create(Optional.empty(), this.shared, ANCHOR, base, counting, availability);
+        RouteDiscovery.Metadata anchor = new RouteDiscovery(base).getDefaultRoute();
+        ClientPool<TestContract> pool = ClientPool.create(Optional.empty(), this.shared, anchor, base, counting, availability);
         assertThat(pool, instanceOf(DirectClientPool.class));
         return (DirectClientPool<TestContract>) pool;
+    }
+
+    private DirectClientPool<TwoRouteContract> twoRoutePool(RouteDiscovery.Metadata anchor, Predicate<Client<TwoRouteContract>> availability) {
+        ClientPool<TwoRouteContract> pool = ClientPool.create(
+            Optional.empty(),
+            this.shared,
+            anchor,
+            TwoRoutes.options(),
+            builder -> builder.withRateLimitManager(this.shared),
+            availability
+        );
+        return (DirectClientPool<TwoRouteContract>) pool;
     }
 
     @Test
@@ -158,6 +173,62 @@ class DirectClientPoolTest {
 
         assertThat(pool.selectClient(), is(sameInstance(first)));
         assertThat(this.built.get(), is(1));
+    }
+
+    @Test
+    @DisplayName("A refusal carries the policy of the second route when its bucket is the one exhausted")
+    void refusalCarriesExhaustedRoutePolicy() {
+        DirectClientPool<TwoRouteContract> pool = this.twoRoutePool(TwoRoutes.anchorRoute(), TwoRoutes::open);
+        Client<TwoRouteContract> client = pool.selectClient();
+
+        TwoRoutes.exhaust(client, TwoRoutes.SECOND);
+        RateLimitException refusal = assertThrows(RateLimitException.class, pool::selectClient);
+
+        assertThat(refusal.getBucketId(), is(TwoRoutes.ANCHOR));
+        assertThat(refusal.getRateLimit(), is(sameInstance(TwoRoutes.policyOf(client, TwoRoutes.SECOND))));
+        assertThat(refusal.getRateLimit().getLimit(), is(TwoRoutes.SECOND_LIMIT));
+        assertThat(refusal.getRateLimit().getResetSeconds(), is(TwoRoutes.SECOND_WINDOW));
+    }
+
+    @Test
+    @DisplayName("A refusal carries the anchor route's policy when no route is exhausted")
+    void refusalCarriesAnchorPolicy() {
+        RouteDiscovery.Metadata anchor = TwoRoutes.anchorRoute();
+        DirectClientPool<TwoRouteContract> pool = this.twoRoutePool(anchor, client -> this.available.get() && TwoRoutes.open(client));
+
+        pool.selectClient();
+        this.available.set(false);
+        RateLimitException refusal = assertThrows(RateLimitException.class, pool::selectClient);
+
+        assertThat(refusal.getBucketId(), is(TwoRoutes.ANCHOR));
+        assertThat(refusal.getRateLimit(), is(sameInstance(anchor.getRateLimit())));
+        assertThat(refusal.getRateLimit().getLimit(), is(TwoRoutes.ANCHOR_LIMIT));
+    }
+
+    @Test
+    @DisplayName("A refusal of a route declaring no limit, spent under a server's policy, carries the server's policy rather than the unlimited sentinel")
+    void refusalOfUnlimitedRouteCarriesServerPolicy() {
+        ClientConfig<TestContract> base = ClientConfig.builder(TestContract.class, GsonSettings.builder().build()).build();
+        RouteDiscovery.Metadata anchor = new RouteDiscovery(base).getDefaultRoute();
+        ClientPool<TestContract> pool = ClientPool.create(
+            Optional.empty(),
+            this.shared,
+            anchor,
+            base,
+            builder -> builder.withRateLimitManager(this.shared),
+            client -> !client.isRateLimited()
+        );
+        Client<TestContract> client = pool.selectClient();
+        long now = System.currentTimeMillis();
+        assertThat(anchor.getRateLimit().isUnlimited(), is(true));
+
+        TwoRoutes.answer(client, client.getRouteDiscovery().getDefaultRoute(), 5, 0, 60, now);
+        RateLimitException refusal = assertThrows(RateLimitException.class, pool::selectClient);
+
+        assertThat(refusal.getBucketId(), is(ANCHOR));
+        assertThat(refusal.getRateLimit().isUnlimited(), is(false));
+        assertThat(refusal.getRateLimit().getLimit(), is(5L));
+        assertThat(refusal.getRateLimit().getResetEpochMillis(), is(now + 60_000L));
     }
 
 }
