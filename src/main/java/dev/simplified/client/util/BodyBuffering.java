@@ -132,6 +132,7 @@ public final class BodyBuffering {
         byte[] buffer = new byte[sized];
         int total = 0;
         int read;
+
         while (total < sized && (read = in.read(buffer, total, sized - total)) != -1)
             total += read;
 

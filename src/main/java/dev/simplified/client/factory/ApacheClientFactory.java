@@ -27,8 +27,6 @@ import org.apache.hc.core5.http.HttpEntity;
 import org.apache.hc.core5.http.HttpException;
 import org.apache.hc.core5.http.HttpHost;
 import org.apache.hc.core5.http.HttpMessage;
-import org.apache.hc.core5.http.HttpRequestInterceptor;
-import org.apache.hc.core5.http.HttpResponseInterceptor;
 import org.apache.hc.core5.http.URIScheme;
 import org.apache.hc.core5.http.config.RegistryBuilder;
 import org.apache.hc.core5.http.io.EofSensorInputStream;
@@ -172,13 +170,13 @@ public final class ApacheClientFactory {
             // Disable HC 5's transport-level retries entirely.
             .disableAutomaticRetries()
             .evictIdleConnections(TimeValue.ofMilliseconds(timings.connectionIdleTimeout()))
-            .addRequestInterceptorFirst((HttpRequestInterceptor) (request, entityDetails, context) -> {
+            .addRequestInterceptorFirst((request, entityDetails, context) -> {
                 context.setAttribute(NetworkDetails.REQUEST_START, Instant.now());
                 removeHeaders(request, NetworkDetails::isClientHeader);
 
                 if (!queries.isEmpty()) appendQueryParameters(request, queries);
             })
-            .addResponseInterceptorFirst((HttpResponseInterceptor) (response, entityDetails, context) -> {
+            .addResponseInterceptorFirst((response, entityDetails, context) -> {
                 removeHeaders(response, NetworkDetails::isInternalHeader);
 
                 for (String marker : NetworkDetails.CONNECTION_HEADERS) {

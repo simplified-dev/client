@@ -16,6 +16,7 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -83,12 +84,12 @@ public final class RouteDiscovery {
         if (defaultRoute.isEmpty())
             throw new IllegalArgumentException("No @Route or @DynamicRoute found on type of " + target.getName());
 
-        ConcurrentMap<Method, Metadata> methodRoutes = Concurrent.newMap();
+        Map<Method, Metadata> methodRoutes = new HashMap<>();
         for (Method method : target.getDeclaredMethods())
             extractRouteFromTarget(method, subnetPrefix).ifPresent(info -> methodRoutes.put(method, info));
 
         this.defaultRoute = defaultRoute.get();
-        this.methodRoutes = methodRoutes.toUnmodifiable();
+        this.methodRoutes = Concurrent.newUnmodifiableMap(methodRoutes);
     }
 
     /**
