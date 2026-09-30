@@ -169,27 +169,30 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          *   <li>source &gt; bucket -&gt; pass-through (rotation gains nothing)</li>
          * </ul>
          *
-         * <h5>Hurricane Electric IPv6 Tunnel Setup (example /48 provider)</h5>
+         * <h4>Hurricane Electric IPv6 Tunnel Setup (example /48 provider)</h4>
          * <ol>
          *     <li>Go to <a href="https://tunnelbroker.net/">TunnelBroker</a></li>
          *     <li>Create an account or login</li>
-         *     <li>Click on Create Regular Tunnel</li>
+         *     <li>Click on Create Regular Tunnel
          *     <ul>
-         *         <li>Enter ipv4 address of your server</li>
+         *         <li>Enter ipv4 address of your server
          *         <ul>
          *             <li>If it gives an error, use the pingable IP of nginx.com</li>
          *         </ul>
+         *         </li>
          *         <li>Select an origin city for your tunnel</li>
          *         <li>Click Create</li>
          *     </ul>
-         *     <li>Click on your tunnel name</li>
+         *     </li>
+         *     <li>Click on your tunnel name
          *     <ul>
          *         <li>If you entered the nginx.com IP, change it to the ipv4 address of your server</li>
          *     </ul>
+         *     </li>
          *     <li>Click on Generate /48</li>
          * </ol>
          *
-         * <h5>Variables</h5>
+         * <h4>Variables</h4>
          * <pre><code>
          * SERVER_IPV4 = Server IPv4 Address
          * CLIENT_IPV4 = Client IPv4 Address
@@ -197,12 +200,12 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * ROUTED_48   = Routed /48 prefix
          * </code></pre>
          *
-         * <h5>Create Routing Table</h5>
+         * <h4>Create Routing Table</h4>
          * <pre><code>
          * grep -q '^100 he' /etc/iproute2/rt_tables || echo "100 he" &gt;&gt; /etc/iproute2/rt_tables
          * </code></pre>
          *
-         * <h5>Enable IPv6 Non-Local Binding &amp; Forwarding and TCP Optimizations</h5>
+         * <h4>Enable IPv6 Non-Local Binding &amp; Forwarding and TCP Optimizations</h4>
          * <pre><code>
          * cat &gt; /etc/sysctl.d/99-he-tunnel.conf &lt;&lt; 'EOF'
          * # Enable nonlocal bind
@@ -220,7 +223,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * sysctl -p /etc/sysctl.d/99-he-tunnel.conf
          * </code></pre>
          *
-         * <h5>Enable Non-Local IPv6 Binding</h5>
+         * <h4>Enable Non-Local IPv6 Binding</h4>
          * <pre><code>
          * cat &gt; /etc/systemd/system/he-ipv6.service &lt;&lt; 'EOF'
          * [Unit]
@@ -251,14 +254,14 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * EOF
          * </code></pre>
          *
-         * <h5>Launch Service</h5>
+         * <h4>Launch Service</h4>
          * <pre><code>
          * systemctl daemon-reload
          * systemctl enable he-ipv6
          * systemctl start he-ipv6
          * </code></pre>
          *
-         * <h5>JVM Requirement</h5>
+         * <h4>JVM Requirement</h4>
          * <p>The JVM must be started with {@code -Djava.net.preferIPv6Addresses=true}.
          * Without this, Java resolves hostnames to IPv4 addresses first, and an IPv6-bound
          * socket cannot connect to an IPv4 destination ({@code Network unreachable}).

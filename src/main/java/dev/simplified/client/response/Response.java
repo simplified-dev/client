@@ -126,7 +126,7 @@ public interface Response<T> {
     /**
      * Determines whether this response represents an error condition.
      * <p>
-     * Delegates to {@link HttpState#isError()} on the state associated with this
+     * Delegates to the {@linkplain HttpState#error error flag} of the state associated with this
      * response's {@link HttpStatus}.
      *
      * @return {@code true} if the response status belongs to an error state;
@@ -730,15 +730,16 @@ public interface Response<T> {
         /**
          * Computes this response's current age per
          * <a href="https://datatracker.ietf.org/doc/html/rfc7234#section-4.2.3">RFC 7234
-         * Section 4.2.3</a>, anchored on the {@link NetworkDetails#getRoundTrip()} bookends of
+         * Section 4.2.3</a>, anchored on the {@link NetworkDetails#roundTrip} bookends of
          * {@link #getDetails()}.
          * <p>
          * The formula honours an upstream {@code Age} response header (injected by CDNs
          * like Cloudflare), the server-reported {@code Date}, and the local
          * request/response timestamps, selecting the conservative maximum of apparent and
          * corrected age as the initial age. A view refreshed by a {@code 304 Not Modified}
-         * reports that exchange's round trip and carries the 304's {@code Date}, or the instant
-         * the 304 was received when it sent none, so its age is counted from the revalidation.
+         * reports that exchange's round trip and carries the 304's {@code Date}, or, when it sent
+         * none, the stored {@code Date} advanced by the time between the two receipts, so its age
+         * is counted from the revalidation on the clock its {@code Date} is read off.
          *
          * @param now the reference instant for the age computation
          * @return the response's current age as a {@link Duration}

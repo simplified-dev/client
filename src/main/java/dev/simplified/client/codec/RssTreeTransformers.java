@@ -14,10 +14,8 @@ import java.util.function.UnaryOperator;
  * when parsing real-world RSS feeds through {@link XmlDecoder}.
  * <p>
  * Each transformer is a stateless, idempotent {@link UnaryOperator} that can be passed
- * directly to
- * {@link XmlDecoder#XmlDecoder(com.google.gson.Gson,
- *        com.fasterxml.jackson.dataformat.xml.XmlMapper, UnaryOperator)
- * XmlDecoder}'s three-argument constructor. They are no-ops on trees that do not
+ * directly to {@link XmlDecoder}'s three-argument constructor as its
+ * {@linkplain XmlDecoder#treeTransformer tree transformer}. They are no-ops on trees that do not
  * exhibit the target quirk, so installing one unconditionally on an RSS client is
  * safe even when the quirk is not present in every response.
  * <p>

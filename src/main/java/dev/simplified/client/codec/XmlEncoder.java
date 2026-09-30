@@ -47,11 +47,11 @@ import java.util.function.Function;
  * touching a {@link RequestTemplate}.
  *
  * <p><b>Lifecycle.</b> This encoder is typically returned from
- * {@link ClientConfig#getEncoderFactory()} when the surrounding client exposes RSS/Atom write
+ * {@link ClientConfig#encoderFactory} when the surrounding client exposes RSS/Atom write
  * endpoints, or instantiated on demand as a standalone serializer for clients whose
  * remote APIs are read-only (such as the Hypixel forum feeds).
  *
- * @see ClientConfig#getEncoderFactory()
+ * @see ClientConfig#encoderFactory
  * @see XmlDecoder
  * @see SyndFeedOutput
  */
@@ -128,10 +128,10 @@ public final class XmlEncoder implements Encoder {
      * independently of a Feign {@link RequestTemplate}.
      *
      * @param object the DTO to serialize, which must be an instance of
-     *               {@link #getExpectedType()}
+     *               {@link #expectedType}
      * @return the serialized XML document
      * @throws EncodeException if {@code object} is not an instance of
-     *                         {@link #getExpectedType()}, if the mapper fails, or if ROME
+     *                         {@link #expectedType}, if the mapper fails, or if ROME
      *                         rejects the produced {@link SyndFeed}
      */
     public @NotNull String serialize(@NotNull Object object) throws EncodeException {

@@ -41,7 +41,7 @@ import java.net.Socket;
  * {@link TlsSocketStrategy}, which is what made the migration cleaner than HC 4's combined
  * {@code LayeredConnectionSocketFactory} shape.
  *
- * @see TimedPlainConnectionSocketFactory
+ * @see TimedConnectionOperator
  * @see NetworkDetails
  * @see dev.simplified.client.Client
  */

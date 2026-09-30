@@ -17,7 +17,7 @@ import java.lang.annotation.Target;
  * the full URL and associated {@link RateLimitConfig} for each endpoint method.
  * <p>
  * The value should be specified without a protocol prefix; the {@code https://} scheme is
- * prepended automatically by {@link RouteDiscovery.Metadata#getFullUrl()}.
+ * prepended automatically by {@link RouteDiscovery.Metadata#fullUrl}.
  * <pre>{@code
  * @Route("api.sbs.dev")              // simple host
  * @Route("api.sbs.dev/v2")           // host with base path

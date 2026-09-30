@@ -13,7 +13,7 @@ import org.jetbrains.annotations.NotNull;
  * <p>
  * Routes must be returned without a protocol prefix (e.g. {@code "api.sbs.dev/v2"}, not
  * {@code "https://api.sbs.dev/v2"}). The {@code https://} scheme is prepended automatically
- * by {@link RouteDiscovery.Metadata#getFullUrl()}.
+ * by {@link RouteDiscovery.Metadata#fullUrl}.
  *
  * @see DynamicRoute
  * @see RouteDiscovery

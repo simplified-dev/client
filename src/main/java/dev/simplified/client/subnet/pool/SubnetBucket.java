@@ -87,7 +87,7 @@ public final class SubnetBucket<C extends Contract> {
 
     /**
      * Selects an available client from this bucket's sub-pool, spawning a new one bound to a random
-     * address within {@link #getSubnet()} if needed.
+     * address within {@link #subnet} if needed.
      * <p>
      * Existing clients are filtered by the availability predicate before fallback construction.
      * Newly spawned clients have the per-client mutator applied first, then the random source

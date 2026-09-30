@@ -113,8 +113,8 @@ public enum HttpState {
      * Checks whether the given HTTP status code falls within this state's inclusive range.
      *
      * @param code the HTTP status code to test
-     * @return {@code true} if {@code code} is between {@link #getMinCode()} and
-     *         {@link #getMaxCode()} (inclusive); {@code false} otherwise
+     * @return {@code true} if {@code code} is between {@link #minCode} and
+     *         {@link #maxCode} (inclusive); {@code false} otherwise
      */
     public boolean containsCode(int code) {
         return code >= this.getMinCode() && code <= this.getMaxCode();

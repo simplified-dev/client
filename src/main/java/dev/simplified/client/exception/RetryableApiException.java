@@ -17,7 +17,7 @@ import org.jetbrains.annotations.NotNull;
  * <p>
  * After all retry attempts are exhausted, the {@link Client}
  * unwrapping proxy intercepts this exception and re-throws the original
- * {@link ApiException} via {@link #getWrappedException()}, ensuring that callers
+ * {@link ApiException} via {@link #wrappedException}, ensuring that callers
  * never observe the internal Feign wrapper type.
  * <p>
  * This class is the lone touchpoint between the exception hierarchy and feign
