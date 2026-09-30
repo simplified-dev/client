@@ -2,6 +2,7 @@ package dev.simplified.client.request;
 
 import dev.simplified.client.Client;
 import dev.simplified.client.cache.ResponseCache;
+import dev.simplified.client.factory.ApacheClientFactory;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
 import org.apache.hc.core5.util.TimeValue;
@@ -18,8 +19,10 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li><b>HTTP connection lifecycle</b> - time-to-live, idle eviction, and keep-alive timeouts
  *       that govern how long pooled connections remain open.</li>
- *   <li><b>Feign request timeouts</b> - connect and read timeouts applied to each outgoing
- *       Feign request via {@link feign.Request.Options}.</li>
+ *   <li><b>Request timeouts</b> - connect and read timeouts applied to each outgoing request: a
+ *       Feign request's via {@link feign.Request.Options}, and every other request's, a URL
+ *       fetcher's among them, as the defaults of the transport {@link ApacheClientFactory}
+ *       configures.</li>
  *   <li><b>Concurrency limits</b> - maximum total connections and maximum connections per
  *       route in the {@link PoolingHttpClientConnectionManager}.</li>
  *   <li><b>Client-level caching</b> - entries in the RFC 7234 response cache are evicted by
@@ -44,12 +47,16 @@ import java.util.concurrent.TimeUnit;
  *                              Default: 45,000 (45 seconds).
  * @param connectionKeepAlive default keep-alive duration in milliseconds for persistent connections when the server
  *                            response does not include a {@code Keep-Alive} header. Default: 30,000 (30 seconds).
- * @param connectTimeout maximum time in milliseconds to wait for a TCP connection to be established. Passed to
- *                       {@link feign.Request.Options} as the connect timeout. Controls {@code SO_CONNECT_TIMEOUT}
- *                       on the underlying socket. Default: 5,000 (5 seconds).
+ * @param connectTimeout maximum time in milliseconds to wait for a TCP connection to be established, which bounds
+ *                       its TLS handshake as well. Passed to {@link feign.Request.Options} as the connect timeout
+ *                       of a Feign request, and set by {@link ApacheClientFactory} as the connect timeout of every
+ *                       other connection its transport opens. Controls {@code SO_CONNECT_TIMEOUT} on the
+ *                       underlying socket. Default: 5,000 (5 seconds).
  * @param socketTimeout maximum time in milliseconds of inactivity between consecutive data packets after the
- *                      connection is established. Passed to {@link feign.Request.Options} as the read timeout, which
- *                      maps to {@code SO_TIMEOUT} on the underlying socket. This is a per-packet inactivity limit,
+ *                      connection is established. Passed to {@link feign.Request.Options} as the read timeout of a
+ *                      Feign request, and set by {@link ApacheClientFactory} as the response and socket timeout of
+ *                      every other request its transport sends, either of which maps to {@code SO_TIMEOUT} on the
+ *                      underlying socket. This is a per-packet inactivity limit,
  *                      not a total transfer timeout - streaming large files works as long as data arrives within
  *                      this interval. Default: 10,000 (10 seconds).
  * @param maxConnections maximum total concurrent HTTP connections across all routes. Passed to

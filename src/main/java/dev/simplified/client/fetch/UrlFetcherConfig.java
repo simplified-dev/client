@@ -214,8 +214,12 @@ public final class UrlFetcherConfig {
          *
          * @param maxBodyBytes the cap in bytes
          * @return this builder
+         * @throws IllegalArgumentException if {@code maxBodyBytes} is negative
          */
         public @NotNull Builder withMaxBodyBytes(long maxBodyBytes) {
+            if (maxBodyBytes < 0)
+                throw new IllegalArgumentException(String.format("Body cap must not be negative, got '%s'", maxBodyBytes));
+
             this.maxBodyBytes = maxBodyBytes;
             return this;
         }
@@ -310,7 +314,7 @@ public final class UrlFetcherConfig {
          * The header is added to each request the fetcher sends, where its response cache sees
          * it, and to the follow-up of each redirect it follows. A request carrying
          * {@code Authorization} or {@code Cookie} does not follow a redirect to another host or
-         * port: the fetcher returns the {@code 3xx} response.
+         * port: the fetcher raises the {@code 3xx} as a {@link UrlFetchException.Redirection}.
          *
          * @param name the header name
          * @param value the header value

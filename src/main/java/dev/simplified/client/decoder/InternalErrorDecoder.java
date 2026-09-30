@@ -1,6 +1,7 @@
 package dev.simplified.client.decoder;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.ClientConfig;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiException;
 import dev.simplified.client.exception.ErrorContext;
@@ -20,6 +21,8 @@ import org.jetbrains.annotations.NotNull;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
+import java.util.Arrays;
+import java.util.Map;
 import java.util.OptionalLong;
 
 /**
@@ -35,7 +38,10 @@ import java.util.OptionalLong;
  *   <li>Buffers the response body into a {@code byte[]} once and builds a primitive
  *       {@link ErrorContext} via {@link ErrorContext#fromFeign(feign.Response, byte[])}.
  *       That single boundary call is the only feign-touch site involved in producing typed
- *       exceptions.</li>
+ *       exceptions. A body larger than the {@linkplain ClientConfig.Builder#withMaxBodyBytes(long) cap} is
+ *       read no further than one byte past it, its exchange aborted rather than drained, and is
+ *       cut at the cap, so the status raises whatever the size of its body and the exception
+ *       carries the body's first bytes.</li>
  *   <li>If the response status is {@link HttpStatus#TOO_MANY_REQUESTS 429}, it constructs a
  *       {@link RateLimitException} directly; if {@link HttpStatus#PRECONDITION_FAILED}, a
  *       {@link PreconditionFailedException}; if a 3xx redirection, a
@@ -45,10 +51,11 @@ import java.util.OptionalLong;
  *       {@link ErrorContext#statusCode()} with {@link HttpStatus#UNKNOWN_ERROR} as
  *       {@link ErrorContext#status()}: a {@code 3xx} code raises a
  *       {@link NotModifiedException} as the {@code 3xx} constants do, and any other reaches
- *       the {@link ClientErrorDecoder}, a {@code 2xx} code included when
- *       {@link InternalResponseDecoder} hands one here.</li>
- *   <li>Reflectively sets the cumulative {@code retryAttempts} count on the resulting
- *       {@link ApiException} via the shared {@link Reflection} accessor.</li>
+ *       the {@link ClientErrorDecoder}. A {@code 2xx} code never arrives here: Feign hands it to
+ *       the {@link InternalResponseDecoder}, which decodes one {@link HttpStatus} has no
+ *       constant for as a {@code 200}.</li>
+ *   <li>Sets the cumulative {@code retryAttempts} count on the resulting
+ *       {@link ApiException} through a {@link VarHandle} on that private field.</li>
  *   <li>Records the exception via {@link ResponseCache#recordLastResponse(dev.simplified.client.response.Response)}
  *       so it is visible through {@link Client#getLastResponse()}.</li>
  *   <li>If a {@code Retry-After} header is present, wraps the exception in a
@@ -72,14 +79,13 @@ public final class InternalErrorDecoder implements ErrorDecoder {
      * Direct handle to the {@code retryAttempts} field on {@link ApiException}. Resolved
      * via {@link MethodHandles#privateLookupIn} so this decoder can write the field across
      * the {@code decoder} / {@code exception} package boundary without exposing a public
-     * setter or constructor parameter on {@code ApiException}. VarHandle stores are
-     * JIT-intrinsified down to plain field stores at hot temperatures, eliminating the
-     * reflection thunks the previous {@code FieldAccessor}-based access went through.
+     * setter or constructor parameter on {@code ApiException}.
      * <p>
-     * Note: works because the entire client module currently lives in the unnamed module.
-     * If a {@code module-info.java} is added later, the exception module must
-     * {@code opens dev.simplified.client.exception} to this decoder module for the
-     * {@code privateLookupIn} call to succeed.
+     * VarHandle stores are JIT-intrinsified down to plain field stores at hot temperatures.
+     * <p>
+     * The lookup succeeds because the client lives in the unnamed module. Packaged as a named
+     * module, it must {@code opens dev.simplified.client.exception} to the module holding this
+     * decoder for {@code privateLookupIn} to succeed.
      */
     private static final @NotNull VarHandle RETRY_ATTEMPTS_HANDLE;
     static {
@@ -112,17 +118,42 @@ public final class InternalErrorDecoder implements ErrorDecoder {
     private final @NotNull ThreadLocal<RetryContext> retryContext;
 
     /**
-     * Constructs a new internal error decoder.
+     * The maximum size in bytes of the body an error carries, beyond which the body is cut, or
+     * {@link ClientConfig#DEFAULT_MAX_BODY_BYTES} to carry every body whole.
+     */
+    private final long maxBodyBytes;
+
+    /**
+     * Constructs a new internal error decoder that carries every body whole.
      *
      * @param clientDecoder the client-supplied decoder for domain-specific error parsing
      * @param routeDiscovery the route discovery engine for resolving route metadata
      * @param responseCache the shared response cache used for recording error responses
      */
     public InternalErrorDecoder(@NotNull ClientErrorDecoder clientDecoder, @NotNull RouteDiscovery routeDiscovery, @NotNull ResponseCache responseCache) {
+        this(clientDecoder, routeDiscovery, responseCache, ClientConfig.DEFAULT_MAX_BODY_BYTES);
+    }
+
+    /**
+     * Constructs a new internal error decoder that cuts the body an error carries at a cap.
+     *
+     * @param clientDecoder the client-supplied decoder for domain-specific error parsing
+     * @param routeDiscovery the route discovery engine for resolving route metadata
+     * @param responseCache the shared response cache used for recording error responses
+     * @param maxBodyBytes the maximum size in bytes of the body an error carries, or
+     *                     {@link ClientConfig#DEFAULT_MAX_BODY_BYTES} to carry every body whole
+     */
+    public InternalErrorDecoder(
+        @NotNull ClientErrorDecoder clientDecoder,
+        @NotNull RouteDiscovery routeDiscovery,
+        @NotNull ResponseCache responseCache,
+        long maxBodyBytes
+    ) {
         this.customDecoder = clientDecoder;
         this.routeDiscovery = routeDiscovery;
         this.responseCache = responseCache;
         this.retryContext = ThreadLocal.withInitial(RetryContext::new);
+        this.maxBodyBytes = maxBodyBytes;
     }
 
     /**
@@ -147,7 +178,7 @@ public final class InternalErrorDecoder implements ErrorDecoder {
         // Buffer the body once; rebuild the feign anchor solely so a retryable wrapper can later
         // hand feign back its own Request object. The primitive ErrorContext is the canonical
         // input to every typed exception below.
-        byte[] bodyBytes = bufferBodyBytes(response);
+        byte[] bodyBytes = bufferBodyBytes(response, this.maxBodyBytes);
         feign.Response anchor = response.toBuilder().body(bodyBytes).build();
         ErrorContext context = ErrorContext.fromFeign(anchor, bodyBytes);
 
@@ -207,19 +238,25 @@ public final class InternalErrorDecoder implements ErrorDecoder {
      * can drive both the rebuilt anchor for retry plumbing and the primitive
      * {@link ErrorContext} fed to every typed exception.
      * <p>
-     * Returns an empty array when the body is absent or unreadable.
+     * A body larger than {@code maxBytes} is read no further than one byte past it, its exchange
+     * {@linkplain BodyBuffering#toByteArray(feign.Response.Body, Map, long) aborted} rather than
+     * drained, and is cut at {@code maxBytes}. Returns an empty array when the body is absent or
+     * unreadable.
      *
      * @param response the raw Feign response received from the transport
-     * @return the buffered body bytes (possibly empty)
+     * @param maxBytes the cap in bytes, or {@link ClientConfig#DEFAULT_MAX_BODY_BYTES} to buffer the
+     *                 body whole
+     * @return the buffered body bytes (possibly empty), cut at {@code maxBytes}
      */
-    private static byte @NotNull [] bufferBodyBytes(@NotNull feign.Response response) {
+    private static byte @NotNull [] bufferBodyBytes(@NotNull feign.Response response, long maxBytes) {
         feign.Response.Body raw = response.body();
 
         if (raw == null)
             return new byte[0];
 
         try {
-            return BodyBuffering.toByteArray(raw, response.headers());
+            byte[] body = BodyBuffering.toByteArray(raw, response.headers(), maxBytes);
+            return body.length > maxBytes ? Arrays.copyOf(body, (int) maxBytes) : body;
         } catch (IOException ex) {
             return new byte[0];
         } finally {

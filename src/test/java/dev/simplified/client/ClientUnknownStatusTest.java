@@ -15,6 +15,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
@@ -33,9 +34,11 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Tests that a {@link Client} raises a status code {@link HttpStatus} has no constant for through
- * its error decoder, carrying the code as {@link ApiException#getStatusCode()}: a {@link Client}
- * built over a scripted transport that answers every {@code GET} with the status a test sets.
+ * Tests how a {@link Client} answers a status code {@link HttpStatus} has no constant for - an
+ * error class through its error decoder, carrying the code as
+ * {@link ApiException#getStatusCode()}, and a {@code 2xx} decoded as a {@code 200}: a
+ * {@link Client} built over a scripted transport that answers every {@code GET} with the status a
+ * test sets.
  */
 class ClientUnknownStatusTest {
 
@@ -177,27 +180,31 @@ class ClientUnknownStatusTest {
     }
 
     @Test
-    @DisplayName("A 2xx HttpStatus has no constant for is not decoded but reaches the error decoder, for every return type")
-    void unknownSuccessReachesTheErrorDecoder() {
-        OriginException raw = this.raise(218, () -> this.client.getContract().raw());
-        OriginException typed = this.raise(218, () -> this.client.getContract().typed());
-        OriginException stream = this.raise(218, () -> this.client.getContract().stream());
+    @DisplayName("A 2xx HttpStatus has no constant for is decoded as a 200, for every return type")
+    void unknownSuccessIsDecodedAsOk() throws IOException {
+        this.status.set(218);
+        Response<byte[]> raw = this.client.getContract().raw();
 
-        assertThat(raw.getStatusCode(), is(218));
-        assertThat(raw.getStatus(), is(HttpStatus.UNKNOWN_ERROR));
-        assertThat(new String(raw.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo(BODY)));
-        assertThat(typed.getStatusCode(), is(218));
-        assertThat(stream.getStatusCode(), is(218));
+        assertThat(raw.getStatus(), is(HttpStatus.OK));
+        assertThat(new String(raw.getBody(), StandardCharsets.UTF_8), is(equalTo(BODY)));
+        assertThat(this.client.getContract().typed().name, is(equalTo("refused")));
+
+        try (InputStream stream = this.client.getContract().stream()) {
+            assertThat(new String(stream.readAllBytes(), StandardCharsets.UTF_8), is(equalTo(BODY)));
+        }
+
+        assertThat(this.client.getLastResponse().orElseThrow().getStatus(), is(HttpStatus.OK));
     }
 
     @Test
-    @DisplayName("A 2xx HttpStatus has no constant for raises from a void contract method as from any other")
-    void unknownSuccessRaisesFromAVoidMethod() {
-        OriginException raised = this.raise(218, () -> this.client.getContract().touch());
+    @DisplayName("A 2xx HttpStatus has no constant for returns from a void contract method as a 200 does")
+    void unknownSuccessReturnsFromAVoidMethod() {
+        this.status.set(460);
+        assertThrows(OriginException.class, () -> this.client.getContract().raw());
+        this.status.set(218);
 
-        assertThat(raised.getStatusCode(), is(218));
-        assertThat(raised.getStatus(), is(HttpStatus.UNKNOWN_ERROR));
-        assertThat(this.client.getLastResponse().orElseThrow(), is(sameInstance(raised)));
+        assertDoesNotThrow(() -> this.client.getContract().touch());
+        assertThat(this.client.getLastResponse().orElseThrow().getStatus(), is(HttpStatus.OK));
     }
 
     @Test
@@ -209,19 +216,23 @@ class ClientUnknownStatusTest {
     }
 
     @Test
-    @DisplayName("A 2xx HttpStatus has no constant for, sent with Retry-After, is retried and raised as an error status is")
-    void unknownSuccessWithRetryAfterRetriesAsAnErrorStatusDoes() {
+    @DisplayName("A 2xx HttpStatus has no constant for, sent with Retry-After, is sent once where an error status is retried")
+    void unknownSuccessWithRetryAfterIsSentOnce() {
         this.headers = Map.of("Retry-After", List.of("0"));
         Client<Resource> other = this.newClient();
 
-        OriginException error = this.raise(460, () -> this.client.getContract().raw());
+        this.status.set(460);
+        assertThrows(OriginException.class, () -> this.client.getContract().raw());
         int errorAttempts = this.answered.getAndSet(0);
-        OriginException success = this.raise(218, () -> other.getContract().raw());
+        this.status.set(218);
+        Response<byte[]> success = other.getContract().raw();
+        int successAttempts = this.answered.getAndSet(0);
+        other.getContract().touch();
 
         assertThat(errorAttempts, is(greaterThan(1)));
-        assertThat(this.answered.get(), is(errorAttempts));
-        assertThat(success.getStatusCode(), is(218));
-        assertThat(success.getRetryAttempts(), is(error.getRetryAttempts()));
+        assertThat(successAttempts, is(1));
+        assertThat(success.getStatus(), is(HttpStatus.OK));
+        assertThat(this.answered.get(), is(1));
     }
 
     @Test

@@ -158,6 +158,27 @@ public class RateLimitManager {
     }
 
     /**
+     * Admits a single request and records it against the bucket identified by {@code bucketId} in
+     * one atomic step, unless the bucket has exhausted its quota, as
+     * {@link RateLimitBucket#tryAcquire(long)} does.
+     * <p>
+     * Creates the bucket with the supplied {@link RateLimit} policy if it does not already exist.
+     * Requests sent together through this manager are admitted no further than the bucket's
+     * limit allows, which an {@link #isRateLimited(String, RateLimit, long)} check followed by
+     * {@link #trackRequest(String, RateLimit, long)} does not guarantee.
+     *
+     * @param bucketId the route identifier to admit the request against
+     * @param rateLimit the rate-limit policy to use if the bucket must be created
+     * @param now the pre-sampled epoch-millisecond timestamp to evaluate the window against and
+     *            record the request at
+     * @return {@code true} if the request was admitted and counted; {@code false} if the bucket is
+     *         rate-limited, in which case nothing is counted
+     */
+    public boolean tryAcquire(@NotNull String bucketId, @NotNull RateLimit rateLimit, long now) {
+        return this.getOrCreateBucket(bucketId, rateLimit, now).tryAcquire(now);
+    }
+
+    /**
      * Replaces the rate-limit policy for the bucket identified by
      * {@code bucketId}.
      * <p>

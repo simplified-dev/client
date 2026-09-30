@@ -12,6 +12,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Stream;
 
 /**
  * Immutable snapshot of network-level timing and TLS metadata collected during an HTTP
@@ -20,9 +21,10 @@ import java.util.Optional;
  * Instances are constructed either from a {@link feign.Response} (by extracting the internal
  * headers the client's transport and {@link CachingFeignClient} record on the response) or
  * directly from an Apache {@link HttpContext} (by reading context attributes set during
- * connection establishment). Internal headers use the {@code X-Internal-} prefix, never leave
- * the client on a request, and are automatically stripped from the public response headers by
- * {@link Response#getHeaders(Map)}.
+ * connection establishment). Internal headers use the {@code X-Internal-} prefix and are
+ * automatically stripped from the public response headers by {@link Response#getHeaders(Map)}.
+ * The ones the client writes itself, the {@link #CLIENT_HEADERS}, never leave it on a request; a
+ * request header of any other name a caller gives the prefix is sent as given.
  * <p>
  * The captured metrics include:
  * <ul>
@@ -111,6 +113,22 @@ public final class NetworkDetails {
     );
 
     /**
+     * Internal header key carrying a request's rate-limit sequence number from the client's
+     * request interceptor to its response interceptor.
+     */
+    public static final @NotNull String REQUEST_SEQUENCE = INTERNAL_HEADER_PREFIX + "Request-Sequence";
+
+    /**
+     * The internal headers the client writes itself - the round-trip markers, the
+     * {@link #CONNECTION_HEADERS} and the {@link #REQUEST_SEQUENCE} - which the client's transport
+     * removes from every request it sends, whoever set them.
+     */
+    public static final @NotNull List<String> CLIENT_HEADERS = Stream.concat(
+        Stream.of(REQUEST_START, RESPONSE_RECEIVED, REQUEST_SEQUENCE),
+        CONNECTION_HEADERS.stream()
+    ).toList();
+
+    /**
      * Timing for the full request/response round trip.
      */
     private final @NotNull Stopwatch roundTrip;
@@ -144,7 +162,7 @@ public final class NetworkDetails {
      * Shared empty {@code NetworkDetails} sentinel with zero-duration stopwatches and empty
      * TLS metadata. Used by callers that need to synthesize a response or exception that did
      * not produce a real network exchange (e.g. cache replays, client-side rate-limit
-     * rejections) so consumers reading {@link #getRoundTrip()} or the TLS optionals see
+     * rejections) so consumers reading {@link #roundTrip} or the TLS optionals see
      * consistent "no exchange" defaults rather than {@code null}.
      */
     public static final @NotNull NetworkDetails EMPTY = new NetworkDetails(new BasicHttpContext());
@@ -269,6 +287,21 @@ public final class NetworkDetails {
      */
     public static boolean isConnectionHeader(@NotNull String headerName) {
         return CONNECTION_HEADERS.stream().anyMatch(headerName::equalsIgnoreCase);
+    }
+
+    /**
+     * Checks whether the given header name is one of the {@link #CLIENT_HEADERS} the client writes
+     * itself, matched ignoring case as {@link #isInternalHeader(String)} matches.
+     * <p>
+     * The client's transport removes a request header for which this answers {@code true} and
+     * sends every other as given, the internal prefix or not.
+     *
+     * @param headerName the header name to test
+     * @return {@code true} if the header name is one the client writes itself, in any case;
+     *         {@code false} otherwise
+     */
+    public static boolean isClientHeader(@NotNull String headerName) {
+        return CLIENT_HEADERS.stream().anyMatch(headerName::equalsIgnoreCase);
     }
 
     /**

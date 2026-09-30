@@ -1,19 +1,34 @@
 package dev.simplified.client.cache;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+import dev.simplified.client.factory.ApacheClientFactory;
 import dev.simplified.client.request.HttpMethod;
+import dev.simplified.client.request.Timings;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.Request;
+import feign.hc5.ApacheHttp5Client;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Random;
 import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPOutputStream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -124,6 +139,148 @@ class CachingFeignClientTest {
             assertThat(directive, refused.status(), is(503));
             assertThat(directive, refused.headers().get(ResponseCache.CACHE_STALE_HEADER), is(nullValue()));
         }
+    }
+
+    /**
+     * The most an {@linkplain #endless endless} body sends, far more than any socket buffers
+     * between the origin and the client hold.
+     */
+    private static final long ENDLESS_BYTES = 64L * 1024 * 1024;
+
+    /**
+     * Answers with {@code status} and a chunked body of {@link #ENDLESS_BYTES} on the wire,
+     * recording whether the client hung up before the whole body went out.
+     * <p>
+     * A gzip-encoded body is sent with {@code Content-Encoding: gzip} and compresses a random
+     * block longer than the deflate window over and over, so it costs as many bytes on the wire
+     * as it holds.
+     *
+     * @param exchange the exchange to answer
+     * @param status the status to answer with
+     * @param gzip whether the body is gzip-encoded
+     * @param hungUp completed with {@code true} if a write failed because the client hung up, or
+     *               {@code false} if the whole body went out
+     */
+    private static void endless(HttpExchange exchange, int status, boolean gzip, CompletableFuture<Boolean> hungUp) {
+        byte[] chunk = new byte[gzip ? 65536 : 8192];
+
+        if (gzip)
+            new Random(7L).nextBytes(chunk);
+        else
+            Arrays.fill(chunk, (byte) 'e');
+
+        try {
+            if (gzip)
+                exchange.getResponseHeaders().add("Content-Encoding", "gzip");
+
+            exchange.sendResponseHeaders(status, 0);
+
+            try (OutputStream os = gzip ? new GZIPOutputStream(exchange.getResponseBody()) : exchange.getResponseBody()) {
+                for (long sent = 0; sent < ENDLESS_BYTES; sent += chunk.length)
+                    os.write(chunk);
+            }
+
+            hungUp.complete(false);
+        } catch (IOException ex) {
+            hungUp.complete(true);
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /**
+     * Serves a stale entry through the Apache transport while the origin answers the request with
+     * an {@linkplain #endless endless} {@code 503}, and asserts the entry replaces the {@code 503}
+     * and the client hangs up on its body.
+     *
+     * @param gzip whether the {@code 503}'s body is gzip-encoded
+     * @throws Exception if the exchange fails or the origin does not finish within ten seconds
+     */
+    private static void assertStaleReplayHangsUp(boolean gzip) throws Exception {
+        CompletableFuture<Boolean> hungUp = new CompletableFuture<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/endless", exchange -> endless(exchange, 503, gzip, hungUp));
+        server.start();
+
+        try (CloseableHttpClient http = ApacheClientFactory.configure(Timings.createDefault(), Map.of(), Optional.empty()).build()) {
+            CachingFeignClient client = new CachingFeignClient(new ApacheHttp5Client(http), new ResponseCache(1L << 20, 3_600_000L));
+            String url = "http://127.0.0.1:" + server.getAddress().getPort() + "/endless";
+            Request sent = Request.create(Request.HttpMethod.GET, url, headers(), null, StandardCharsets.UTF_8, null);
+            String past = Instant.now().minusSeconds(10).toString();
+            CacheEntry<byte[]> stale = entry(
+                sent,
+                "Cache-Control", "max-age=0, stale-if-error=600",
+                NetworkDetails.REQUEST_START, past,
+                NetworkDetails.RESPONSE_RECEIVED, past
+            );
+
+            feign.Response replay = client.serveFromCache(sent, new Request.Options(), HttpMethod.GET, stale);
+
+            assertThat(replay.status(), is(200));
+            assertThat(replay.headers().get(ResponseCache.CACHE_STALE_HEADER), contains("true"));
+            assertThat(hungUp.get(10, TimeUnit.SECONDS), is(true));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    @DisplayName("A 5xx replaced by a stale-if-error replay through the Apache transport is not downloaded: the client hangs up on it")
+    void staleIfErrorReplayAbortsTheDownload() throws Exception {
+        assertStaleReplayHangsUp(false);
+    }
+
+    @Test
+    @DisplayName("A gzip-encoded 5xx replaced by a stale-if-error replay through the Apache transport is not downloaded: the client hangs up on it")
+    void staleIfErrorReplayAbortsAnEncodedDownload() throws Exception {
+        assertStaleReplayHangsUp(true);
+    }
+
+    @Test
+    @DisplayName("A stale entry without a validator is requested as it stands and replaces a 5xx within its stale-if-error window")
+    void staleIfErrorWithoutValidatorServesStale() throws IOException {
+        String past = Instant.now().minusSeconds(10).toString();
+        List<Request> sent = new ArrayList<>();
+        CachingFeignClient client = new CachingFeignClient(
+            (request, options) -> {
+                sent.add(request);
+                return feign.Response.builder()
+                    .status(503)
+                    .reason("Origin")
+                    .request(request)
+                    .headers(headers())
+                    .body(new byte[0])
+                    .build();
+            },
+            new ResponseCache(1L << 20, 3_600_000L)
+        );
+        CacheEntry<byte[]> unvalidated = entry(
+            request(),
+            "Cache-Control", "max-age=0, stale-if-error=600",
+            NetworkDetails.REQUEST_START, past,
+            NetworkDetails.RESPONSE_RECEIVED, past
+        );
+
+        feign.Response replaced = client.serveFromCache(request(), new Request.Options(), HttpMethod.GET, unvalidated);
+
+        assertThat(replaced.status(), is(200));
+        assertThat(replaced.headers().get(ResponseCache.CACHE_STALE_HEADER), contains("true"));
+        assertThat(sent.size(), is(1));
+        assertThat(CacheRevalidation.hasConditionalHeaders(sent.getFirst().headers()), is(false));
+    }
+
+    @Test
+    @DisplayName("A stale entry with neither a validator nor a stale-if-error window leaves the request to the delegate")
+    void staleEntryWithoutValidatorOrStaleIfErrorFallsThrough() throws IOException {
+        String past = Instant.now().minusSeconds(10).toString();
+        CacheEntry<byte[]> unvalidated = entry(
+            request(),
+            "Cache-Control", "max-age=0",
+            NetworkDetails.REQUEST_START, past,
+            NetworkDetails.RESPONSE_RECEIVED, past
+        );
+
+        assertThat(serveAnswering(unvalidated, 503), is(nullValue()));
     }
 
     @Test

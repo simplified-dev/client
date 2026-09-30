@@ -5,7 +5,6 @@ import dev.simplified.annotations.Getter;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.OptionalLong;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -15,20 +14,24 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p>
  * Each bucket is identified by a route string (typically the resolved domain or
  * domain+path) and is associated with a {@link RateLimit} policy that defines the
- * quota and window duration.  Request counts and window boundaries are maintained
- * using atomic primitives, making the bucket safe for concurrent access without
- * external synchronization.
+ * quota and window duration.  The current {@link Window} - when it opened, when it ends, and the
+ * requests counted in it - is one immutable value held in a single atomic reference, and every
+ * change to it replaces the whole value by compare-and-set, making the bucket safe for concurrent
+ * access without external synchronization.
  * <p>
- * The current window ends at {@link #windowEnd}. Under a server-advertised policy that is the
- * instant the server says its quota resets at, {@link RateLimit#getResetEpochMillis()}; under a
- * client-configured policy it is {@link RateLimit#getWindowDurationMillis()} after the window
+ * The current window ends at {@link Window#end()}. Under a server-advertised policy that is the
+ * instant the server says its quota resets at, {@link RateLimit#resetEpochMillis}; under a
+ * client-configured policy it is {@link RateLimit#windowDurationMillis} after the window
  * opened.
  * <p>
  * Window rotation is performed lazily: when a request arrives at or after the window's end, a
- * new window opens at that moment and the counter is reset via a compare-and-set operation.
- * This approach avoids the need for a background timer while remaining accurate under
- * contention. A window opened this way lasts the policy's window duration until the next
- * server-advertised policy anchors it to the server's reset instant.
+ * new window opens at that moment with a count of zero. This approach avoids the need for a
+ * background timer. A request is counted by the same compare-and-set that rotates the window it
+ * is counted in, so a request racing a rotation lands in the window that ended or in the one that
+ * opened, and the rotation never erases it: however many requests race across a boundary, the
+ * window opened there admits no more than the limit. A window opened this way lasts the policy's
+ * window duration until the next server-advertised policy anchors it to the server's reset
+ * instant.
  * <p>
  * Server responses are applied through {@link #updateFromServer}, which orders them by the
  * request they answered and serializes them on a lock of the bucket's own; counting and
@@ -44,19 +47,10 @@ import java.util.concurrent.locks.ReentrantLock;
 public class RateLimitBucket {
 
     /**
-     * The epoch-millisecond timestamp marking the start of the current window.
+     * The current window, replaced whole on every change.
      */
-    private final @NotNull AtomicLong windowStart;
-
-    /**
-     * The epoch-millisecond timestamp at which the current window ends and its count clears.
-     */
-    private final @NotNull AtomicLong windowEnd;
-
-    /**
-     * The number of requests recorded in the current window.
-     */
-    private final @NotNull AtomicLong requestCount;
+    @Getter(AccessLevel.NONE)
+    private final @NotNull AtomicReference<Window> window;
 
     /**
      * The rate-limit policy governing this bucket, updatable from server headers.
@@ -94,17 +88,28 @@ public class RateLimitBucket {
      * @param now the epoch-millisecond timestamp the first window opens at
      */
     public RateLimitBucket(@NotNull RateLimit initialRateLimit, long now) {
-        this.windowStart = new AtomicLong(now);
-        this.windowEnd = new AtomicLong(nextWindowEnd(initialRateLimit, now));
-        this.requestCount = new AtomicLong(0);
+        this.window = new AtomicReference<>(Window.open(initialRateLimit, now));
         this.rateLimit = new AtomicReference<>(initialRateLimit);
+    }
+
+    /**
+     * Returns the window this bucket holds, as one consistent snapshot of its start, end and
+     * count.
+     * <p>
+     * A window that has ended is returned as it stands, without being rotated.
+     *
+     * @return the window this bucket holds
+     */
+    public @NotNull Window getWindow() {
+        return this.window.get();
     }
 
     /**
      * Determines whether this bucket has exhausted its quota for the current window.
      * <p>
-     * If the current window has elapsed, the counter is atomically reset and the method returns {@code false}.
-     * Buckets backed by an {@linkplain RateLimit#isUnlimited() unlimited} policy always return {@code false}.
+     * If the current window has elapsed, a new one opens with a count of zero before the check, so
+     * a bucket under any positive limit returns {@code false}. Buckets backed by an
+     * {@linkplain RateLimit#unlimited unlimited} policy always return {@code false}.
      *
      * @return {@code true} if the request count has reached the configured
      *         limit and the window has not yet expired; {@code false} otherwise
@@ -129,17 +134,15 @@ public class RateLimitBucket {
         if (limit.isUnlimited())
             return false;
 
-        if (this.rotateIfElapsed(limit, now))
-            return false;
-
-        return this.requestCount.get() >= limit.getLimit();
+        return this.rotateIfElapsed(limit, now).count() >= limit.getLimit();
     }
 
     /**
      * Records a single request against this bucket.
      * <p>
-     * If the current window has elapsed, the counter is atomically reset to {@code 1} (counting the current request
-     * as the first in the new window). Requests against an {@linkplain RateLimit#isUnlimited() unlimited} policy are silently ignored.
+     * If the current window has elapsed, a new window opens with this request as the first it
+     * counts, in the same atomic step that counts it. Requests against an
+     * {@linkplain RateLimit#unlimited unlimited} policy are silently ignored.
      */
     public void trackRequest() {
         this.trackRequest(System.currentTimeMillis());
@@ -159,8 +162,43 @@ public class RateLimitBucket {
         if (limit.isUnlimited())
             return;
 
-        this.rotateIfElapsed(limit, now);
-        this.requestCount.incrementAndGet();
+        this.window.updateAndGet(current -> current.rotatedAt(limit, now).counted());
+    }
+
+    /**
+     * Admits a single request and records it against this bucket in one atomic step, unless the
+     * bucket has exhausted its quota for the current window.
+     * <p>
+     * The window is replaced by a compare-and-set that succeeds only while no other change has
+     * landed since it was read, and only a window whose count is below the limit is counted into,
+     * so requests arriving together are admitted no further than the limit allows, where an
+     * {@link #isRateLimited(long)} check followed by {@link #trackRequest(long)} can admit every
+     * request that checks before any of them is counted. A window that has elapsed is rotated by
+     * the same compare-and-set that counts the request, so a request racing the rotation is
+     * counted in the window it was admitted against and is never erased by it. Requests against an
+     * {@linkplain RateLimit#unlimited unlimited} policy are admitted without being counted.
+     *
+     * @param now the pre-sampled epoch-millisecond timestamp to evaluate the window against and
+     *            record the request at
+     * @return {@code true} if the request was admitted and counted; {@code false} if the quota is
+     *         exhausted, in which case nothing is counted
+     */
+    public boolean tryAcquire(long now) {
+        RateLimit limit = this.rateLimit.get();
+
+        if (limit.isUnlimited())
+            return true;
+
+        while (true) {
+            Window observed = this.window.get();
+            Window current = observed.rotatedAt(limit, now);
+
+            if (current.count() >= limit.getLimit())
+                return false;
+
+            if (this.window.compareAndSet(observed, current.counted()))
+                return true;
+        }
     }
 
     /**
@@ -181,7 +219,7 @@ public class RateLimitBucket {
      * Replaces the current rate-limit policy for this bucket against a pre-sampled clock reading.
      * <p>
      * A window that has already ended by {@code now} clears its count first. The current window
-     * then ends at the new policy's {@linkplain RateLimit#getResetEpochMillis() reset instant}
+     * then ends at the new policy's {@linkplain RateLimit#resetEpochMillis reset instant}
      * when it is server-advertised, even one already past, which clears the count on the next
      * check; under a client-configured policy it ends the new policy's window duration after the
      * current window opened.
@@ -191,9 +229,12 @@ public class RateLimitBucket {
      */
     public void updateRateLimit(@NotNull RateLimit newLimit, long now) {
         this.rateLimit.set(newLimit);
-        this.rotateIfElapsed(newLimit, now);
         long resetEpochMillis = newLimit.getResetEpochMillis();
-        this.windowEnd.set(resetEpochMillis > 0 ? resetEpochMillis : nextWindowEnd(newLimit, this.windowStart.get()));
+
+        this.window.updateAndGet(current -> {
+            Window rotated = current.rotatedAt(newLimit, now);
+            return rotated.endingAt(resetEpochMillis > 0 ? resetEpochMillis : nextWindowEnd(newLimit, rotated.start()));
+        });
     }
 
     /**
@@ -247,7 +288,7 @@ public class RateLimitBucket {
      * reported the figure is not in it, so under concurrent load the count can trail the true
      * usage until that request's own response is synced. {@link #updateFromServer} keeps a
      * response that lands after a later request's from syncing its older figure. Buckets backed
-     * by an {@linkplain RateLimit#isUnlimited() unlimited} policy ignore it.
+     * by an {@linkplain RateLimit#unlimited unlimited} policy ignore it.
      *
      * @param remaining the number of requests the server reports remaining in its current window
      */
@@ -258,7 +299,8 @@ public class RateLimitBucket {
             return;
 
         long max = Math.max(0L, limit.getLimit());
-        this.requestCount.set(max - Math.clamp(remaining, 0L, max));
+        long count = max - Math.clamp(remaining, 0L, max);
+        this.window.updateAndGet(current -> current.withCount(count));
     }
 
     /**
@@ -269,10 +311,7 @@ public class RateLimitBucket {
      * window ends at that instant.
      */
     public void reset() {
-        long now = System.currentTimeMillis();
-        this.windowStart.set(now);
-        this.windowEnd.set(nextWindowEnd(this.rateLimit.get(), now));
-        this.requestCount.set(0);
+        this.window.set(Window.open(this.rateLimit.get(), System.currentTimeMillis()));
     }
 
     /**
@@ -293,7 +332,8 @@ public class RateLimitBucket {
      * @return the request count of the window current at {@code now}
      */
     public long getCount(long now) {
-        return now >= this.windowEnd.get() ? 0L : this.requestCount.get();
+        Window current = this.window.get();
+        return now >= current.end() ? 0L : current.count();
     }
 
     /**
@@ -301,7 +341,7 @@ public class RateLimitBucket {
      * is exhausted in the current window.
      * <p>
      * Returns {@link Long#MAX_VALUE} for buckets backed by an
-     * {@linkplain RateLimit#isUnlimited() unlimited} policy.  The returned
+     * {@linkplain RateLimit#unlimited unlimited} policy.  The returned
      * value is clamped to a minimum of {@code 0}.
      *
      * @return the number of remaining requests, or {@link Long#MAX_VALUE} if unlimited
@@ -316,7 +356,7 @@ public class RateLimitBucket {
      * <p>
      * A window that has ended by {@code now} reports the policy's full limit without being
      * rotated. Returns {@link Long#MAX_VALUE} for buckets backed by an
-     * {@linkplain RateLimit#isUnlimited() unlimited} policy; the returned value is otherwise
+     * {@linkplain RateLimit#unlimited unlimited} policy; the returned value is otherwise
      * clamped to a minimum of {@code 0}.
      *
      * @param now the pre-sampled epoch-millisecond timestamp to evaluate the window against
@@ -333,34 +373,31 @@ public class RateLimitBucket {
     }
 
     /**
-     * Opens a new window at {@code now} when the current one has ended, clearing the count.
+     * Opens a new window at {@code now} when the current one has ended, with a count of zero.
      * <p>
-     * Only the caller whose compare-and-set moves {@link #windowEnd} opens the window; a
-     * concurrent caller that loses the race sees the window the winner opened.
+     * The new window replaces the one that ended by compare-and-set, so a caller that loses the
+     * race to a concurrent change reads the window that change left and checks it again.
      *
      * @param limit the policy the new window is sized by
      * @param now the epoch-millisecond timestamp to evaluate the window against
-     * @return {@code true} if this call opened a new window
+     * @return the window current at {@code now}, which is the one this call opened when the
+     *         window it read had ended
      */
-    private boolean rotateIfElapsed(@NotNull RateLimit limit, long now) {
-        long end = this.windowEnd.get();
+    private @NotNull Window rotateIfElapsed(@NotNull RateLimit limit, long now) {
+        while (true) {
+            Window observed = this.window.get();
+            Window current = observed.rotatedAt(limit, now);
 
-        if (now < end)
-            return false;
-
-        if (!this.windowEnd.compareAndSet(end, nextWindowEnd(limit, now)))
-            return false;
-
-        this.windowStart.set(now);
-        this.requestCount.set(0);
-        return true;
+            if (current == observed || this.window.compareAndSet(observed, current))
+                return current;
+        }
     }
 
     /**
      * Computes the end of a window opening at {@code start} under the given policy.
      * <p>
      * A server-advertised reset instant still ahead of {@code start} ends the window; otherwise
-     * the window lasts the policy's {@linkplain RateLimit#getWindowDurationMillis() duration},
+     * the window lasts the policy's {@linkplain RateLimit#windowDurationMillis duration},
      * saturating at {@link Long#MAX_VALUE}.
      *
      * @param limit the policy sizing the window
@@ -375,6 +412,72 @@ public class RateLimitBucket {
 
         long end = start + limit.getWindowDurationMillis();
         return end < start ? Long.MAX_VALUE : end;
+    }
+
+    /**
+     * One fixed window of a bucket - when it opened, when it ends, and the requests counted in it.
+     * <p>
+     * A window is immutable. The bucket replaces the one it holds whole, so the three components
+     * are always read and changed together.
+     *
+     * @param start the epoch-millisecond timestamp the window opened at
+     * @param end the epoch-millisecond timestamp at which the window ends and its count clears
+     * @param count the number of requests counted in the window
+     */
+    public record Window(long start, long end, long count) {
+
+        /**
+         * Opens a window at a timestamp under a policy, with nothing counted.
+         *
+         * @param limit the policy sizing the window
+         * @param start the epoch-millisecond timestamp the window opens at
+         * @return the opened window
+         */
+        private static @NotNull Window open(@NotNull RateLimit limit, long start) {
+            return new Window(start, nextWindowEnd(limit, start), 0L);
+        }
+
+        /**
+         * Resolves the window current at a timestamp: this one while it has not ended, otherwise
+         * one opened at that timestamp under a policy.
+         *
+         * @param limit the policy sizing a window opened in place of this one
+         * @param now the epoch-millisecond timestamp to evaluate this window against
+         * @return this window, or the one opened at {@code now}
+         */
+        private @NotNull Window rotatedAt(@NotNull RateLimit limit, long now) {
+            return now < this.end ? this : open(limit, now);
+        }
+
+        /**
+         * Counts one more request in this window.
+         *
+         * @return this window with its count raised by one
+         */
+        private @NotNull Window counted() {
+            return new Window(this.start, this.end, this.count + 1);
+        }
+
+        /**
+         * Replaces the count of this window.
+         *
+         * @param count the number of requests the window counts
+         * @return this window with the given count
+         */
+        private @NotNull Window withCount(long count) {
+            return new Window(this.start, this.end, count);
+        }
+
+        /**
+         * Moves the end of this window.
+         *
+         * @param end the epoch-millisecond timestamp the window ends at
+         * @return this window ending at the given timestamp
+         */
+        private @NotNull Window endingAt(long end) {
+            return new Window(this.start, end, this.count);
+        }
+
     }
 
 }

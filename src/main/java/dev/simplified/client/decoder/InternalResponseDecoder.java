@@ -1,10 +1,11 @@
 package dev.simplified.client.decoder;
 
 import dev.simplified.client.Client;
+import dev.simplified.client.ClientConfig;
 import dev.simplified.client.cache.CachingFeignClient;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ApiDecodeException;
-import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.BodyCapExceededException;
 import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.HttpStatus;
@@ -12,13 +13,9 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.util.BodyBuffering;
 import feign.FeignException;
-import feign.MethodMetadata;
-import feign.RequestTemplate;
 import feign.Util;
-import feign.codec.DecodeException;
 import feign.codec.Decoder;
 import feign.codec.DefaultDecoder;
-import feign.codec.ErrorDecoder;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -27,6 +24,7 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -36,15 +34,14 @@ import java.util.function.Supplier;
  * <p>
  * Decoding is routed by the declared return type of the Feign endpoint method:
  * <ul>
- *   <li><b>{@link InputStream}</b> - the raw response body stream is returned directly.
- *       The caller owns the stream lifecycle and must close it to release the underlying
- *       HTTP connection back to the pool. If the return type is {@code Response<InputStream>},
- *       the stream is wrapped in a {@link Response.StreamingImpl} envelope providing access
- *       to {@link NetworkDetails}, status, and headers. In either case the envelope is not
- *       offered to {@link ResponseCache#store} because streaming bodies are not replayable,
- *       but the envelope is still passed to
- *       {@link ResponseCache#recordLastResponse(Response)} so observability callers see the
- *       latest exchange.</li>
+ *   <li><b>{@link InputStream}</b> - the raw response body stream is returned directly, or in
+ *       a {@link Response.StreamingImpl} envelope providing access to {@link NetworkDetails},
+ *       status, and headers when the return type is {@code Response<InputStream>}. The caller
+ *       owns the stream lifecycle and must close it to release the underlying HTTP connection
+ *       back to the pool. In either case a {@link Response.StreamingImpl} envelope around the
+ *       stream is passed to {@link ResponseCache#recordLastResponse(Response)} so observability
+ *       callers see the latest exchange, and it is not offered to {@link ResponseCache#store}
+ *       because streaming bodies are not replayable.</li>
  *   <li><b>{@code byte[]}</b> - delegates to Feign's {@link DefaultDecoder} which reads
  *       the entire response body into a byte array. The response body is closed after
  *       decoding.</li>
@@ -89,19 +86,30 @@ import java.util.function.Supplier;
  * test it.
  * <p>
  * A response whose status code {@link HttpStatus} has no constant for - a {@code 2xx} such as
- * {@code 218}, since Feign hands every other class to its error decoder - is not decoded. It
- * is handed to the {@link InternalErrorDecoder}, which raises it as it raises an error status,
- * so the contract method raises the client's {@link ApiException} carrying the code as
- * {@link ApiException#getStatusCode()} and {@link HttpStatus#UNKNOWN_ERROR} as
- * {@link ApiException#getStatus()}. The exception is recorded as the last response, as an
- * error status's is, and nothing is stored for it. A decoder built without an error decoder
- * hands such a response to Feign's {@link ErrorDecoder.Default}, as a Feign builder given no
- * error decoder raises an error status.
+ * {@code 218}, since Feign hands every other class to its error decoder - is decoded as the
+ * {@code x00} code of its class, {@link HttpStatus#OK} for a {@code 2xx}, as
+ * <a href="https://www.rfc-editor.org/rfc/rfc9110#section-15">RFC 9110 §15</a> asks of a
+ * recipient that does not recognise a status code. Its envelope reports that constant and is
+ * returned and recorded as the envelope of a response carrying it is, on every return type, so
+ * a {@code void} or {@link InputStream} contract method answered with such a code returns
+ * normally. It is not offered to {@link ResponseCache#store}, since its envelope reports a code
+ * the origin did not send and a replay would answer with it.
  * <p>
- * A {@code void} return type decodes to {@code null} and records nothing, and a response to it
- * whose status code {@link HttpStatus} has no constant for raises as it does for any other
- * return type. The Feign builder hands this decoder a {@code void} return type only under
- * {@link feign.Feign.Builder#decodeVoid()}, which {@link Client} sets.
+ * A {@code void} return type decodes to {@code null}. Its body is closed undecoded, and an envelope
+ * carrying the exchange's status, headers and {@link NetworkDetails} over an empty
+ * {@code byte[]} body is passed to {@link ResponseCache#recordLastResponse(Response)} and never
+ * offered to {@link ResponseCache#store}. The Feign builder hands this decoder a {@code void}
+ * return type only under {@link feign.Feign.Builder#decodeVoid()}, which {@link Client} sets.
+ * <p>
+ * A decoder built with a {@linkplain ClientConfig#maxBodyBytes body cap} holds every body it
+ * reads to it, a body replayed from the cache as well as one read off the wire: the read stops one
+ * byte past the cap and aborts the exchange rather than draining the rest of the body, and a body
+ * larger than the cap raises {@link BodyCapExceededException}, which is recorded as the last
+ * response, before anything is decoded or offered to {@link ResponseCache#store}. A cached entry
+ * whose body the cap refuses stays cached. The body of a {@code void} return type is read no
+ * further than the cap either before it is closed, and the method returns normally, since it
+ * answers with no body. A streaming body is handed to the caller unread and is not held to the
+ * cap.
  * <p>
  * This decoder requires {@link feign.Feign.Builder#doNotCloseAfterDecode()} to be set
  * on the Feign builder so that {@link InputStream} responses are not prematurely closed
@@ -134,59 +142,51 @@ public final class InternalResponseDecoder implements Decoder {
     private final @NotNull ResponseCache responseCache;
 
     /**
-     * The error decoder that raises a response whose status code {@link HttpStatus} has no
-     * constant for - the client's {@link InternalErrorDecoder}, or Feign's
-     * {@link ErrorDecoder.Default} for a decoder built without one.
+     * The maximum size in bytes of a body this decoder reads, beyond which it raises
+     * {@link BodyCapExceededException}, or {@link ClientConfig#DEFAULT_MAX_BODY_BYTES} to read
+     * every body whole.
      */
-    private final @NotNull ErrorDecoder errorDecoder;
+    private final long maxBodyBytes;
 
     /**
-     * Constructs a new {@code InternalResponseDecoder} that hands a response whose status code
-     * {@link HttpStatus} has no constant for to Feign's {@link ErrorDecoder.Default}.
+     * Constructs a new {@code InternalResponseDecoder} over the given inner decoder and response
+     * cache, reading every body whole.
      *
      * @param delegate the inner decoder that performs JSON deserialization
      * @param responseCache the shared response cache used for observability and storage
      */
     public InternalResponseDecoder(@NotNull Decoder delegate, @NotNull ResponseCache responseCache) {
-        this(delegate, responseCache, new ErrorDecoder.Default());
+        this(delegate, responseCache, ClientConfig.DEFAULT_MAX_BODY_BYTES);
     }
 
     /**
-     * Constructs a new {@code InternalResponseDecoder} that hands a response whose status code
-     * {@link HttpStatus} has no constant for to {@code errorDecoder}.
+     * Constructs a new {@code InternalResponseDecoder} over the given inner decoder and response
+     * cache, holding every body it reads to a cap.
      *
      * @param delegate the inner decoder that performs JSON deserialization
      * @param responseCache the shared response cache used for observability and storage
-     * @param errorDecoder the error decoder that raises a response whose status code
-     *                     {@link HttpStatus} has no constant for, the client's
-     *                     {@link InternalErrorDecoder}
+     * @param maxBodyBytes the maximum size in bytes of a body the decoder reads, or
+     *                     {@link ClientConfig#DEFAULT_MAX_BODY_BYTES} to read every body whole
      */
-    public InternalResponseDecoder(
-        @NotNull Decoder delegate,
-        @NotNull ResponseCache responseCache,
-        @NotNull ErrorDecoder errorDecoder
-    ) {
+    public InternalResponseDecoder(@NotNull Decoder delegate, @NotNull ResponseCache responseCache, long maxBodyBytes) {
         this.delegate = delegate;
         this.responseCache = responseCache;
-        this.errorDecoder = errorDecoder;
+        this.maxBodyBytes = maxBodyBytes;
     }
 
     /**
      * {@inheritDoc}
      */
     @Override
-    public Object decode(@NotNull feign.Response feignResponse, @NotNull Type type) throws IOException, FeignException {
-        if (HttpStatus.findByCode(feignResponse.status()).isEmpty()) {
-            Exception raised = this.errorDecoder.decode(methodKey(feignResponse.request()), feignResponse);
-
-            if (raised instanceof RuntimeException unchecked)
-                throw unchecked;
-
-            throw new DecodeException(feignResponse.status(), raised.getMessage(), feignResponse.request(), raised);
-        }
+    public Object decode(@NotNull feign.Response received, @NotNull Type type) throws IOException, FeignException {
+        // RFC 9110 §15: an unrecognised status code is read as the x00 code of its class
+        int status = received.status();
+        boolean recognised = HttpStatus.findByCode(status).isPresent();
+        feign.Response feignResponse = recognised ? received : received.toBuilder().status(status - status % 100).build();
 
         if (type == void.class || type == Void.class) {
-            Util.ensureClosed(feignResponse.body());
+            this.discard(feignResponse);
+            this.responseCache.recordLastResponse(new Response.Impl<>(feignResponse, () -> new byte[0]));
             return null;
         }
 
@@ -202,15 +202,9 @@ public final class InternalResponseDecoder implements Decoder {
 
         // Streaming: caller owns lifecycle, not cached
         if (InputStream.class.equals(bodyType)) {
-            InputStream stream = feignResponse.body().asInputStream();
-
-            if (shouldWrap) {
-                Response.StreamingImpl<InputStream> wrapped = new Response.StreamingImpl<>(feignResponse, stream);
-                this.responseCache.recordLastResponse(wrapped);
-                return wrapped;
-            }
-
-            return stream;
+            Response.StreamingImpl<InputStream> streaming = new Response.StreamingImpl<>(feignResponse, feignResponse.body().asInputStream());
+            this.responseCache.recordLastResponse(streaming);
+            return shouldWrap ? streaming : streaming.getBody();
         }
 
         // Non-streaming: buffer the body, build a lazy envelope, then close the body
@@ -219,11 +213,14 @@ public final class InternalResponseDecoder implements Decoder {
             Supplier<Object> bodyDecoder;
 
             if (byte[].class.equals(bodyType)) {
-                Object eagerBody = this.binaryDecoder.decode(feignResponse, bodyType);
+                feign.Response source = this.maxBodyBytes != ClientConfig.DEFAULT_MAX_BODY_BYTES && feignResponse.body() != null
+                    ? feignResponse.toBuilder().body(this.read(feignResponse)).build()
+                    : feignResponse;
+                Object eagerBody = this.binaryDecoder.decode(source, bodyType);
                 bodyData = eagerBody instanceof byte[] raw ? raw : new byte[0];
                 bodyDecoder = () -> eagerBody;
             } else {
-                bodyData = BodyBuffering.toByteArray(feignResponse.body(), feignResponse.headers());
+                bodyData = this.read(feignResponse);
                 Type finalBodyType = bodyType;
                 byte[] capturedBody = bodyData;
                 bodyDecoder = () -> {
@@ -241,7 +238,9 @@ public final class InternalResponseDecoder implements Decoder {
             this.responseCache.recordLastResponse(response);
 
             if (shouldWrap) {
-                this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
+                if (recognised)
+                    this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
+
                 return response;
             }
 
@@ -254,10 +253,67 @@ public final class InternalResponseDecoder implements Decoder {
                 throw ex;
             }
 
-            this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
+            if (recognised)
+                this.responseCache.store(response, bodyData, CachingFeignClient.keyHeaders(feignResponse));
+
             return body;
         } finally {
             Util.ensureClosed(feignResponse.body());
+        }
+    }
+
+    /**
+     * Reads a response's body, holding it to the decoder's cap.
+     * <p>
+     * A body that passes the cap is read no further, its exchange
+     * {@linkplain BodyBuffering#toByteArray(feign.Response.Body, Map, long) aborted} rather than
+     * drained, and is refused with a {@link BodyCapExceededException} carrying the response's
+     * headers, which is recorded as the last response.
+     *
+     * @param feignResponse the response whose body is read
+     * @return the body
+     * @throws BodyCapExceededException if the body is larger than the cap
+     * @throws IOException if reading the body fails
+     */
+    private byte @NotNull [] read(@NotNull feign.Response feignResponse) throws IOException {
+        byte[] body = BodyBuffering.toByteArray(feignResponse.body(), feignResponse.headers(), this.maxBodyBytes);
+
+        if (body.length <= this.maxBodyBytes)
+            return body;
+
+        feign.Request request = feignResponse.request();
+        BodyCapExceededException refused = new BodyCapExceededException(
+            HttpMethod.of(request.httpMethod().name()),
+            request.url(),
+            feignResponse.headers(),
+            request.headers(),
+            this.maxBodyBytes
+        );
+        this.responseCache.recordLastResponse(refused);
+        throw refused;
+    }
+
+    /**
+     * Closes the body of a response a {@code void} contract method answers with, which nothing
+     * reads, reading no further than one byte past the decoder's cap first.
+     * <p>
+     * A body within the cap is read to its end, as closing it would drain it, and one that passes
+     * the cap has its exchange aborted rather than drained. A decoder without a cap closes the body
+     * unread. A failure reading the body is ignored, since the body is closed whether or not it
+     * could be read.
+     *
+     * @param feignResponse the response whose body is closed
+     */
+    private void discard(@NotNull feign.Response feignResponse) {
+        feign.Response.Body body = feignResponse.body();
+
+        try {
+            if (body != null && this.maxBodyBytes != ClientConfig.DEFAULT_MAX_BODY_BYTES)
+                BodyBuffering.toByteArray(body, feignResponse.headers(), this.maxBodyBytes);
+        } catch (IOException ignored) {
+            // The body is unwanted; it is closed below whether or not it could be read.
+        } finally {
+            Util.ensureClosed(body);
         }
     }
 
@@ -285,24 +341,6 @@ public final class InternalResponseDecoder implements Decoder {
         } catch (Exception ex) {
             throw new ApiDecodeException(ex, ErrorContext.fromFeign(synthetic, body));
         }
-    }
-
-    /**
-     * Names the contract method a request was built from, as Feign names it to an error
-     * decoder.
-     *
-     * @param request the request
-     * @return the Feign config key of the request's contract method, or the request's method and
-     *         URL for a request built without one
-     */
-    private static @NotNull String methodKey(@NotNull feign.Request request) {
-        RequestTemplate template = request.requestTemplate();
-        MethodMetadata endpoint = template != null ? template.methodMetadata() : null;
-
-        if (endpoint != null)
-            return endpoint.configKey();
-
-        return request.httpMethod() + " " + request.url();
     }
 
 }

@@ -9,9 +9,11 @@ import dev.simplified.client.cache.CacheKey;
 import dev.simplified.client.decoder.ClientErrorDecoder;
 import dev.simplified.client.decoder.GsonAwareErrorDecoder;
 import dev.simplified.client.exception.ApiException;
+import dev.simplified.client.exception.BodyCapExceededException;
 import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.JsonApiException;
 import dev.simplified.client.exception.NotModifiedException;
+import dev.simplified.client.fetch.UrlFetcherConfig;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
@@ -32,6 +34,7 @@ import feign.gson.GsonEncoder;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.io.InputStream;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.net.Inet6Address;
@@ -48,11 +51,11 @@ import java.util.function.Supplier;
  * Immutable configuration bundle consumed by {@link Client} during construction.
  * <p>
  * A {@code ClientOptions} captures every customizable aspect of a client - the target endpoint
- * interface, Gson instance, headers, queries, dynamic headers, timing parameters, error decoder,
- * encoder/decoder factories, and optional IPv6 local address - in a single value object that can
- * be reused across multiple clients, mutated to derive variants, and tested in isolation.
+ * interface, Gson instance, headers, queries, dynamic headers, timing parameters, body cap, error
+ * decoder, encoder/decoder factories, and optional IPv6 local address - in a single value object
+ * that can be reused across multiple clients, mutated to derive variants, and tested in isolation.
  * <p>
- * Construction is via {@link #builder(Class, Gson)}, which seeds a {@link Builder} with sensible
+ * Construction is via {@link #builder(Class, GsonSettings)}, which seeds a {@link Builder} with sensible
  * defaults for every optional field. {@link #from(ClientConfig)} or {@link #mutate()} produces a
  * new builder pre-populated from an existing instance, enabling the
  * {@code base.mutate().withFoo(...).build()} idiom for derived configurations.
@@ -70,6 +73,16 @@ import java.util.function.Supplier;
 @Getter
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
 public final class ClientConfig<C extends Contract> {
+
+    /**
+     * Default body size cap, {@link Long#MAX_VALUE}, which holds no body to a cap, so a client
+     * reads every body whole unless {@link Builder#withMaxBodyBytes(long)} sets one.
+     * <p>
+     * It is not {@link UrlFetcherConfig#DEFAULT_MAX_BODY_BYTES}: contract clients read bodies
+     * larger than 5 MiB, such as a multi-megabyte file a raw-content API answers whole, and a
+     * default of that size would refuse them.
+     */
+    public static final long DEFAULT_MAX_BODY_BYTES = Long.MAX_VALUE;
 
     /**
      * The contract interface class the resulting client will target.
@@ -93,6 +106,14 @@ public final class ClientConfig<C extends Contract> {
      * The timing configuration governing connection pool sizes, timeouts, keep-alive, and cache duration.
      */
     private final @NotNull Timings timings;
+
+    /**
+     * The maximum response body size in bytes the client reads itself; a {@code 2xx} body beyond
+     * it raises {@link BodyCapExceededException}, and the body of any other status is cut at it.
+     * {@link #DEFAULT_MAX_BODY_BYTES} holds no body to a cap. A streaming body is handed to the
+     * caller unread and is not held to it.
+     */
+    private final long maxBodyBytes;
 
     /**
      * The error decoder that transforms HTTP error responses into typed {@link ApiException} instances.
@@ -161,8 +182,9 @@ public final class ClientConfig<C extends Contract> {
      * {@link GsonSettings} instance.
      * <p>
      * Defaults: empty headers, queries, and dynamic headers; {@link Timings#createDefault()};
-     * an error decoder that wraps the Feign error status into a generic {@link ApiException};
-     * {@link GsonEncoder} and {@link GsonDecoder} factories; and no IPv6 local address binding.
+     * no body cap, {@link #DEFAULT_MAX_BODY_BYTES}; an error decoder that wraps the Feign error
+     * status into a generic {@link ApiException}; {@link GsonEncoder} and {@link GsonDecoder}
+     * factories; and no IPv6 local address binding.
      *
      * @param <C> the contract interface type
      * @param target the contract interface class
@@ -211,6 +233,7 @@ public final class ClientConfig<C extends Contract> {
         private @NotNull GsonSettings gsonSettings;
         private @NotNull Optional<Inet6Address> inet6Address = Optional.empty();
         private @NotNull Timings timings = Timings.createDefault();
+        private long maxBodyBytes = DEFAULT_MAX_BODY_BYTES;
         private @NotNull ClientErrorDecoder errorDecoder = defaultErrorDecoder();
         private final @NotNull ConcurrentMap<String, String> queries = Concurrent.newMap();
         private final @NotNull ConcurrentMap<String, String> headers = Concurrent.newMap();
@@ -230,6 +253,7 @@ public final class ClientConfig<C extends Contract> {
             this.gsonSettings = existing.gsonSettings;
             this.inet6Address = existing.inet6Address;
             this.timings = existing.timings;
+            this.maxBodyBytes = existing.maxBodyBytes;
             this.errorDecoder = existing.errorDecoder;
             this.queries.putAll(existing.queries);
             this.headers.putAll(existing.headers);
@@ -282,6 +306,40 @@ public final class ClientConfig<C extends Contract> {
          */
         public @NotNull Builder<C> withTimings(@NotNull Timings timings) {
             this.timings = timings;
+            return this;
+        }
+
+        /**
+         * Sets the maximum response body size in bytes the client reads itself.
+         * <p>
+         * The cap binds every body the client reads: a {@code 2xx} body a contract method
+         * decodes, whether read off the wire or replayed from the response cache on a fresh hit, a
+         * {@code 304 Not Modified} or a {@code stale-if-error} replacement, and the body of any
+         * other status its error decoder reads. A read off the wire stops once the body passes the
+         * cap and aborts the exchange, closing its connection rather than draining the rest of the
+         * body for reuse, so the client downloads no more of a larger body, or of one that never
+         * ends, than the cap and what the connection had already buffered. A {@code 2xx} body
+         * larger than the cap then raises {@link BodyCapExceededException} - a cached one on a
+         * fresh hit without a request being sent, the entry staying cached - and the body of any
+         * other status is cut at the cap, so that the status is what the call raises, carrying
+         * the cut body. A {@code void} contract method reads no further than the cap either, and
+         * returns normally, since it answers with no body.
+         * <p>
+         * A contract method returning a bare {@link InputStream} or a
+         * {@code Response<InputStream>} is handed its body unread, and the cap does not apply to
+         * it: the client reads none of that body, and the caller bounds what it reads.
+         * <p>
+         * The default is {@link #DEFAULT_MAX_BODY_BYTES}, which holds no body to a cap.
+         *
+         * @param maxBodyBytes the cap in bytes
+         * @return this builder
+         * @throws IllegalArgumentException if {@code maxBodyBytes} is negative
+         */
+        public @NotNull Builder<C> withMaxBodyBytes(long maxBodyBytes) {
+            if (maxBodyBytes < 0)
+                throw new IllegalArgumentException(String.format("Body cap must not be negative, got '%s'", maxBodyBytes));
+
+            this.maxBodyBytes = maxBodyBytes;
             return this;
         }
 
@@ -521,6 +579,7 @@ public final class ClientConfig<C extends Contract> {
                 this.gsonSettings,
                 this.inet6Address,
                 this.timings,
+                this.maxBodyBytes,
                 this.errorDecoder,
                 Concurrent.newUnmodifiableMap(this.queries),
                 Concurrent.newUnmodifiableMap(this.headers),

@@ -62,59 +62,77 @@ import java.util.TreeMap;
  *       each dynamic header, read once. The request is sent with them, and the cache looks it up,
  *       stores its response and refreshes that response's variant by them, so a response's
  *       {@code Vary} is matched against the values the origin received.</li>
- *   <li>Resolve a rate-limit bucket id via {@link UrlFetcherConfig#getBucketResolver()}.</li>
+ *   <li>Resolve a rate-limit bucket id via {@link UrlFetcherConfig#bucketResolver}.</li>
  *   <li>Look up the URL, ended with the {@linkplain CacheKey#queryFingerprints(Map) stand-in} for
  *       the static query parameters, and the request's headers in the {@link ResponseCache},
- *       which stores the response under the same URL; on a hit that
+ *       which stores the response under the same URL, unless the request's headers carry
+ *       {@code If-None-Match} or {@code If-Modified-Since}: such a request leaves the conditional
+ *       exchange to its caller, so it is sent as it stands and a {@code 304 Not Modified}
+ *       answering it raises. On a hit that
  *       {@linkplain Response.CachedImpl#canServeWithoutRevalidation(Instant) may be served
  *       without revalidation} - fresh, and carrying no {@code no-cache} - serve a synthesized
  *       {@link Response.DirectImpl} immediately. On any other hit with an
  *       {@code ETag} or {@code Last-Modified} validator, attach {@code If-None-Match} /
  *       {@code If-Modified-Since} and dispatch a conditional request; on
  *       {@code 304 Not Modified}, refresh the cached entry and replay the cached body under the
- *       refreshed headers, or under the stored ones when {@link ResponseCache#updateOn304}
- *       refreshed nothing; on a {@code 5xx} within the entry's {@code stale-if-error} window,
- *       replay the cached body stamped {@link ResponseCache#CACHE_STALE_HEADER}, unless the
- *       entry carries {@code must-revalidate}, {@code proxy-revalidate} or {@code no-cache},
- *       which {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) refuse a stale
- *       replay}, so the {@code 5xx} raises.</li>
- *   <li>Check the local rate limit; raise {@link UrlFetchException.RateLimited} if exhausted.</li>
- *   <li>Track the request and dispatch through the shared Apache transport, which appends the
- *       static query parameters themselves, recording the instant the response arrived on the
- *       request's context so the response's {@link NetworkDetails} carry the whole round
- *       trip.</li>
- *   <li>Read the response body capped at the fetch's cap; raise
- *       {@link UrlFetchException.BodyCapExceeded} if the cap is hit, except under an error
- *       status or a code {@link HttpStatus} has no constant for, whose body is cut at the cap
- *       so that the status is what the fetch raises.</li>
- *   <li>Raise for a code {@link HttpStatus} has no constant for, as
- *       {@link UrlFetchException#ofUnknownStatus UrlFetchException.ofUnknownStatus} builds it:
- *       {@link UrlFetchException.ClientError} for a {@code 4xx} code outside the Nginx range
- *       {@code 494-499}, a {@link UrlFetchException} for any other, each carrying the code as its
- *       {@link UrlFetchException#getStatusCode() status code}. The exception is recorded on the
- *       cache as the last response, as a Feign contract client records the exception it raises
- *       for such a code, and nothing is stored for it.</li>
- *   <li>Build a {@link Response.DirectImpl} and record it on the cache for observability.</li>
- *   <li>Raise for an {@linkplain Response#isError() error} status, which is never offered to
- *       the cache: {@link UrlFetchException.ClientError} for a {@code 4xx}, a
- *       {@link UrlFetchException} for any other; otherwise offer the response to the cache for
- *       storage and return it.</li>
+ *       stored headers {@linkplain ResponseCache#mergeHeaders merged} with the 304's, as a Feign
+ *       contract client replays it, whether or not {@link ResponseCache#updateOn304} found the
+ *       entry to refresh. A hit without a validator is requested as it stands. On a
+ *       {@code 5xx} answering the request for any hit, with a validator or without one, within
+ *       the entry's {@code stale-if-error} window at the instant the fetch began, abort the
+ *       exchange without reading the {@code 5xx}'s body and replay the cached body stamped
+ *       {@link ResponseCache#CACHE_STALE_HEADER}, unless the entry carries
+ *       {@code must-revalidate}, {@code proxy-revalidate} or {@code no-cache}, which
+ *       {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) refuse a stale replay}, so
+ *       the {@code 5xx} raises.</li>
+ *   <li>Admit the request against its rate-limit bucket and count it in one atomic step; raise
+ *       {@link UrlFetchException.RateLimited} if the bucket is exhausted, so fetches sent
+ *       together are admitted no further than its limit.</li>
+ *   <li>Dispatch through the shared Apache transport, which appends the static query
+ *       parameters themselves, recording the instant the response arrived on the request's
+ *       context so the response's {@link NetworkDetails} carry the whole round trip.</li>
+ *   <li>Read the response body capped at the fetch's cap. Once the body passes the cap the
+ *       fetch stops reading and aborts the exchange, closing its connection rather than
+ *       draining the rest of the body for reuse. It then raises
+ *       {@link UrlFetchException.BodyCapExceeded} under a {@code 2xx} status, and under any
+ *       other cuts the body at the cap, so that the status is what the fetch raises.</li>
+ *   <li>Raise for a status outside the {@code 2xx} class, as
+ *       {@link UrlFetchException#ofStatus UrlFetchException.ofStatus} builds it, or
+ *       {@link UrlFetchException#ofUnknownStatus UrlFetchException.ofUnknownStatus} for a code
+ *       {@link HttpStatus} has no constant for: {@link UrlFetchException.Redirection} for a
+ *       {@code 3xx}, {@link UrlFetchException.ClientError} for a {@code 4xx} outside the Nginx
+ *       range {@code 494-499}, a {@link UrlFetchException} for any other, each carrying the code
+ *       the origin sent as its {@link UrlFetchException#getStatusCode() status code}. The
+ *       exception is recorded on the cache as the last response, as a Feign contract client
+ *       records the exception it raises for such a status, and nothing is stored for it.</li>
+ *   <li>Build a {@link Response.DirectImpl} for a {@code 2xx} status, record it on the cache for
+ *       observability, offer it to the cache for storage and return it. A {@code 2xx} code
+ *       {@link HttpStatus} has no constant for is read as {@link HttpStatus#OK}, as
+ *       <a href="https://www.rfc-editor.org/rfc/rfc9110#section-15">RFC 9110 §15</a> asks of a
+ *       recipient that does not recognise a status code and as a Feign contract client reads
+ *       one: its response reports {@code 200}, is recorded and returned as the response of a
+ *       {@code 200} is, and is not offered to the cache, since a replay would answer with a code
+ *       the origin did not send.</li>
  * </ol>
  * <p>
  * A {@code 4xx} answering a conditional request raises as well: only a {@code 5xx} is replaced
- * by a {@code stale-if-error} replay. A cache replay whose status is an error raises the
- * exception the live answer would have; this fetcher never stores one, so such an entry comes
- * only from another writer to a {@linkplain UrlFetcherConfig#getSharedCache() shared cache}.
+ * by a {@code stale-if-error} replay. A cache replay whose status is outside the {@code 2xx}
+ * class raises the exception the live answer would have, recorded as the last response; this
+ * fetcher never stores one, so such an entry comes only from another writer to a
+ * {@linkplain UrlFetcherConfig#sharedCache shared cache}.
  * <p>
- * A fetch's cap is {@link UrlFetcherConfig#getMaxBodyBytes()} unless the call names its own, as
+ * A fetch's cap is {@link UrlFetcherConfig#maxBodyBytes} unless the call names its own, as
  * {@link #get(URI, long)}, {@link #get(URI, Class, long)} and {@link #bytes(URI, long)} do. The
  * cap binds every body the fetch answers with: one read off the wire, and one the cache replays
- * on a fresh hit, a {@code 304 Not Modified} or a {@code stale-if-error} replacement. A cached
- * body larger than the cap raises {@link UrlFetchException.BodyCapExceeded} with the replay's
- * headers, and a fresh hit raises it without a request being sent. The entry stays cached, so a
- * fetch with a larger cap is still answered from it. An error status raises its own exception
- * whatever the size of its body, which that exception carries cut at the cap, so a {@code 404}
- * page larger than the cap still raises {@link UrlFetchException.ClientError}.
+ * on a fresh hit, a {@code 304 Not Modified} or a {@code stale-if-error} replacement. A read off
+ * the wire stops at the cap and discards the connection, so a fetch downloads no more of a
+ * larger body, or of one that never ends, than the cap and what the connection had already
+ * buffered. A cached body larger than the cap raises {@link UrlFetchException.BodyCapExceeded}
+ * with the replay's headers, and a fresh hit raises it without a request being sent. The entry
+ * stays cached, so a fetch with a larger cap is still answered from it. A status outside the
+ * {@code 2xx} class raises its own exception whatever the size of its body, which that
+ * exception carries cut at the cap, so a {@code 404} page larger than the cap still raises
+ * {@link UrlFetchException.ClientError}.
  *
  * @see UrlFetcherConfig
  * @see UrlFetchException
@@ -182,7 +200,7 @@ public final class UrlFetcher {
     /**
      * Fetches the given URL and returns its body decoded as a {@link String} using the
      * charset advertised by the {@code Content-Type} header (or UTF-8 if absent), holding the
-     * body to the {@linkplain UrlFetcherConfig#getMaxBodyBytes() configured cap}.
+     * body to the {@linkplain UrlFetcherConfig#maxBodyBytes configured cap}.
      *
      * @param url the URL to fetch
      * @return the typed response envelope
@@ -211,7 +229,7 @@ public final class UrlFetcher {
     /**
      * Fetches the given URL and deserializes the body into {@code type} via the configured
      * {@link Gson Gson} instance, holding the body to the
-     * {@linkplain UrlFetcherConfig#getMaxBodyBytes() configured cap}. Body bytes are first
+     * {@linkplain UrlFetcherConfig#maxBodyBytes configured cap}. Body bytes are first
      * decoded to a string using the charset advertised by the {@code Content-Type} header (or
      * UTF-8 if absent).
      *
@@ -242,7 +260,7 @@ public final class UrlFetcher {
 
     /**
      * Fetches the given URL and returns its body bytes verbatim, holding the body to the
-     * {@linkplain UrlFetcherConfig#getMaxBodyBytes() configured cap}.
+     * {@linkplain UrlFetcherConfig#maxBodyBytes configured cap}.
      *
      * @param url the URL to fetch
      * @return the typed response envelope
@@ -330,20 +348,19 @@ public final class UrlFetcher {
         Map<String, Collection<String>> requestHeaders = this.requestHeaders();
         String bucketId = this.options.getBucketResolver().apply(url);
         RateLimit policy = this.options.getDefaultRateLimit();
-        long now = System.currentTimeMillis();
+        Instant now = Instant.now();
 
-        Optional<CacheEntry<?>> hit = this.responseCache.lookup(HttpMethod.GET, request.getUrl(), requestHeaders);
+        Optional<CacheEntry<?>> hit = CacheRevalidation.hasConditionalHeaders(requestHeaders)
+            ? Optional.empty()
+            : this.responseCache.lookup(HttpMethod.GET, request.getUrl(), requestHeaders);
 
-        if (hit.isPresent() && hit.get().response().canServeWithoutRevalidation(Instant.now()))
+        if (hit.isPresent() && hit.get().response().canServeWithoutRevalidation(now))
             return this.serveFromCache(url, request, hit.get(), false, maxBodyBytes);
 
-        if (this.rateLimitManager.isRateLimited(bucketId, policy, now))
+        if (!this.rateLimitManager.tryAcquire(bucketId, policy, now.toEpochMilli()))
             throw new UrlFetchException.RateLimited(url, bucketId, policy);
 
-        this.rateLimitManager.trackRequest(bucketId, policy, now);
-
-        CacheEntry<?> revalidating = hit.filter(e -> e.response().canRevalidate()).orElse(null);
-        return this.executeAndStore(url, request, requestHeaders, revalidating, maxBodyBytes);
+        return this.executeAndStore(url, request, requestHeaders, hit.orElse(null), now, maxBodyBytes);
     }
 
     /**
@@ -365,15 +382,33 @@ public final class UrlFetcher {
         return headers;
     }
 
+    /**
+     * Sends a request the cache could not answer and reads its response, storing a success.
+     *
+     * @param url the URL fetched
+     * @param request the request the response answers
+     * @param requestHeaders the request's headers
+     * @param held the cached entry the lookup found, which the request revalidates when it
+     *             carries a validator and which replaces a {@code 5xx} within its
+     *             {@code stale-if-error} window, or {@code null} if the lookup found none
+     * @param started the instant the fetch began, at which {@code held}'s
+     *                {@code stale-if-error} window is judged
+     * @param maxBodyBytes the largest body, in bytes, the fetch accepts
+     * @return the response, live or replayed from {@code held}
+     * @throws UrlFetchException if the status is outside the {@code 2xx} class and no replay of
+     *                           {@code held} answers it
+     */
     private @NotNull Response.DirectImpl<byte[]> executeAndStore(
         @NotNull URI url,
         @NotNull Request request,
         @NotNull Map<String, Collection<String>> requestHeaders,
-        @Nullable CacheEntry<?> revalidating,
+        @Nullable CacheEntry<?> held,
+        @NotNull Instant started,
         long maxBodyBytes
     ) {
         HttpGet get = new HttpGet(url);
         requestHeaders.forEach((name, values) -> values.forEach(value -> get.addHeader(name, value)));
+        CacheEntry<?> revalidating = held != null && held.response().canRevalidate() ? held : null;
 
         if (revalidating != null)
             CacheRevalidation.buildConditionalHeaders(Collections.emptyMap(), revalidating.response())
@@ -388,27 +423,29 @@ public final class UrlFetcher {
             if (statusCode == HttpStatus.NOT_MODIFIED.getCode() && revalidating != null)
                 return this.serveOn304(url, request, requestHeaders, apacheResponse, context, revalidating, maxBodyBytes);
 
-            if (HttpState.SERVER_ERROR.containsCode(statusCode) && revalidating != null
-                && revalidating.response().canServeStaleOnError(Instant.now())) {
-                EntityUtils.consumeQuietly(apacheResponse.getEntity());
-                return this.serveFromCache(url, request, revalidating, true, maxBodyBytes);
+            if (HttpState.SERVER_ERROR.containsCode(statusCode) && held != null
+                && held.response().canServeStaleOnError(started)) {
+                abort(get, apacheResponse);
+                return this.serveFromCache(url, request, held, true, maxBodyBytes);
             }
 
+            boolean success = HttpState.SUCCESS.containsCode(statusCode);
             Optional<HttpStatus> known = HttpStatus.findByCode(statusCode);
-            boolean raises = known.map(HttpStatus::getState).map(HttpState::isError).orElse(true);
-            byte[] body = readBody(apacheResponse, url, context, maxBodyBytes, raises);
+            byte[] body = readBody(get, apacheResponse, url, context, maxBodyBytes, !success);
             Map<String, Collection<String>> headers = headersFromApache(apacheResponse);
 
-            if (known.isEmpty()) {
-                UrlFetchException unknown = UrlFetchException.ofUnknownStatus(statusCode, url, headers, body, new NetworkDetails(context));
-                this.responseCache.recordLastResponse(unknown);
-                throw unknown;
+            if (!success) {
+                NetworkDetails details = new NetworkDetails(context);
+                UrlFetchException failure = known.isPresent()
+                    ? statusFailure(request, known.get(), headers, body, details)
+                    : UrlFetchException.ofUnknownStatus(statusCode, url, headers, body, details);
+                this.responseCache.recordLastResponse(failure);
+                throw failure;
             }
 
-            HttpStatus status = known.get();
-
+            // RFC 9110 §15: a 2xx code HttpStatus has no constant for is read as 200
             Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
-                status,
+                known.orElse(HttpStatus.OK),
                 request,
                 () -> new NetworkDetails(context),
                 headers,
@@ -417,10 +454,9 @@ public final class UrlFetcher {
 
             this.responseCache.recordLastResponse(response);
 
-            if (response.isError())
-                throw statusFailure(request, status, headers, body, new NetworkDetails(context));
+            if (known.isPresent())
+                this.responseCache.store(response, body, requestHeaders);
 
-            this.responseCache.store(response, body, requestHeaders);
             return response;
         } catch (UrlFetchException ex) {
             throw ex;
@@ -429,6 +465,26 @@ public final class UrlFetcher {
         }
     }
 
+    /**
+     * Answers a fetch whose revalidation the origin answered with {@code 304 Not Modified}:
+     * refreshes the revalidated entry in the cache and replays it under its stored headers merged
+     * with the 304's.
+     * <p>
+     * The replay is {@linkplain ResponseCache#mergeHeaders(CacheEntry, Map, NetworkDetails) the
+     * merge} the cache refreshes the entry with, taken of the entry the fetch revalidated, so it
+     * carries the 304's headers and is aged from the 304 exchange whether or not
+     * {@link ResponseCache#updateOn304} found the entry to refresh.
+     *
+     * @param url the URL fetched
+     * @param request the request the entry answers
+     * @param requestHeaders the request's headers, without the conditional headers the
+     *                       revalidation added
+     * @param apacheResponse the {@code 304} response
+     * @param context the request's context, carrying the 304 exchange's network details
+     * @param revalidating the cached entry the request revalidated
+     * @param maxBodyBytes the largest body, in bytes, the fetch accepts
+     * @return the replayed response
+     */
     private @NotNull Response.DirectImpl<byte[]> serveOn304(
         @NotNull URI url,
         @NotNull Request request,
@@ -443,16 +499,21 @@ public final class UrlFetcher {
             revalidating.response().varyHeaderNames(),
             requestHeaders
         );
-        CacheEntry<?> refreshed = this.responseCache
-            .updateOn304(key, fingerprint, requestHeaders, headersFromApache(apacheResponse), new NetworkDetails(context))
-            .orElse(revalidating);
+        Map<String, Collection<String>> notModifiedHeaders = headersFromApache(apacheResponse);
+        NetworkDetails revalidation = new NetworkDetails(context);
+        this.responseCache.updateOn304(key, fingerprint, requestHeaders, notModifiedHeaders, revalidation);
         EntityUtils.consumeQuietly(apacheResponse.getEntity());
+
+        CacheEntry<?> refreshed = ResponseCache.mergeHeaders(revalidating, notModifiedHeaders, revalidation);
         return this.serveFromCache(url, request, refreshed, false, maxBodyBytes);
     }
 
     /**
      * Answers a fetch with a cached entry, holding its body to the fetch's cap as a live read
      * holds the body it reads.
+     * <p>
+     * The replay is recorded as the last response, or, for a cached status outside the
+     * {@code 2xx} class, the exception it raises is.
      *
      * @param url the URL fetched
      * @param request the request the entry answers
@@ -461,10 +522,11 @@ public final class UrlFetcher {
      *                    {@code stale-if-error} window
      * @param maxBodyBytes the largest body, in bytes, the fetch accepts
      * @return the replayed response
-     * @throws UrlFetchException.BodyCapExceeded if the cached status is not an error and the
-     *                                           cached body is larger than {@code maxBodyBytes}
-     * @throws UrlFetchException if the cached status is an error, carrying the body cut at
-     *                           {@code maxBodyBytes}
+     * @throws UrlFetchException.BodyCapExceeded if the cached status is in the {@code 2xx} class
+     *                                           and the cached body is larger than
+     *                                           {@code maxBodyBytes}
+     * @throws UrlFetchException if the cached status is outside the {@code 2xx} class, carrying
+     *                           the body cut at {@code maxBodyBytes}
      */
     private @NotNull Response.DirectImpl<byte[]> serveFromCache(
         @NotNull URI url,
@@ -485,9 +547,13 @@ public final class UrlFetcher {
         if (servedStale)
             headers.put(ResponseCache.CACHE_STALE_HEADER, List.of("true"));
 
-        boolean error = cached.getStatus().getState().isError();
+        if (!HttpState.SUCCESS.containsCode(cached.getStatus().getCode())) {
+            UrlFetchException failure = statusFailure(request, cached.getStatus(), headers, cutAt(entry.body(), maxBodyBytes), NetworkDetails.EMPTY);
+            this.responseCache.recordLastResponse(failure);
+            throw failure;
+        }
 
-        if (!error && entry.body().length > maxBodyBytes)
+        if (entry.body().length > maxBodyBytes)
             throw new UrlFetchException.BodyCapExceeded(url, NetworkDetails.EMPTY, headers, maxBodyBytes);
 
         Response.DirectImpl<byte[]> response = new Response.DirectImpl<>(
@@ -498,10 +564,6 @@ public final class UrlFetcher {
             entry::body
         );
         this.responseCache.recordLastResponse(response);
-
-        if (error)
-            throw statusFailure(request, cached.getStatus(), headers, cutAt(entry.body(), maxBodyBytes), NetworkDetails.EMPTY);
-
         return response;
     }
 
@@ -548,15 +610,16 @@ public final class UrlFetcher {
     }
 
     /**
-     * Builds the exception a fetch raises for an error status, whether the origin answered it or
-     * the cache replayed it.
+     * Builds the exception a fetch raises for a status outside the {@code 2xx} class, whether
+     * the origin answered it or the cache replayed it.
      *
      * @param request the request the status answers
-     * @param status the error status
+     * @param status the status
      * @param headers the response headers
      * @param body the response body
      * @param details the network timing snapshot of the exchange
-     * @return a {@link UrlFetchException.ClientError} for a client error status, otherwise a
+     * @return a {@link UrlFetchException.Redirection} for a {@code 3xx} status, a
+     *         {@link UrlFetchException.ClientError} for a client error status, otherwise a
      *         {@link UrlFetchException}
      */
     private static @NotNull UrlFetchException statusFailure(
@@ -584,20 +647,43 @@ public final class UrlFetcher {
     }
 
     /**
-     * Reads a response's body, holding it to a cap.
+     * Aborts an exchange whose body the fetch does not read to its end.
+     * <p>
+     * The request is cancelled, which closes its connection at once rather than handing it back
+     * to the pool, and the entity is then released against the closed connection. Releasing an
+     * entity whose connection is still open reads the rest of its body so that the connection
+     * can be reused; against a closed one it reads at most what the connection had already
+     * buffered, so none of the body still to come is downloaded.
      *
+     * @param get the request whose exchange is aborted
+     * @param apacheResponse the response whose body is abandoned
+     */
+    private static void abort(@NotNull HttpGet get, @NotNull CloseableHttpResponse apacheResponse) {
+        get.cancel();
+        EntityUtils.consumeQuietly(apacheResponse.getEntity());
+    }
+
+    /**
+     * Reads a response's body, holding it to a cap.
+     * <p>
+     * A body that passes the cap is not read further: the exchange is
+     * {@linkplain #abort(HttpGet, CloseableHttpResponse) aborted} before the body is cut or
+     * refused, so the rest of it is never downloaded.
+     *
+     * @param get the request the response answers, cancelled when the body passes the cap
      * @param apacheResponse the response whose body is read
      * @param url the URL fetched
      * @param context the request's context, for the network details of a refusal
      * @param maxBytes the largest body, in bytes, the fetch accepts
      * @param cutAtCap whether a body past the cap is cut at it rather than refused, as the body
-     *                 of an error status is
+     *                 of a status outside the {@code 2xx} class is
      * @return the body, empty when the response carries none
      * @throws UrlFetchException.BodyCapExceeded if the body is larger than {@code maxBytes} and
      *                                           {@code cutAtCap} is not set
      * @throws IOException if reading the body fails
      */
     private static byte @NotNull [] readBody(
+        @NotNull HttpGet get,
         @NotNull CloseableHttpResponse apacheResponse,
         @NotNull URI url,
         @NotNull HttpClientContext context,
@@ -619,6 +705,8 @@ public final class UrlFetcher {
             while ((read = in.read(buffer)) != -1) {
                 total += read;
                 if (total > maxBytes) {
+                    abort(get, apacheResponse);
+
                     if (cutAtCap) {
                         out.write(buffer, 0, (int) (read - (total - maxBytes)));
                         break;

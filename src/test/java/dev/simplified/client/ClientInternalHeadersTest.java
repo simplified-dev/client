@@ -7,6 +7,7 @@ import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.route.Route;
 import dev.simplified.gson.GsonSettings;
+import feign.Headers;
 import feign.RequestLine;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
@@ -18,6 +19,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
@@ -40,6 +42,10 @@ class ClientInternalHeadersTest {
 
         @RequestLine("GET /missing")
         Response<byte[]> missing();
+
+        @RequestLine("GET /resource")
+        @Headers("X-Internal-Trace: c1")
+        Response<byte[]> traced();
 
     }
 
@@ -119,6 +125,24 @@ class ClientInternalHeadersTest {
         LoopbackOrigin.Received request = this.origin.received().getFirst();
         assertNoInternalHeader(request);
         assertConnectionOf(raised.getDetails(), request);
+    }
+
+    @Test
+    @DisplayName("A header a caller names with the internal prefix reaches the origin, while none the client writes itself does")
+    void callersInternalHeadersReachTheOrigin() {
+        Client<Origin> configured = this.origin.client(
+            ClientConfig.builder(Origin.class, GsonSettings.builder().build())
+                .withHeader("X-Internal-Tenant", "t1")
+                .build()
+        );
+
+        configured.getContract().traced();
+
+        assertThat(this.origin.received(), hasSize(1));
+        LoopbackOrigin.Received request = this.origin.received().getFirst();
+        assertThat(request.header("X-Internal-Tenant"), contains("t1"));
+        assertThat(request.header("X-Internal-Trace"), contains("c1"));
+        assertThat(request.headers().keySet().stream().filter(NetworkDetails::isClientHeader).toList(), is(empty()));
     }
 
 }

@@ -68,7 +68,7 @@ public final class InternalRequestInterceptor implements RequestInterceptor {
      * sequence number} from request to response interceptor; the transport removes it from the
      * request it sends.
      */
-    static final @NotNull String SEQUENCE_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Request-Sequence";
+    static final @NotNull String SEQUENCE_HEADER = NetworkDetails.REQUEST_SEQUENCE;
 
     /**
      * {@inheritDoc}

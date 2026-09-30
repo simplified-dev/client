@@ -22,7 +22,6 @@ import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
-import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.route.DynamicRoute;
@@ -238,7 +237,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /**
      * Calculates the round-trip latency of the most recent HTTP request in milliseconds.
      * <p>
-     * The latency is derived from the {@linkplain NetworkDetails#getRoundTrip() round-trip}
+     * The latency is derived from the {@linkplain NetworkDetails#roundTrip round-trip}
      * duration recorded in the most recent response's {@link NetworkDetails}. This includes DNS
      * resolution, TCP connect, TLS handshake, request transfer, server processing, and response
      * transfer.
@@ -260,7 +259,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * Checks whether the type-level default rate-limit bucket is currently exhausted.
      * <p>
      * Resolves the bucket from the {@link Route @Route} declared on the endpoint interface via
-     * {@link RouteDiscovery#getDefaultRoute()} and {@link RateLimitManager#getBucketKey(String)}:
+     * {@link RouteDiscovery#defaultRoute} and {@link RateLimitManager#getBucketKey(String)}:
      * the quota the route's latest response named, or the route's own bucket. Convenient for
      * single-domain endpoints where every request shares one bucket; multi-domain contracts
      * should prefer the {@link DynamicRouteProvider} overload to target a specific route's bucket.
@@ -345,12 +344,14 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * sends, so the cache keys a request by them without holding their values. The
      * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
      * {@linkplain ClientConfig#getDecoderFactory() decoder factory} from the options are
-     * each invoked once with the configured {@link Gson Gson}.
+     * each invoked once with the configured {@link Gson Gson}. The {@link InternalResponseDecoder}
+     * and {@link InternalErrorDecoder} both hold the bodies they read to the
+     * {@linkplain ClientConfig#getMaxBodyBytes() configured body cap}.
      * {@link feign.Feign.Builder#doNotCloseAfterDecode()} is set so that
      * {@link InternalResponseDecoder} can manage response body lifecycle for
      * {@link InputStream} return types, and {@link feign.Feign.Builder#decodeVoid()} so that a
-     * {@code void} contract method reaches it too, raising for a status code {@link HttpStatus}
-     * has no constant for as every other return type does.
+     * {@code void} contract method reaches it too and its exchange is recorded as the
+     * {@linkplain #getLastResponse() last response}.
      * <p>
      * The returned proxy is subsequently wrapped by {@link #wrapContractProxy(Contract)} to
      * strip internal exception wrappers before they reach callers.
@@ -370,21 +371,20 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             this.options.getDynamicHeaders(),
             this.options.getQueries()
         );
-        InternalErrorDecoder errorDecoder = new InternalErrorDecoder(
-            this.options.getErrorDecoder(),
-            this.getRouteDiscovery(),
-            this.responseCache
-        );
-
         return Feign.builder()
             .client(cachingClient)
             .encoder(this.options.getEncoderFactory().apply(this.gson))
             .decoder(new InternalResponseDecoder(
                 this.options.getDecoderFactory().apply(this.gson),
                 this.responseCache,
-                errorDecoder
+                this.options.getMaxBodyBytes()
             ))
-            .errorDecoder(errorDecoder)
+            .errorDecoder(new InternalErrorDecoder(
+                this.options.getErrorDecoder(),
+                this.getRouteDiscovery(),
+                this.responseCache,
+                this.options.getMaxBodyBytes()
+            ))
             .requestInterceptor(new InternalRequestInterceptor(
                 this.getRateLimitManager(),
                 this.getRouteDiscovery()
@@ -436,8 +436,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                         throw retryable.getWrappedException();
 
                     // Unwrap an ApiException the decoder raised, which InvocationContext wraps
-                    // in a DecodeException - a decode failure, or a status HttpStatus has no
-                    // constant for
+                    // in a DecodeException - a decode failure
                     if (cause instanceof DecodeException && cause.getCause() instanceof ApiException apiEx)
                         throw apiEx;
 

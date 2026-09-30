@@ -31,9 +31,12 @@ import java.io.IOException;
  *       {@link RateLimitManager#getBucketKey(String, String)}: the quota the endpoint's latest
  *       response named, or the route's own bucket; a request without an endpoint resolves
  *       through {@link RateLimitManager#getBucketKey(String)}.</li>
- *   <li>Throws a {@link RateLimitException} when that bucket is currently rate-limited, before
- *       the request is sent.</li>
- *   <li>Records the request against the bucket and sends it through the delegate.</li>
+ *   <li>Admits the request and records it against that bucket in one atomic step, through
+ *       {@link RateLimitManager#tryAcquire(String, RateLimit, long)}, so requests sent together
+ *       are admitted no further than the bucket's limit allows; throws a
+ *       {@link RateLimitException} before the request is sent when the bucket is currently
+ *       rate-limited.</li>
+ *   <li>Sends the admitted request through the delegate.</li>
  * </ol>
  * <p>
  * The {@link InternalRequestInterceptor} resolves the request's target URL and numbers it
@@ -80,12 +83,10 @@ public final class RateLimitingFeignClient implements Client {
         String bucketKey = known
             ? this.rateLimitManager.getBucketKey(route.getBucketKey(), endpoint.configKey())
             : this.rateLimitManager.getBucketKey(route.getBucketKey());
-        long now = System.currentTimeMillis();
 
-        if (this.rateLimitManager.isRateLimited(bucketKey, route.getRateLimit(), now))
+        if (!this.rateLimitManager.tryAcquire(bucketKey, route.getRateLimit(), System.currentTimeMillis()))
             throw new RateLimitException(request, route);
 
-        this.rateLimitManager.trackRequest(bucketKey, route.getRateLimit(), now);
         return this.delegate.execute(request, options);
     }
 

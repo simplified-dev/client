@@ -76,16 +76,10 @@ class InternalResponseInterceptorTest {
 
     /**
      * Mirrors {@link RateLimitingFeignClient#execute}: refuses the request if its bucket is
-     * exhausted, otherwise counts it.
+     * exhausted, otherwise counts it, in one atomic step.
      */
     private boolean send(long at) {
-        String bucket = this.bucket();
-
-        if (this.manager.isRateLimited(bucket, this.policy, at))
-            return false;
-
-        this.manager.trackRequest(bucket, this.policy, at);
-        return true;
+        return this.manager.tryAcquire(this.bucket(), this.policy, at);
     }
 
     private static Map<String, Collection<String>> headers(String... headerPairs) {

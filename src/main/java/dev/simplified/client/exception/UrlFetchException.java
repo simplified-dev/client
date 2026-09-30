@@ -21,21 +21,23 @@ import java.util.Map;
 /**
  * Thrown when a {@link UrlFetcher} call cannot complete - either because the local rate-limit
  * budget rejected the request, the response body exceeded the fetch's cap, the transport
- * failed, or the origin answered with an {@linkplain HttpState#isError() error} status.
+ * failed, or the origin answered with a status outside the {@link HttpState#SUCCESS 2xx} class.
  * <p>
  * Each cause has its own type, so a caller tells them apart by the type it catches:
  * <ul>
+ *   <li>{@link Redirection} - the origin answered with a {@code 3xx} code the fetch neither
+ *       follows nor answers from the response cache, whether or not {@link HttpStatus} has a
+ *       constant for it</li>
  *   <li>{@link ClientError} - the origin answered with a status {@link HttpState#CLIENT_ERROR}
  *       classifies, {@code 400} to {@code 451}, or with a {@code 4xx} code {@link HttpStatus}
  *       has no constant for, outside the Nginx range {@code 494-499}</li>
- *   <li>{@code UrlFetchException} itself - the origin answered with any other error status: a
- *       {@code 5xx}, or a vendor-specific code such as Nginx's {@code 444} and
- *       {@code 494-499}; or with any other code {@link HttpStatus} has no constant for,
- *       whatever its class</li>
+ *   <li>{@code UrlFetchException} itself - the origin answered with any other status outside
+ *       the {@code 2xx} class: a {@code 5xx}, or a vendor-specific code such as Nginx's
+ *       {@code 444} and {@code 494-499}; or with any other code {@link HttpStatus} has no
+ *       constant for outside the {@code 2xx} class, which a fetch reads as {@code 200}</li>
  *   <li>{@link Transport} - no response arrived</li>
- *   <li>{@link BodyCapExceeded} - the body of a response that is not an error was larger than
- *       the fetch's cap; an error status, or a code {@link HttpStatus} has no constant for,
- *       raises its own type whatever the size of its body</li>
+ *   <li>{@link BodyCapExceeded} - the body of a {@code 2xx} response was larger than the
+ *       fetch's cap; any other status raises its own type whatever the size of its body</li>
  *   <li>{@link RateLimited} - the local budget refused the request before it was sent</li>
  * </ul>
  * {@link #getStatus()} does not separate them on its own: a {@link RateLimited} carries a
@@ -86,36 +88,58 @@ public class UrlFetchException extends ApiException {
     private static final int CLIENT_ERROR_MAX = 499;
 
     /**
-     * Constructs a new {@code UrlFetchException} with the given context and pre-formatted message.
+     * Constructs a new {@code UrlFetchException} with the given context and message.
      *
      * @param context the HTTP context bundle carrying status, headers, body, and request metadata
      * @param message the detail message describing the failure
-     * @param args optional format arguments for {@code message}
      */
-    public UrlFetchException(@NotNull ErrorContext context, @NotNull @PrintFormat String message, @Nullable Object... args) {
-        this(null, context, message, args);
+    public UrlFetchException(@NotNull ErrorContext context, @NotNull String message) {
+        super(null, NAME, context, message, true);
     }
 
     /**
-     * Constructs a new {@code UrlFetchException} with the given cause, context, and pre-formatted message.
+     * Constructs a new {@code UrlFetchException} with the given cause, context, and message.
      *
-     * @param cause the underlying transport or decode failure, or {@code null} if none
+     * @param cause the underlying transport or decode failure
      * @param context the HTTP context bundle carrying status, headers, body, and request metadata
      * @param message the detail message describing the failure
-     * @param args optional format arguments for {@code message}
+     */
+    public UrlFetchException(@NotNull Throwable cause, @NotNull ErrorContext context, @NotNull String message) {
+        super(cause, NAME, context, message, true);
+    }
+
+    /**
+     * Constructs a new {@code UrlFetchException} with the given context and a formatted message.
+     *
+     * @param context the HTTP context bundle carrying status, headers, body, and request metadata
+     * @param message the format string of the detail message
+     * @param args the format arguments for {@code message}
+     */
+    public UrlFetchException(@NotNull ErrorContext context, @NotNull @PrintFormat String message, @Nullable Object... args) {
+        super(null, NAME, context, String.format(message, args), true);
+    }
+
+    /**
+     * Constructs a new {@code UrlFetchException} with the given cause, context, and a formatted
+     * message.
+     *
+     * @param cause the underlying transport or decode failure
+     * @param context the HTTP context bundle carrying status, headers, body, and request metadata
+     * @param message the format string of the detail message
+     * @param args the format arguments for {@code message}
      */
     public UrlFetchException(
-        @Nullable Throwable cause,
+        @NotNull Throwable cause,
         @NotNull ErrorContext context,
         @NotNull @PrintFormat String message,
         @Nullable Object... args
     ) {
-        super(cause, NAME, context, args.length == 0 ? message : String.format(message, args), true);
+        super(cause, NAME, context, String.format(message, args), true);
     }
 
     /**
-     * Constructs a new {@code UrlFetchException} with a pre-built {@link NetworkDetails},
-     * bypassing the header-map lazy build inside {@link ApiException}.
+     * Constructs a new {@code UrlFetchException} with a pre-built {@link NetworkDetails} and a
+     * message, bypassing the header-map lazy build inside {@link ApiException}.
      * <p>
      * Used by subtypes whose timing data originates from Apache's
      * {@link HttpContext} rather than feign-style header injection -
@@ -125,35 +149,65 @@ public class UrlFetchException extends ApiException {
      * @param context the HTTP context bundle
      * @param details a pre-built network timing snapshot to expose via {@link #getDetails()}
      * @param message the detail message describing the failure
-     * @param args optional format arguments for {@code message}
      */
-    public UrlFetchException(
-        @NotNull ErrorContext context,
-        @NotNull NetworkDetails details,
-        @NotNull @PrintFormat String message,
-        @Nullable Object... args
-    ) {
-        this(null, context, details, message, args);
+    public UrlFetchException(@NotNull ErrorContext context, @NotNull NetworkDetails details, @NotNull String message) {
+        super(null, NAME, context, details, message, true);
     }
 
     /**
-     * Constructs a new {@code UrlFetchException} with a cause and a pre-built
-     * {@link NetworkDetails}, bypassing the header-map lazy build inside {@link ApiException}.
+     * Constructs a new {@code UrlFetchException} with a cause, a pre-built {@link NetworkDetails}
+     * and a message, bypassing the header-map lazy build inside {@link ApiException}.
      *
-     * @param cause the underlying transport or decode failure, or {@code null} if none
+     * @param cause the underlying transport or decode failure
      * @param context the HTTP context bundle
      * @param details a pre-built network timing snapshot to expose via {@link #getDetails()}
      * @param message the detail message describing the failure
-     * @param args optional format arguments for {@code message}
      */
     public UrlFetchException(
-        @Nullable Throwable cause,
+        @NotNull Throwable cause,
+        @NotNull ErrorContext context,
+        @NotNull NetworkDetails details,
+        @NotNull String message
+    ) {
+        super(cause, NAME, context, details, message, true);
+    }
+
+    /**
+     * Constructs a new {@code UrlFetchException} with a pre-built {@link NetworkDetails} and a
+     * formatted message, bypassing the header-map lazy build inside {@link ApiException}.
+     *
+     * @param context the HTTP context bundle
+     * @param details a pre-built network timing snapshot to expose via {@link #getDetails()}
+     * @param message the format string of the detail message
+     * @param args the format arguments for {@code message}
+     */
+    public UrlFetchException(
         @NotNull ErrorContext context,
         @NotNull NetworkDetails details,
         @NotNull @PrintFormat String message,
         @Nullable Object... args
     ) {
-        super(cause, NAME, context, details, args.length == 0 ? message : String.format(message, args), true);
+        super(null, NAME, context, details, String.format(message, args), true);
+    }
+
+    /**
+     * Constructs a new {@code UrlFetchException} with a cause, a pre-built {@link NetworkDetails}
+     * and a formatted message, bypassing the header-map lazy build inside {@link ApiException}.
+     *
+     * @param cause the underlying transport or decode failure
+     * @param context the HTTP context bundle
+     * @param details a pre-built network timing snapshot to expose via {@link #getDetails()}
+     * @param message the format string of the detail message
+     * @param args the format arguments for {@code message}
+     */
+    public UrlFetchException(
+        @NotNull Throwable cause,
+        @NotNull ErrorContext context,
+        @NotNull NetworkDetails details,
+        @NotNull @PrintFormat String message,
+        @Nullable Object... args
+    ) {
+        super(cause, NAME, context, details, String.format(message, args), true);
     }
 
     /**
@@ -178,7 +232,7 @@ public class UrlFetchException extends ApiException {
      * {@link HttpContext}) feed that {@link NetworkDetails} into the
      * prebuilt-details {@link UrlFetchException} constructor instead of threading it through
      * this helper. The empty request-headers map ensures the lazy {@link NetworkDetails} build
-     * in the standard path produces the same result as {@link NetworkDetails#empty()}.
+     * in the standard path produces the same result as {@link NetworkDetails#EMPTY}.
      *
      * @param status the synthetic status to expose
      * @param url the URL that was being fetched
@@ -202,21 +256,25 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
-     * Builds the exception a fetch raises when the origin answers with an error status - a
-     * {@link ClientError} for a status {@link HttpState#CLIENT_ERROR} classifies, a
-     * {@code UrlFetchException} for any other.
+     * Builds the exception a fetch raises when the origin answers with a status outside the
+     * {@code 2xx} class - a {@link Redirection} for a {@code 3xx} code, a {@link ClientError} for
+     * a status {@link HttpState#CLIENT_ERROR} classifies, a {@code UrlFetchException} for any
+     * other.
      * <p>
      * A context carrying a code {@link HttpStatus} has no constant for raises as
      * {@link #ofUnknownStatus(int, URI, Map, byte[], NetworkDetails)} raises it: a
-     * {@link ClientError} for a {@code 4xx} code outside the Nginx range {@code 494-499}, a
-     * {@code UrlFetchException} for any other.
+     * {@link Redirection} for a {@code 3xx} code, a {@link ClientError} for a {@code 4xx} code
+     * outside the Nginx range {@code 494-499}, a {@code UrlFetchException} for any other.
      *
-     * @param context the HTTP context bundle carrying the error status, headers, body, and
-     *                request metadata
+     * @param context the HTTP context bundle carrying the status, headers, body, and request
+     *                metadata
      * @param details the network timing snapshot of the exchange
      * @return the exception to raise
      */
     public static @NotNull UrlFetchException ofStatus(@NotNull ErrorContext context, @NotNull NetworkDetails details) {
+        if (HttpState.REDIRECTION.containsCode(context.statusCode()))
+            return new Redirection(context, details);
+
         if (isClientError(context))
             return new ClientError(context, details);
 
@@ -224,13 +282,14 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
-     * Builds the exception a fetch raises when the origin answers with a status code
-     * {@link HttpStatus} has no constant for - a {@link ClientError} for a {@code 4xx} code
+     * Builds the exception for a status code {@link HttpStatus} has no constant for - a
+     * {@link Redirection} for a {@code 3xx} code, a {@link ClientError} for a {@code 4xx} code
      * outside the range {@link HttpState#NGINX_ERROR} holds, a {@code UrlFetchException} for any
-     * other, whatever its class, so a code in the Nginx range raises as the Nginx codes
-     * {@link HttpStatus} names do.
+     * other, so a code in the Nginx range raises as the Nginx codes {@link HttpStatus} names do.
+     * A fetch raises it for every such code outside the {@code 2xx} class; a {@code 2xx} code it
+     * reads as {@code 200}.
      * <p>
-     * Either carries the code as its {@link #getStatusCode()} and
+     * Each carries the code as its {@link #getStatusCode()} and
      * {@link HttpStatus#UNKNOWN_ERROR} as its {@link #getStatus()}.
      *
      * @param statusCode the status code the origin answered with
@@ -295,6 +354,38 @@ public class UrlFetchException extends ApiException {
             return String.format(UNKNOWN_STATUS_MESSAGE, context.statusCode(), context.requestUrl());
 
         return String.format(STATUS_MESSAGE, context.statusCode(), context.status().getMessage(), context.requestUrl());
+    }
+
+    /**
+     * Thrown when the origin answers a fetch with a {@code 3xx} code the fetch neither follows
+     * nor answers from the response cache: a {@code 300}, {@code 305} or {@code 306}, a redirect
+     * the transport does not follow - one without a {@code Location}, or one to another host or
+     * port from a fetch carrying {@code Authorization} or {@code Cookie} - a
+     * {@code 304 Not Modified} that answers no revalidation of a cached entry, or a {@code 3xx}
+     * code {@link HttpStatus} has no constant for.
+     * <p>
+     * {@link #getStatusCode()} is the code the origin sent and {@link #getStatus()} its
+     * constant, {@link HttpStatus#UNKNOWN_ERROR} for a code without one. {@link #getBody()} is
+     * the body the origin sent with it, cut at the fetch's body cap, and {@link #getHeaders()} its
+     * headers, a redirect's {@code Location} among them. Nothing is stored for it, and a fetch
+     * answered from the response cache with a {@code 3xx} status raises it as well, with the
+     * cached headers.
+     */
+    public static final class Redirection extends UrlFetchException {
+
+        /**
+         * Constructs a new {@code Redirection} with the context and network details of the
+         * exchange the origin answered.
+         *
+         * @param context the HTTP context bundle carrying the {@code 3xx} status, or a
+         *                {@code 3xx} code {@link HttpStatus} has no constant for, and the
+         *                headers, body, and request metadata
+         * @param details the network timing snapshot of the exchange
+         */
+        public Redirection(@NotNull ErrorContext context, @NotNull NetworkDetails details) {
+            super(context, details, statusMessage(context));
+        }
+
     }
 
     /**
@@ -364,10 +455,11 @@ public class UrlFetchException extends ApiException {
     }
 
     /**
-     * Thrown when a response body is larger than the fetch's size cap - one read off the wire,
-     * which stops reading at the cap, or one the response cache would replay. A response with an
-     * error status raises the exception for its status instead, carrying its body cut at the
-     * cap.
+     * Thrown when the body of a {@code 2xx} response is larger than the fetch's size cap - one
+     * read off the wire, whose exchange is aborted once the body passes the cap, its connection
+     * closed rather than drained, so the rest of the body is never downloaded, or one the
+     * response cache would replay. A response with any other status raises the exception for its
+     * status instead, carrying its body cut at the cap, and its exchange is aborted the same way.
      */
     @Getter
     public static final class BodyCapExceeded extends UrlFetchException {

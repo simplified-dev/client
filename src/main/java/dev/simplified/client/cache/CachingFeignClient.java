@@ -1,12 +1,14 @@
 package dev.simplified.client.cache;
 
 import dev.simplified.client.decoder.InternalResponseDecoder;
+import dev.simplified.client.factory.ApacheClientFactory;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import feign.Client;
 import feign.Request;
 import feign.hc5.ApacheHttp5Client;
+import org.apache.hc.core5.http.io.EofSensorInputStream;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -48,12 +50,14 @@ import java.util.function.Supplier;
  *       refreshed headers. A stale entry is held only while its bucket lives, which
  *       {@link ResponseCacheExpiry} keeps for the cache's stale retention past the entry's
  *       freshness when the entry carries a validator.</li>
- *   <li>On a stale cache hit where the origin returns {@code 5xx} within the entry's
- *       {@code stale-if-error} window, the cached bytes are served in place of the error
- *       response per <a href="https://datatracker.ietf.org/doc/html/rfc5861#section-4">RFC
- *       5861 §4</a>, unless the entry carries {@code must-revalidate},
- *       {@code proxy-revalidate} or {@code no-cache}, whose
- *       {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) stale replay is refused}
+ *   <li>On a stale cache hit, with a validator or without one, where the origin returns
+ *       {@code 5xx} within the entry's {@code stale-if-error} window, judged at the instant
+ *       before the request is sent, the cached bytes are served in place of the error response
+ *       per <a href="https://datatracker.ietf.org/doc/html/rfc5861#section-4">RFC 5861 §4</a>,
+ *       and the {@code 5xx}'s exchange is aborted without its body being read; a hit without a
+ *       validator is requested as it stands, with no conditional header. An entry carrying
+ *       {@code must-revalidate}, {@code proxy-revalidate} or {@code no-cache} has its
+ *       {@linkplain Response.CachedImpl#canServeStaleOnError(Instant) stale replay refused},
  *       and the error response is returned.</li>
  *   <li>On a successful unsafe method ({@code POST}, {@code PUT}, {@code PATCH},
  *       {@code DELETE}), the cache is invalidated for the target URL plus any
@@ -341,13 +345,15 @@ public final class CachingFeignClient implements Client {
         if (cached.canServeWithoutRevalidation(now))
             return this.synthesizeFreshHit(outgoing, entry, now);
 
-        if (!cached.canRevalidate())
+        boolean revalidates = cached.canRevalidate();
+
+        if (!revalidates && !cached.canServeStaleOnError(now))
             return null;
 
-        Request conditional = this.withConditionalHeaders(outgoing.wire(), cached);
-        feign.Response response = this.exchange(outgoing, conditional, options);
+        Request sent = revalidates ? this.withConditionalHeaders(outgoing.wire(), cached) : outgoing.wire();
+        feign.Response response = this.exchange(outgoing, sent, options);
 
-        if (response.status() == 304) {
+        if (revalidates && response.status() == 304) {
             NetworkDetails revalidation = new NetworkDetails(response);
             CacheKey.UrlKey key = CacheKey.UrlKey.of(method, outgoing.request().url());
             CacheKey.VaryFingerprint fingerprint = CacheKey.VaryFingerprint.of(cached.varyHeaderNames(), outgoing.keyHeaders());
@@ -359,11 +365,41 @@ public final class CachingFeignClient implements Client {
         }
 
         if (isServerError(response.status()) && cached.canServeStaleOnError(now)) {
-            feign.Util.ensureClosed(response.body());
+            abort(response);
             return this.synthesizeStaleHit(outgoing, entry, now);
         }
 
         return response;
+    }
+
+    /**
+     * Abandons a response whose body this client does not read, without downloading the rest
+     * of it.
+     * <p>
+     * The Apache transport {@link ApacheClientFactory} configures reads the body of every
+     * response through an {@link EofSensorInputStream}, one it decodes for its
+     * {@code Content-Encoding} as well as one it does not, and that stream is aborted: its
+     * connection is closed at once rather than handed back to the pool, and closing the body
+     * then reads at most what the connection had already buffered, so none of the body still to
+     * come is downloaded, and an encoded body is not decoded. The body of any other transport is
+     * closed, which reads it to its end.
+     *
+     * @param response the response to abandon
+     */
+    private static void abort(@NotNull feign.Response response) {
+        feign.Response.Body body = response.body();
+
+        if (body == null)
+            return;
+
+        try {
+            if (body.asInputStream() instanceof EofSensorInputStream exchange)
+                exchange.abort();
+        } catch (IOException ignored) {
+            // The body is closed below whether or not its exchange could be aborted.
+        }
+
+        feign.Util.ensureClosed(body);
     }
 
     /**

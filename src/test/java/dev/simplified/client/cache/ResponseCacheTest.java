@@ -416,7 +416,7 @@ class ResponseCacheTest {
     }
 
     @Test
-    @DisplayName("A 304 carrying no Date dates the refreshed entry when it was received, so the request after it is a fresh hit")
+    @DisplayName("A 304 carrying no Date from an origin whose clock agrees with ours dates the refreshed entry when it was received, so the request after it is a fresh hit")
     void notModifiedWithoutDateIsDatedWhenReceived() {
         Instant stored = Instant.now().minusSeconds(100);
         this.storeDirectly(receivedAt(stored, "Cache-Control", "max-age=60", "Date", HTTP_DATE.format(stored), "ETag", "\"v1\""));
@@ -446,6 +446,28 @@ class ResponseCacheTest {
 
         assertThat(revalidated.getHeaders().get("Date"), contains(revalidatedAt));
         assertThat(this.lookup().orElseThrow().response().getHeaders().get("Date"), contains(revalidatedAt));
+    }
+
+    @Test
+    @DisplayName("A 304 carrying no Date keeps the refreshed entry's Date on the origin's clock, so an Expires that clock has passed is revalidated")
+    void notModifiedWithoutDateKeepsTheOriginClock() {
+        Instant stored = Instant.now().minusSeconds(100).truncatedTo(ChronoUnit.SECONDS);
+        Instant originDate = stored.plusSeconds(3600);
+        this.storeDirectly(receivedAt(
+            stored,
+            "Date", HTTP_DATE.format(originDate),
+            "Expires", HTTP_DATE.format(originDate.plusSeconds(2)),
+            "ETag", "\"v1\""
+        ));
+
+        this.origin = request -> answer(request, 304, "ETag", "\"v1\"");
+        this.resource.get();
+        Instant dated = HttpDates.parseFromHeaders(this.lookup().orElseThrow().response().getHeaders(), "Date").orElseThrow();
+        this.resource.get();
+
+        assertThat(dated.isBefore(originDate.plusSeconds(100)), is(false));
+        assertThat(this.sent, hasSize(2));
+        assertThat(this.sent.getLast().headers().get(ETag.IF_NONE_MATCH_HEADER), contains("\"v1\""));
     }
 
     @Test
@@ -993,6 +1015,28 @@ class ResponseCacheTest {
 
         assertThat(this.answering(varyingOnAccept(earlier, "Date", HTTP_DATE.format(earlier)), varyingOnLanguage(now)), contains("\"language\""));
         assertThat(this.answering(varyingOnAccept(now, "Date", HTTP_DATE.format(now)), varyingOnLanguage(earlier)), contains("\"accept\""));
+    }
+
+    @Test
+    @DisplayName("A variant a 304 carrying no Date refreshed is weighed against the other variants on the origin's clock")
+    void variantRefreshedWithoutDateKeepsTheOriginClock() {
+        Instant now = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        Instant older = now.minusSeconds(60);
+        Instant newer = now.minusSeconds(30);
+        Map<String, Collection<String>> request = headers("Accept", "a", "Accept-Language", "en");
+        storeDirectly(this.cache, request, varyingOnAccept(older, "Date", HTTP_DATE.format(older.plusSeconds(3600))));
+        storeDirectly(this.cache, request, varyingOnLanguage(newer, "Date", HTTP_DATE.format(newer.plusSeconds(3600))));
+
+        Optional<CacheEntry<?>> refreshed = this.cache.updateOn304(
+            CacheKey.UrlKey.of(HttpMethod.GET, URL),
+            CacheKey.VaryFingerprint.of(Set.of("accept-language"), request),
+            request,
+            headers("ETag", "\"language\""),
+            notModified()
+        );
+
+        assertThat(refreshed.isPresent(), is(true));
+        assertThat(this.cache.lookup(HttpMethod.GET, URL, request).orElseThrow().response().getHeaders().get("ETag"), contains("\"language\""));
     }
 
     @Test
