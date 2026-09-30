@@ -1,9 +1,12 @@
 package dev.simplified.client.util;
 
 import dev.simplified.annotations.UtilityClass;
+import dev.simplified.client.factory.ApacheClientFactory;
+import org.apache.hc.core5.http.io.EofSensorInputStream;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Arrays;
@@ -26,6 +29,10 @@ import java.util.Map;
  * clamped to {@link #MAX_INITIAL_BUFFER} so that a hostile {@code Content-Length} cannot
  * force a gigabyte preallocation; streams exceeding the clamp or lacking a hint fall back
  * to natural {@code ByteArrayOutputStream} growth.
+ * <p>
+ * A body can be read up to a cap: the read stops one byte past it and aborts the exchange the body
+ * arrived on rather than draining the rest, so a caller holding bodies to a cap downloads no more
+ * of a larger one than the cap.
  */
 @UtilityClass
 public final class BodyBuffering {
@@ -68,6 +75,45 @@ public final class BodyBuffering {
     }
 
     /**
+     * Drains the given Feign response body into a {@code byte[]} as
+     * {@link #toByteArray(feign.Response.Body, Map)} does, reading no more than one byte past a
+     * cap.
+     * <p>
+     * A body that passes the cap is read no further. When it is read through an
+     * {@link EofSensorInputStream}, as every body of the transport {@link ApacheClientFactory}
+     * configures is, that stream is aborted: the exchange's connection is closed at once rather
+     * than drained for reuse, so none of the body still to come is downloaded, and closing the
+     * body then reads at most what the connection had already buffered. The answer is then the
+     * body's first {@code maxBytes + 1} bytes, so a caller tells a body past the cap by its
+     * length. A body that fits the cap is read to its end. A cap of {@link Long#MAX_VALUE} holds
+     * no body to a cap, and the body is read whole.
+     *
+     * @param body the feign response body to drain
+     * @param responseHeaders the feign response headers, consulted for {@code Content-Length}
+     * @param maxBytes the cap in bytes
+     * @return the body, or its first {@code maxBytes + 1} bytes when it is larger than
+     *         {@code maxBytes}
+     * @throws IOException if the underlying stream throws
+     */
+    public static byte @NotNull [] toByteArray(
+        @NotNull feign.Response.Body body,
+        @NotNull Map<String, Collection<String>> responseHeaders,
+        long maxBytes
+    ) throws IOException {
+        if (maxBytes == Long.MAX_VALUE)
+            return toByteArray(body, responseHeaders);
+
+        InputStream in = body.asInputStream();
+        long limit = maxBytes + 1;
+        byte[] read = toByteArray(new Bounded(in, limit), (int) Math.min(parseContentLength(responseHeaders), limit));
+
+        if (read.length > maxBytes && in instanceof EofSensorInputStream exchange)
+            exchange.abort();
+
+        return read;
+    }
+
+    /**
      * Drains the given stream into a {@code byte[]}. When {@code sizeHint} is a usable
      * positive value, the stream is read directly into a pre-allocated buffer of that
      * size (clamped to {@link #MAX_INITIAL_BUFFER}); otherwise the helper falls back to a
@@ -86,6 +132,7 @@ public final class BodyBuffering {
         byte[] buffer = new byte[sized];
         int total = 0;
         int read;
+
         while (total < sized && (read = in.read(buffer, total, sized - total)) != -1)
             total += read;
 
@@ -135,6 +182,56 @@ public final class BodyBuffering {
             }
         }
         return -1;
+    }
+
+    /**
+     * Stream that answers the end of the stream once a limit of bytes has been read through it,
+     * leaving the rest of the stream it reads unread.
+     */
+    private static final class Bounded extends FilterInputStream {
+
+        /**
+         * The bytes still to be read before the limit.
+         */
+        private long remaining;
+
+        /**
+         * Constructs a new {@code Bounded} over a stream, reading at most {@code limit} bytes of it.
+         *
+         * @param in the stream to read
+         * @param limit the most bytes to read
+         */
+        Bounded(@NotNull InputStream in, long limit) {
+            super(in);
+            this.remaining = limit;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (this.remaining <= 0)
+                return -1;
+
+            int read = super.read();
+
+            if (read != -1)
+                this.remaining--;
+
+            return read;
+        }
+
+        @Override
+        public int read(byte @NotNull [] buffer, int offset, int length) throws IOException {
+            if (this.remaining <= 0)
+                return -1;
+
+            int read = super.read(buffer, offset, (int) Math.min(length, this.remaining));
+
+            if (read > 0)
+                this.remaining -= read;
+
+            return read;
+        }
+
     }
 
 }

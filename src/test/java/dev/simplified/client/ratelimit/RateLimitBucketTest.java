@@ -40,7 +40,7 @@ class RateLimitBucketTest {
 
         bucket.updateRateLimit(RateLimit.fromHeaders(60, resetSecond, NOW), NOW);
 
-        assertThat(bucket.getWindowEnd().get(), is(resetSecond * 1000L));
+        assertThat(bucket.getWindow().end(), is(resetSecond * 1000L));
     }
 
     @Test
@@ -51,7 +51,7 @@ class RateLimitBucketTest {
 
         exhaust(bucket, 10, NOW);
 
-        assertThat(bucket.getWindowEnd().get(), is(NOW + 30_000L));
+        assertThat(bucket.getWindow().end(), is(NOW + 30_000L));
         assertThat(bucket.isRateLimited(NOW + 29_999L), is(true));
         assertThat(bucket.isRateLimited(NOW + 30_000L), is(false));
     }
@@ -112,8 +112,8 @@ class RateLimitBucketTest {
         long later = firstReset + 10_000L;
         bucket.updateRateLimit(RateLimit.fromHeaders(5, secondReset / 1000L, later), later);
 
-        assertThat(bucket.getRequestCount().get(), is(0L));
-        assertThat(bucket.getWindowEnd().get(), is(secondReset));
+        assertThat(bucket.getWindow().count(), is(0L));
+        assertThat(bucket.getWindow().end(), is(secondReset));
         assertThat(bucket.isRateLimited(later), is(false));
     }
 
@@ -144,7 +144,7 @@ class RateLimitBucketTest {
         assertThat(bucket.updateFromServer(RateLimit.fromHeaders(60, resetSecond - 3600L, NOW), OptionalLong.of(58), NOW, 2), is(false));
 
         assertThat(bucket.getCount(NOW), is(3L));
-        assertThat(bucket.getWindowEnd().get(), is(resetSecond * 1000L));
+        assertThat(bucket.getWindow().end(), is(resetSecond * 1000L));
     }
 
     @Test
@@ -182,13 +182,109 @@ class RateLimitBucketTest {
     }
 
     @Test
+    @DisplayName("Requests acquired together are admitted no further than the limit, and each admitted one is counted")
+    void concurrentAcquiresAdmitOnlyTheLimit() throws Exception {
+        int threads = 32;
+        RateLimit policy = RateLimit.builder().limit(3).window(60, ChronoUnit.SECONDS).build();
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+
+        try {
+            for (int round = 0; round < 200; round++) {
+                RateLimitBucket bucket = new RateLimitBucket(policy, NOW);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Boolean>> acquired = new ArrayList<>();
+
+                for (int i = 0; i < threads; i++) {
+                    acquired.add(pool.submit(() -> {
+                        start.await();
+                        return bucket.tryAcquire(NOW);
+                    }));
+                }
+
+                start.countDown();
+                long admitted = 0;
+
+                for (Future<Boolean> future : acquired) {
+                    if (future.get())
+                        admitted++;
+                }
+
+                assertThat("round " + round, admitted, is(3L));
+                assertThat("round " + round, bucket.getCount(NOW), is(3L));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("A refused acquire counts nothing, and an unlimited bucket admits every request without counting it")
+    void refusedAcquireCountsNothing() {
+        RateLimitBucket bucket = new RateLimitBucket(RateLimit.builder().limit(1).window(60, ChronoUnit.SECONDS).build(), NOW);
+        RateLimitBucket unlimited = new RateLimitBucket(RateLimit.UNLIMITED, NOW);
+
+        assertThat(bucket.tryAcquire(NOW), is(true));
+        assertThat(bucket.tryAcquire(NOW), is(false));
+        assertThat(bucket.getCount(NOW), is(1L));
+        assertThat(bucket.tryAcquire(NOW + 60_000L), is(true));
+        assertThat(unlimited.tryAcquire(NOW), is(true));
+        assertThat(unlimited.getCount(NOW), is(0L));
+    }
+
+    @Test
+    @DisplayName("Requests racing across a window boundary are admitted no further than the limit in the window opened there")
+    void acquiresRacingABoundaryAdmitOnlyTheLimit() throws Exception {
+        int threads = 32;
+        int attempts = 4;
+        long limit = 5L;
+        long boundary = NOW + 60_000L;
+        RateLimit policy = RateLimit.builder().limit(limit).window(60, ChronoUnit.SECONDS).build();
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+
+        try {
+            for (int round = 0; round < 300; round++) {
+                // Nothing is counted in the window ending at the boundary, so a request counted in
+                // it while a racing rotation opens the next window would be admitted and erased.
+                RateLimitBucket bucket = new RateLimitBucket(policy, NOW);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Integer>> acquired = new ArrayList<>();
+
+                for (int i = 0; i < threads; i++) {
+                    acquired.add(pool.submit(() -> {
+                        start.await();
+                        int admitted = 0;
+
+                        for (int attempt = 0; attempt < attempts; attempt++) {
+                            if (bucket.tryAcquire(boundary))
+                                admitted++;
+                        }
+
+                        return admitted;
+                    }));
+                }
+
+                start.countDown();
+                long admitted = 0;
+
+                for (Future<Integer> future : acquired)
+                    admitted += future.get();
+
+                assertThat("round " + round, admitted, is(limit));
+                assertThat("round " + round, bucket.getWindow(), is(new RateLimitBucket.Window(boundary, boundary + 60_000L, limit)));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     @DisplayName("A client-configured window still runs its duration from when it opened")
     void clientConfiguredWindowRunsItsDuration() {
         RateLimitBucket bucket = new RateLimitBucket(RateLimit.builder().limit(2).window(10, ChronoUnit.SECONDS).build(), NOW);
 
         exhaust(bucket, 2, NOW);
 
-        assertThat(bucket.getWindowEnd().get(), is(NOW + 10_000L));
+        assertThat(bucket.getWindow().end(), is(NOW + 10_000L));
         assertThat(bucket.isRateLimited(NOW + 9_999L), is(true));
         assertThat(bucket.isRateLimited(NOW + 10_000L), is(false));
     }

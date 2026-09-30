@@ -12,7 +12,7 @@ import org.jetbrains.annotations.NotNull;
  * JSON schema, while this interface provides the common accessor consumed by
  * {@link ApiException}.
  *
- * @see ApiException#getResponse()
+ * @see ApiException#response
  */
 public interface ApiErrorResponse {
 

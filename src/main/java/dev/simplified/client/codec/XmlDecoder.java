@@ -61,14 +61,14 @@ import java.util.function.UnaryOperator;
  * collision (such as RSS {@code <link>} versus {@code <atom:link>}) down to the expected
  * scalar before Gson attempts to bind the DTO field.
  *
- * <p><b>Lifecycle.</b> This decoder is typically returned from {@link ClientConfig#getEncoderFactory()}
+ * <p><b>Lifecycle.</b> This decoder is typically returned from {@link ClientConfig#decoderFactory}
  * and wrapped by {@link InternalResponseDecoder}, which handles {@link InputStream} and
  * {@code byte[]} return types and closes the response body after decoding. Exceptions thrown
  * by this decoder are caught by {@link InternalResponseDecoder} and re-wrapped as
  * {@link ApiDecodeException ApiDecodeException}, so this
  * class does not need to do its own exception wrapping.
  *
- * @see ClientConfig#getEncoderFactory()
+ * @see ClientConfig#decoderFactory
  * @see XmlEncoder
  * @see InternalResponseDecoder
  */

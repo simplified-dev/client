@@ -255,9 +255,9 @@ public final class RateLimit {
      * One billion seconds and one trillion milliseconds are the same instant,
      * 2001-09-09T01:46:40Z, so each epoch form covers every reset from then until the year 33658,
      * and no delta reaches the thirty-one years one billion seconds spans. An epoch reset resets
-     * at the instant it names, and the policy's {@link #getResetSeconds() resetSeconds} is the
+     * at the instant it names, and the policy's {@link #resetSeconds} is the
      * seconds from {@code now} until then, rounded up and never negative. Every form carries the
-     * absolute {@link #getResetEpochMillis() reset instant}.
+     * absolute {@link #resetEpochMillis reset instant}.
      *
      * @param limit the maximum number of requests allowed in the window
      * @param reset the number of seconds until the quota resets, or the epoch second or epoch

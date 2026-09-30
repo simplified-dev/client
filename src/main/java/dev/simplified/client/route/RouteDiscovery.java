@@ -16,6 +16,7 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -28,8 +29,8 @@ import java.util.Set;
  * On construction, the target class is scanned for a mandatory type-level route (the
  * default) and optional per-method route overrides. The resulting {@link Metadata} objects
  * pair each route string with its {@link RateLimit} policy and a precomputed
- * {@linkplain Metadata#getBucketKey() bucket key} composed against the optional
- * {@linkplain ClientConfig#getSubnetPrefix() subnet prefix} carried on the supplied
+ * {@linkplain Metadata#bucketKey bucket key} composed against the optional
+ * {@linkplain ClientConfig#subnetPrefix subnet prefix} carried on the supplied
  * {@link ClientConfig}, and are stored in an unmodifiable map for fast, lock-free lookups
  * at request time.
  * <p>
@@ -64,11 +65,11 @@ public final class RouteDiscovery {
      * Scans the target Feign endpoint interface declared on the given options for route
      * annotations and caches the results.
      * <p>
-     * The {@linkplain ClientConfig#getTarget() target class} must declare either a
+     * The {@linkplain ClientConfig#target target class} must declare either a
      * {@link Route @Route} or a {@link DynamicRoute @DynamicRoute}-annotated custom annotation
      * at the type level; otherwise an {@link IllegalArgumentException} is thrown. Each declared
      * method is additionally inspected for method-level route overrides. The optional
-     * {@linkplain ClientConfig#getSubnetPrefix() subnet prefix} carried on the options is
+     * {@linkplain ClientConfig#subnetPrefix subnet prefix} carried on the options is
      * baked into each {@link Metadata}'s precomputed bucket key, so subnet-rotated clients
      * resolve to a per-subnet rate-limit identifier without runtime composition.
      *
@@ -83,12 +84,12 @@ public final class RouteDiscovery {
         if (defaultRoute.isEmpty())
             throw new IllegalArgumentException("No @Route or @DynamicRoute found on type of " + target.getName());
 
-        ConcurrentMap<Method, Metadata> methodRoutes = Concurrent.newMap();
+        Map<Method, Metadata> methodRoutes = new HashMap<>();
         for (Method method : target.getDeclaredMethods())
             extractRouteFromTarget(method, subnetPrefix).ifPresent(info -> methodRoutes.put(method, info));
 
         this.defaultRoute = defaultRoute.get();
-        this.methodRoutes = methodRoutes.toUnmodifiable();
+        this.methodRoutes = Concurrent.newUnmodifiableMap(methodRoutes);
     }
 
     /**

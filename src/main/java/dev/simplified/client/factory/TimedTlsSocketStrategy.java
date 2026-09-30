@@ -41,7 +41,7 @@ import java.net.Socket;
  * {@link TlsSocketStrategy}, which is what made the migration cleaner than HC 4's combined
  * {@code LayeredConnectionSocketFactory} shape.
  *
- * @see TimedPlainConnectionSocketFactory
+ * @see TimedConnectionOperator
  * @see NetworkDetails
  * @see dev.simplified.client.Client
  */
@@ -57,7 +57,7 @@ public final class TimedTlsSocketStrategy implements TlsSocketStrategy {
      * {@inheritDoc}
      */
     @Override
-    public SSLSocket upgrade(@NotNull Socket socket, @NotNull String target, int port, Object attachment, @NotNull HttpContext context) throws IOException {
+    public @NotNull SSLSocket upgrade(@NotNull Socket socket, @NotNull String target, int port, Object attachment, @NotNull HttpContext context) throws IOException {
         // The connection operator's anchor when it is opening this connection, so the handshake
         // and the connection window share one clock domain.
         ClockAnchor anchor = ClockAnchor.of(context);

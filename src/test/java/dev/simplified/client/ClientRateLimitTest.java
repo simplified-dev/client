@@ -13,10 +13,15 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -145,6 +150,49 @@ class ClientRateLimitTest {
         assertThat(this.client.getRemainingRequests(), is(0L));
         assertThrows(RateLimitException.class, resource::revalidated);
         assertThat(this.answered.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("Requests sent together are admitted no further than the client-side rate limit allows")
+    void concurrentRequestsAreAdmittedNoFurtherThanTheLimit() throws Exception {
+        Resource resource = this.client.getContract();
+        int threads = 32;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+
+        try {
+            for (int round = 0; round < 50; round++) {
+                this.client.getRateLimitManager().clear();
+                this.answered.set(0);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Boolean>> sent = new ArrayList<>();
+
+                for (int i = 0; i < threads; i++) {
+                    sent.add(pool.submit(() -> {
+                        start.await();
+
+                        try {
+                            resource.uncached();
+                            return true;
+                        } catch (RateLimitException refused) {
+                            return false;
+                        }
+                    }));
+                }
+
+                start.countDown();
+                long admitted = 0;
+
+                for (Future<Boolean> future : sent) {
+                    if (future.get())
+                        admitted++;
+                }
+
+                assertThat("round " + round, admitted, is(2L));
+                assertThat("round " + round, this.answered.get(), is(2));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
 }

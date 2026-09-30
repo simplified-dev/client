@@ -4,8 +4,8 @@ import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
-import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.request.Contract;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.SubnetRotation;
 import org.jetbrains.annotations.NotNull;
 
@@ -18,9 +18,10 @@ import java.util.stream.Stream;
  * the bucket prefix length.
  * <p>
  * Holds exactly one {@link SubnetBucket} whose subnet is the configured source
- * prefix. There is no bucket-level selection - all rotation happens at the
- * address-within-bucket dimension. When the bucket exceeds its soft cap,
- * {@link #selectClient()} throws.
+ * prefix. There is no bucket-level selection - every call is served by the
+ * bucket's one client, bound to a random address inside the source prefix.
+ * Once the availability predicate rejects that client, {@link #selectClient()}
+ * throws the bucket's refusal.
  *
  * @param <C> the contract interface type
  */
@@ -32,7 +33,7 @@ public final class SingleBucketPool<C extends Contract> implements SubnetBucketP
 
     SingleBucketPool(
         @NotNull SubnetRotation rotation,
-        @NotNull String anchorRouteId,
+        @NotNull RouteDiscovery.Metadata anchorRoute,
         @NotNull ClientConfig<C> baseOptions,
         @NotNull UnaryOperator<ClientConfig.Builder<C>> mutator,
         @NotNull Predicate<Client<C>> availability
@@ -40,7 +41,8 @@ public final class SingleBucketPool<C extends Contract> implements SubnetBucketP
         this.rotation = rotation;
         this.bucket = new SubnetBucket<>(
             rotation.sourcePrefix(),
-            anchorRouteId + "@" + rotation.sourcePrefix(),
+            anchorRoute.getRoute() + "@" + rotation.sourcePrefix(),
+            anchorRoute.getRateLimit(),
             baseOptions,
             mutator,
             availability
@@ -54,8 +56,6 @@ public final class SingleBucketPool<C extends Contract> implements SubnetBucketP
 
     @Override
     public @NotNull Client<C> selectClient() throws RateLimitException {
-        if (this.bucket.isSaturated())
-            throw new RateLimitException(this.bucket.getSubnet().toString(), RateLimit.UNLIMITED);
         return this.bucket.selectClient();
     }
 

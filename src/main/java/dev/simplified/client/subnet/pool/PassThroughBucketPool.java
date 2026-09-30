@@ -5,6 +5,7 @@ import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.request.Contract;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.SubnetRotation;
 import org.jetbrains.annotations.NotNull;
 
@@ -18,9 +19,9 @@ import java.util.stream.Stream;
  * <p>
  * Holds one {@link SubnetBucket} whose subnet is the source prefix. The source prefix shares a
  * single upstream bucket with everything else in the same /bucket-prefix subnet, so rotation
- * within the source prefix cannot relieve upstream pressure; saturation here only fires if the
- * availability predicate fails on every spawned client. Random addresses are still bound for
- * unpredictability.
+ * within the source prefix cannot relieve upstream pressure; the pool refuses a request once the
+ * availability predicate rejects the bucket's one client. That client's address is still random
+ * within the source prefix, for unpredictability.
  *
  * @param <C> the contract interface type
  */
@@ -32,7 +33,7 @@ public final class PassThroughBucketPool<C extends Contract> implements SubnetBu
 
     PassThroughBucketPool(
         @NotNull SubnetRotation rotation,
-        @NotNull String anchorRouteId,
+        @NotNull RouteDiscovery.Metadata anchorRoute,
         @NotNull ClientConfig<C> baseOptions,
         @NotNull UnaryOperator<ClientConfig.Builder<C>> mutator,
         @NotNull Predicate<Client<C>> availability
@@ -40,7 +41,8 @@ public final class PassThroughBucketPool<C extends Contract> implements SubnetBu
         this.rotation = rotation;
         this.bucket = new SubnetBucket<>(
             rotation.sourcePrefix(),
-            anchorRouteId + "@" + rotation.sourcePrefix(),
+            anchorRoute.getRoute() + "@" + rotation.sourcePrefix(),
+            anchorRoute.getRateLimit(),
             baseOptions,
             mutator,
             availability

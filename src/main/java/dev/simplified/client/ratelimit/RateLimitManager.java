@@ -158,6 +158,27 @@ public class RateLimitManager {
     }
 
     /**
+     * Admits a single request and records it against the bucket identified by {@code bucketId} in
+     * one atomic step, unless the bucket has exhausted its quota, as
+     * {@link RateLimitBucket#tryAcquire(long)} does.
+     * <p>
+     * Creates the bucket with the supplied {@link RateLimit} policy if it does not already exist.
+     * Requests sent together through this manager are admitted no further than the bucket's
+     * limit allows, which an {@link #isRateLimited(String, RateLimit, long)} check followed by
+     * {@link #trackRequest(String, RateLimit, long)} does not guarantee.
+     *
+     * @param bucketId the route identifier to admit the request against
+     * @param rateLimit the rate-limit policy to use if the bucket must be created
+     * @param now the pre-sampled epoch-millisecond timestamp to evaluate the window against and
+     *            record the request at
+     * @return {@code true} if the request was admitted and counted; {@code false} if the bucket is
+     *         rate-limited, in which case nothing is counted
+     */
+    public boolean tryAcquire(@NotNull String bucketId, @NotNull RateLimit rateLimit, long now) {
+        return this.getOrCreateBucket(bucketId, rateLimit, now).tryAcquire(now);
+    }
+
+    /**
      * Replaces the rate-limit policy for the bucket identified by
      * {@code bucketId}.
      * <p>
@@ -387,6 +408,34 @@ public class RateLimitManager {
     public long getRemaining(@NotNull String bucketId) {
         RateLimitBucket bucket = this.buckets.get(bucketId);
         return bucket != null ? bucket.getRemaining() : RateLimit.UNLIMITED.getLimit();
+    }
+
+    /**
+     * Returns the policy the specified bucket enforces: the one it was created with, or the one a
+     * server response last replaced it with.
+     * <p>
+     * Does <em>not</em> create a missing bucket.
+     *
+     * @param bucketId the route identifier to query
+     * @return the bucket's policy, or empty if no bucket exists for the given identifier
+     */
+    public @NotNull Optional<RateLimit> getRateLimit(@NotNull String bucketId) {
+        return Optional.ofNullable(this.buckets.get(bucketId))
+            .map(bucket -> bucket.getRateLimit().get());
+    }
+
+    /**
+     * Returns the window the specified bucket holds, as {@link RateLimitBucket#getWindow()} returns
+     * it.
+     * <p>
+     * Does <em>not</em> create a missing bucket.
+     *
+     * @param bucketId the route identifier to query
+     * @return the bucket's window, or empty if no bucket exists for the given identifier
+     */
+    public @NotNull Optional<RateLimitBucket.Window> getWindow(@NotNull String bucketId) {
+        return Optional.ofNullable(this.buckets.get(bucketId))
+            .map(RateLimitBucket::getWindow);
     }
 
     /**

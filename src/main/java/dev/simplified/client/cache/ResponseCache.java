@@ -19,6 +19,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
@@ -172,8 +173,9 @@ public final class ResponseCache {
      * <p>
      * The replay carries the stored headers overlaid with the 304's, so each named header holds
      * the value the server sent with the 304 and every other header is replayed from the cache,
-     * but for a {@code Date} the 304 did not carry, which holds the instant the 304 was received.
-     * Named with {@link NetworkDetails#INTERNAL_HEADER_PREFIX} as an internal header.
+     * but for a {@code Date} the 304 did not carry, which holds the stored {@code Date} advanced to
+     * the instant the 304 was received ({@link #mergeHeaders}). Named with
+     * {@link NetworkDetails#INTERNAL_HEADER_PREFIX} as an internal header.
      */
     public static final @NotNull String REVALIDATED_HEADER = NetworkDetails.INTERNAL_HEADER_PREFIX + "Revalidated";
 
@@ -204,7 +206,10 @@ public final class ResponseCache {
      * Orders the variants of one URL from the least to the most recent: by the
      * {@linkplain Response.CachedImpl#date() date} each response was generated, then by the
      * instant each was received, then by the headers and values of the fingerprint each is held
-     * under, which no two variants of one bucket share.
+     * under, which no two variants of one bucket share. A variant that a {@code 304} carrying no
+     * {@code Date} refreshed keeps its date on the clock its stored {@code Date} was read off
+     * ({@link #mergeHeaders}), so the dates of variants an origin dated are compared on that
+     * origin's clock.
      */
     private static final @NotNull Comparator<Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>>> RECENCY = Comparator
         .<Map.Entry<CacheKey.VaryFingerprint, CacheEntry<?>>, Instant>comparing(variant -> variant.getValue().response().date())
@@ -425,7 +430,7 @@ public final class ResponseCache {
      *       405, 410, 414, 501}} unless explicit freshness is present -> skip</li>
      *   <li>response carries the {@link #CACHE_HIT_HEADER} marker (replay from this cache)
      *       -> skip</li>
-     *   <li>the start of the response's {@linkplain NetworkDetails#getRoundTrip() round trip}
+     *   <li>the start of the response's {@linkplain NetworkDetails#roundTrip round trip}
      *       is not after the instant {@link #invalidateAll()} last emptied the cache, or the
      *       instant {@link #invalidate(String)} last invalidated the response's URL -> skip, so
      *       an answer to a request in flight across an invalidation cannot re-enter the
@@ -1005,16 +1010,27 @@ public final class ResponseCache {
      * §4.3.4</a>: the merged view reports the 304 exchange's network details, and the stored
      * {@code Age} is kept only when the 304 carries its own, so the refreshed entry's
      * {@linkplain Response.CachedImpl#currentAge(Instant) age} is counted from the revalidation.
-     * The stored {@code Date} is replaced as well: by the 304's own, or, when the 304 carries
-     * none, by the instant the 304 was received, formatted as an HTTP date, as
+     * The stored {@code Date} is replaced as well, by the 304's own when it carries one. When it
+     * carries none, the stored {@code Date} - read off the origin's clock, which can run apart
+     * from the local one - is advanced by the local time elapsed between the receipt of the
+     * response it was stored from and the receipt of the 304, both counted in whole seconds. The
+     * refreshed {@code Date} so stays on the origin's clock, beside the stored {@code Expires} it
+     * is subtracted from and the {@code Date} of every other variant {@link #lookup} weighs it
+     * against, and a chain of refreshes never drifts from that clock by a second or more. A
+     * response stored without a {@code Date} is dated by the instant the 304 was received instead,
+     * formatted as an HTTP date, as
      * <a href="https://datatracker.ietf.org/doc/html/rfc7231#section-7.1.1.2">RFC 7231
      * §7.1.1.2</a> asks of a cache storing a response that has no {@code Date}. The apparent age
-     * is therefore measured from the revalidation too, never from the response first stored. The
-     * stored {@code Date} is kept only when the 304 carries none and the exchange records no
-     * instant it was received.
+     * therefore counts the origin's lag behind the local clock as it did for the stored response,
+     * never the time since that response was received. The stored {@code Date} is kept when the
+     * 304 carries none and the exchange, or the one the stored response was received in, records
+     * no instant it was received.
      * <p>
-     * {@link CachingFeignClient} answers the revalidation from the same merge, so the replay
-     * matches the refreshed entry.
+     * A client answers a revalidation with this merge of the entry it revalidated, whether or
+     * not {@link #updateOn304} refreshed that entry in the cache. An entry evicted, invalidated
+     * or re-varied away between the lookup and the {@code 304} is refreshed nowhere, and its
+     * replay still carries the 304's headers and is aged from the 304 exchange, as the replay of
+     * an entry the cache refreshed is.
      *
      * @param existing the cached entry to refresh
      * @param new304Headers the headers from the 304 response
@@ -1024,7 +1040,7 @@ public final class ResponseCache {
      *         existing body bytes
      * @see #refreshesStoredHeader(String, Collection)
      */
-    static <T> @NotNull CacheEntry<T> mergeHeaders(
+    public static <T> @NotNull CacheEntry<T> mergeHeaders(
         @NotNull CacheEntry<T> existing,
         @NotNull Map<String, ? extends Collection<String>> new304Headers,
         @NotNull NetworkDetails revalidation
@@ -1034,10 +1050,8 @@ public final class ResponseCache {
         merged.putAll(existingResponse.getHeaders());
         merged.remove("Age");
 
-        Instant received = revalidation.getRoundTrip().completedAt();
-
-        if (!received.equals(Instant.EPOCH))
-            merged.put("Date", Concurrent.newUnmodifiableList(HttpDates.format(received)));
+        refreshedDate(existingResponse, revalidation.getRoundTrip().completedAt())
+            .ifPresent(date -> merged.put("Date", Concurrent.newUnmodifiableList(HttpDates.format(date))));
 
         for (Map.Entry<String, ? extends Collection<String>> entry : new304Headers.entrySet()) {
             Collection<String> values = entry.getValue();
@@ -1052,6 +1066,41 @@ public final class ResponseCache {
         );
 
         return new CacheEntry<>(existingResponse.withHeaders(mergedView, revalidation), existing.body());
+    }
+
+    /**
+     * Dates a cached response that a {@code 304 Not Modified} carrying no {@code Date} refreshes,
+     * on the clock its stored {@code Date} was read off.
+     * <p>
+     * The stored {@code Date} is advanced by the time between the receipt of the response it was
+     * stored from and the receipt of the {@code 304}, each truncated to the second an HTTP date
+     * resolves to, so the advances of successive refreshes add up to the time between the first
+     * receipt and the last within a second. A response stored without a {@code Date} is dated by
+     * the {@code 304}'s receipt, as its apparent age was measured from its own.
+     *
+     * @param stored the cached response the {@code 304} refreshes
+     * @param received the instant the {@code 304} was received, or {@link Instant#EPOCH} when its
+     *                 exchange records none
+     * @return the refreshed {@code Date}, or {@link Optional#empty()} to keep the stored one when
+     *         the {@code 304}'s receipt, or the stored response's alongside a stored {@code Date},
+     *         is unrecorded
+     */
+    private static @NotNull Optional<Instant> refreshedDate(@NotNull Response.CachedImpl<?> stored, @NotNull Instant received) {
+        if (received.equals(Instant.EPOCH))
+            return Optional.empty();
+
+        Optional<Instant> date = HttpDates.parseFromHeaders(stored.getHeaders(), "Date");
+
+        if (date.isEmpty())
+            return Optional.of(received);
+
+        Instant storedReceipt = stored.getDetails().getRoundTrip().completedAt();
+
+        if (storedReceipt.equals(Instant.EPOCH))
+            return Optional.empty();
+
+        Duration elapsed = Duration.between(storedReceipt.truncatedTo(ChronoUnit.SECONDS), received.truncatedTo(ChronoUnit.SECONDS));
+        return Optional.of(date.get().plus(elapsed.isNegative() ? Duration.ZERO : elapsed));
     }
 
     /**

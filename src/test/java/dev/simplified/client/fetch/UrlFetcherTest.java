@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpServer;
 import dev.simplified.client.cache.ResponseCache;
 import dev.simplified.client.exception.ErrorContext;
 import dev.simplified.client.exception.UrlFetchException;
+import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.request.HttpMethod;
 import dev.simplified.client.request.Request;
 import dev.simplified.client.request.Timings;
@@ -21,15 +22,27 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -39,9 +52,11 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class UrlFetcherTest {
 
@@ -82,6 +97,16 @@ class UrlFetcherTest {
      * The requests {@code /unknown-client} has answered.
      */
     private final AtomicInteger unknownClientHits = new AtomicInteger();
+
+    /**
+     * The requests {@code /unknown-success} has answered.
+     */
+    private final AtomicInteger unknownSuccessHits = new AtomicInteger();
+
+    /**
+     * The requests {@code /choices} has answered.
+     */
+    private final AtomicInteger choicesHits = new AtomicInteger();
 
     /**
      * The {@code X-Variant} values each request {@code /negotiated} answered carried, in the
@@ -249,9 +274,34 @@ class UrlFetcherTest {
             }
         });
         this.server.createContext("/unknown-success", exchange -> {
+            this.unknownSuccessHits.incrementAndGet();
             byte[] body = "odd".getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
             exchange.sendResponseHeaders(299, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unknown-success-big", exchange -> {
+            byte[] body = new byte[64 * 1024];
+            java.util.Arrays.fill(body, (byte) 's');
+            exchange.sendResponseHeaders(299, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/choices", exchange -> {
+            this.choicesHits.incrementAndGet();
+            byte[] body = "pick one".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.sendResponseHeaders(300, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        this.server.createContext("/unknown-redirection", exchange -> {
+            byte[] body = "odd".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(399, body.length);
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(body);
             }
@@ -500,6 +550,69 @@ class UrlFetcherTest {
         cache.store(response, body, Map.of());
     }
 
+    /**
+     * The most an {@linkplain #endless endless} body sends, far more than any socket buffers
+     * between the origin and the fetcher hold.
+     */
+    private static final long ENDLESS_BYTES = 64L * 1024 * 1024;
+
+    /**
+     * Answers with {@code status} and a chunked body of {@link #ENDLESS_BYTES}, recording whether
+     * the fetcher hung up before the whole body went out.
+     *
+     * @param exchange the exchange to answer
+     * @param status the status to answer with
+     * @param hungUp completed with {@code true} if a write failed because the fetcher hung up, or
+     *               {@code false} if the whole body went out
+     */
+    private static void endless(HttpExchange exchange, int status, CompletableFuture<Boolean> hungUp) {
+        byte[] chunk = new byte[8192];
+        Arrays.fill(chunk, (byte) 'e');
+
+        try {
+            exchange.sendResponseHeaders(status, 0);
+
+            try (OutputStream os = exchange.getResponseBody()) {
+                for (long sent = 0; sent < ENDLESS_BYTES; sent += chunk.length)
+                    os.write(chunk);
+            }
+
+            hungUp.complete(false);
+        } catch (IOException ex) {
+            hungUp.complete(true);
+        } finally {
+            exchange.close();
+        }
+    }
+
+    /**
+     * Builds a fetcher with the default timings but for its connect and socket timeouts.
+     *
+     * @param connectTimeout the connect timeout in milliseconds
+     * @param socketTimeout the socket timeout in milliseconds
+     * @return the fetcher
+     */
+    private static UrlFetcher timedFetcher(long connectTimeout, long socketTimeout) {
+        Timings defaults = Timings.createDefault();
+
+        return UrlFetcher.create(
+            UrlFetcherConfig.builder(new Gson())
+                .withTimings(new Timings(
+                    defaults.connectionTimeToLive(),
+                    defaults.connectionIdleTimeout(),
+                    defaults.connectionKeepAlive(),
+                    connectTimeout,
+                    socketTimeout,
+                    defaults.maxConnections(),
+                    defaults.maxConnectionsPerRoute(),
+                    defaults.maxCacheBytes(),
+                    defaults.cacheSafetyFallback(),
+                    defaults.cacheStaleRetention()
+                ))
+                .build()
+        );
+    }
+
     @Test
     @DisplayName("Fetches a small body and decodes by Content-Type charset")
     void fetchesSmallBody() {
@@ -551,6 +664,12 @@ class UrlFetcherTest {
         UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
 
         assertThrows(IllegalArgumentException.class, () -> fetcher.get(this.baseUri.resolve("/hello"), -1));
+    }
+
+    @Test
+    @DisplayName("A negative configured cap is refused")
+    void negativeConfiguredCapIsRefused() {
+        assertThrows(IllegalArgumentException.class, () -> UrlFetcherConfig.builder(new Gson()).withMaxBodyBytes(-1));
     }
 
     @Test
@@ -696,15 +815,109 @@ class UrlFetcherTest {
     }
 
     @Test
-    @DisplayName("A 2xx HttpStatus has no constant for raises a UrlFetchException that is not a ClientError")
-    void unknownSuccessStatusRaises() {
-        UrlFetchException raised = assertThrows(
-            UrlFetchException.class,
-            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).get(this.baseUri.resolve("/unknown-success"))
+    @DisplayName("A 2xx HttpStatus has no constant for is a 200 success, recorded as the last response and never stored")
+    void unknownSuccessStatusIsReadAsOk() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/unknown-success");
+
+        Response<String> first = fetcher.get(uri);
+        Response<String> second = fetcher.get(uri);
+        Response<?> last = fetcher.getLastResponse().orElseThrow();
+
+        assertThat(first.getStatus(), is(HttpStatus.OK));
+        assertThat(first.getBody(), is(equalTo("odd")));
+        assertThat(second.isFromCache(), is(false));
+        assertThat(last, is(not(instanceOf(UrlFetchException.class))));
+        assertThat(last.getStatus(), is(HttpStatus.OK));
+        assertThat(this.unknownSuccessHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 2xx HttpStatus has no constant for, with a body larger than the cap, raises BodyCapExceeded as a 200 does")
+    void unknownSuccessOverTheCapRaisesBodyCapExceeded() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+
+        UrlFetchException.BodyCapExceeded raised = assertThrows(
+            UrlFetchException.BodyCapExceeded.class,
+            () -> fetcher.bytes(this.baseUri.resolve("/unknown-success-big"), 1024)
         );
 
-        assertThat(raised, is(not(instanceOf(UrlFetchException.ClientError.class))));
-        assertThat(raised.getStatusCode(), is(299));
+        assertThat(raised.getMaxBytes(), is(1024L));
+    }
+
+    @Test
+    @DisplayName("A 3xx the transport does not follow raises Redirection, recorded as the last response and never stored")
+    void redirectionStatusRaisesRedirection() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/choices");
+
+        UrlFetchException.Redirection first = assertThrows(UrlFetchException.Redirection.class, () -> fetcher.get(uri));
+        UrlFetchException.Redirection second = assertThrows(UrlFetchException.Redirection.class, () -> fetcher.get(uri));
+
+        assertThat(first.getStatus(), is(HttpStatus.MULTIPLE_CHOICES));
+        assertThat(first.getStatusCode(), is(300));
+        assertThat(new String(first.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("pick one")));
+        assertThat(second.isFromCache(), is(false));
+        assertThat(fetcher.getLastResponse().orElseThrow(), is(sameInstance(second)));
+        assertThat(this.choicesHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 3xx HttpStatus has no constant for raises Redirection as the 3xx constants do")
+    void unknownRedirectionStatusRaisesRedirection() {
+        UrlFetchException.Redirection raised = assertThrows(
+            UrlFetchException.Redirection.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(this.baseUri.resolve("/unknown-redirection"))
+        );
+
+        assertThat(raised.getStatusCode(), is(399));
+        assertThat(raised.getStatus(), is(HttpStatus.UNKNOWN_ERROR));
+        assertThat(raised.getMessage(), containsString("399"));
+    }
+
+    @Test
+    @DisplayName("A 3xx another writer stored in a shared cache raises Redirection on replay without reaching the origin")
+    void cachedRedirectionRaisesOnReplay() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/choices");
+        storeDirectly(fetcher.getResponseCache(), uri, HttpStatus.MULTIPLE_CHOICES, "stored".getBytes(StandardCharsets.UTF_8));
+
+        UrlFetchException.Redirection raised = assertThrows(UrlFetchException.Redirection.class, () -> fetcher.get(uri));
+
+        assertThat(raised.isFromCache(), is(true));
+        assertThat(fetcher.getLastResponse().orElseThrow(), is(sameInstance(raised)));
+        assertThat(this.choicesHits.get(), is(0));
+    }
+
+    @Test
+    @DisplayName("A request carrying its own If-None-Match is sent past a fresh cached entry, and the 304 answering it raises Redirection")
+    void callersConditionalRequestBypassesTheCache() {
+        UrlFetcher fetcher = UrlFetcher.create(
+            UrlFetcherConfig.builder(new Gson())
+                .withHeader("If-None-Match", "\"v1\"")
+                .build()
+        );
+        URI uri = this.baseUri.resolve("/validated");
+        storeDirectly(fetcher.getResponseCache(), uri, HttpStatus.OK, "stored".getBytes(StandardCharsets.UTF_8));
+
+        UrlFetchException.Redirection raised = assertThrows(UrlFetchException.Redirection.class, () -> fetcher.get(uri));
+
+        assertThat(raised.getStatus(), is(HttpStatus.NOT_MODIFIED));
+        assertThat(this.validatedValidators, contains(List.of("\"v1\"")));
+    }
+
+    @Test
+    @DisplayName("The exception raised for an error status is the fetcher's last response")
+    void errorStatusIsTheLastResponse() {
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        fetcher.get(this.baseUri.resolve("/fresh"));
+
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> fetcher.get(this.baseUri.resolve("/missing"))
+        );
+
+        assertThat(fetcher.getLastResponse().orElseThrow(), is(sameInstance(raised)));
     }
 
     @Test
@@ -885,7 +1098,7 @@ class UrlFetcherTest {
     @Test
     @DisplayName("ofStatus raises a context carrying a code HttpStatus has no constant for as ofUnknownStatus does")
     void ofStatusRaisesAnUnknownCodeAsOfUnknownStatusDoes() {
-        for (int code : new int[] { 460, 498, 561, 218 }) {
+        for (int code : new int[] { 399, 460, 498, 561, 218 }) {
             ErrorContext context = new ErrorContext(
                 HttpStatus.UNKNOWN_ERROR,
                 code,
@@ -1008,7 +1221,7 @@ class UrlFetcherTest {
     }
 
     @Test
-    @DisplayName("A 4xx another writer stored in a shared cache raises ClientError on replay without reaching the origin")
+    @DisplayName("A 4xx another writer stored in a shared cache raises ClientError on replay without reaching the origin, recorded as the last response")
     void cachedClientErrorRaisesOnReplay() {
         UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
         URI uri = this.baseUri.resolve("/missing");
@@ -1018,6 +1231,7 @@ class UrlFetcherTest {
 
         assertThat(raised.isFromCache(), is(true));
         assertThat(new String(raised.getBody().orElseThrow(), StandardCharsets.UTF_8), is(equalTo("stored")));
+        assertThat(fetcher.getLastResponse().orElseThrow(), is(sameInstance(raised)));
         assertThat(this.missingHits.get(), is(0));
     }
 
@@ -1037,6 +1251,47 @@ class UrlFetcherTest {
         assertThat(replay.isFromCache(), is(true));
         assertThat(replay.getBody(), is(equalTo("revalidated")));
         assertThat(this.revalidatedHits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 304 that re-varies its entry out of the cache is answered with the entry under the 304's headers, aged from the revalidation")
+    void notModifiedThatRefreshesNothingReplaysUnderItsHeaders() {
+        AtomicInteger hits = new AtomicInteger();
+        this.server.createContext("/revaried-away", exchange -> {
+            hits.incrementAndGet();
+            exchange.getResponseHeaders().add("ETag", "\"v1\"");
+
+            if (exchange.getRequestHeaders().containsKey("If-None-Match")) {
+                exchange.getResponseHeaders().add("Vary", "*");
+                exchange.getResponseHeaders().add("Cache-Control", "max-age=100");
+                exchange.sendResponseHeaders(304, -1);
+                exchange.close();
+                return;
+            }
+
+            byte[] body = "unvaried".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=UTF-8");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=60");
+            exchange.getResponseHeaders().add("Age", "120");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/revaried-away");
+
+        fetcher.get(uri);
+        Response<String> revalidated = fetcher.get(uri);
+        Response<String> again = fetcher.get(uri);
+
+        assertThat(revalidated.isFromCache(), is(true));
+        assertThat(revalidated.getBody(), is(equalTo("unvaried")));
+        assertThat(revalidated.getHeaders().get("Cache-Control"), contains("max-age=100"));
+        assertThat(revalidated.getHeaders().get("Vary"), contains("*"));
+        assertThat(Long.parseLong(revalidated.getHeaders().get("Age").getFirst()), is(lessThan(120L)));
+        assertThat(again.isFromCache(), is(false));
+        assertThat(hits.get(), is(3));
     }
 
     @Test
@@ -1184,7 +1439,7 @@ class UrlFetcherTest {
     }
 
     @Test
-    @DisplayName("A request carrying a configured Authorization does not follow a redirect to another host")
+    @DisplayName("A request carrying a configured Authorization does not follow a redirect to another host, and raises Redirection")
     void credentialStopsACrossHostRedirect() throws IOException {
         List<List<String>> landed = new CopyOnWriteArrayList<>();
         HttpServer elsewhere = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -1208,19 +1463,248 @@ class UrlFetcherTest {
         try {
             URI uri = this.baseUri.resolve("/moved");
             Response<String> anonymous = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).get(uri);
-            Response<String> credentialed = UrlFetcher.create(
+            UrlFetcher credentialed = UrlFetcher.create(
                 UrlFetcherConfig.builder(new Gson())
                     .withHeader("Authorization", "Bearer one")
                     .build()
-            ).get(uri);
+            );
+
+            UrlFetchException.Redirection raised = assertThrows(UrlFetchException.Redirection.class, () -> credentialed.get(uri));
 
             assertThat(anonymous.getStatus().getCode(), is(200));
             assertThat(anonymous.getBody(), is(equalTo("landed")));
-            assertThat(credentialed.getStatus().getCode(), is(302));
+            assertThat(raised.getStatus(), is(HttpStatus.FOUND));
+            assertThat(raised.getHeaders().get("Location"), contains(landing));
             assertThat(landed, is(equalTo(List.<List<String>>of(List.of()))));
         } finally {
             elsewhere.stop(0);
         }
+    }
+
+    @Test
+    @DisplayName("A body past the cap is not downloaded further: the fetch hangs up on it and raises BodyCapExceeded")
+    void bodyCapAbortsTheDownload() throws Exception {
+        CompletableFuture<Boolean> hungUp = new CompletableFuture<>();
+        this.server.createContext("/endless", exchange -> endless(exchange, 200, hungUp));
+
+        assertThrows(UrlFetchException.BodyCapExceeded.class, () -> buildFetcher(1024).bytes(this.baseUri.resolve("/endless")));
+
+        assertThat(hungUp.get(10, TimeUnit.SECONDS), is(true));
+    }
+
+    @Test
+    @DisplayName("An error body past the cap is cut there and not downloaded further")
+    void errorBodyCutAtTheCapAbortsTheDownload() throws Exception {
+        CompletableFuture<Boolean> hungUp = new CompletableFuture<>();
+        this.server.createContext("/endless-missing", exchange -> endless(exchange, 404, hungUp));
+
+        UrlFetchException.ClientError raised = assertThrows(
+            UrlFetchException.ClientError.class,
+            () -> buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES).bytes(this.baseUri.resolve("/endless-missing"), 1024)
+        );
+
+        assertThat(raised.getBody().orElseThrow().length, is(1024));
+        assertThat(hungUp.get(10, TimeUnit.SECONDS), is(true));
+    }
+
+    @Test
+    @DisplayName("A 5xx replaced by a stale-if-error replay is not downloaded: the fetch hangs up on it")
+    void staleIfErrorReplayAbortsTheDownload() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        CompletableFuture<Boolean> hungUp = new CompletableFuture<>();
+        this.server.createContext("/stale-endless", exchange -> {
+            if (hits.getAndIncrement() > 0) {
+                endless(exchange, 503, hungUp);
+                return;
+            }
+
+            byte[] body = "steady".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("ETag", "\"v1\"");
+            exchange.getResponseHeaders().add("Cache-Control", "max-age=0, stale-if-error=60");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/stale-endless");
+
+        fetcher.get(uri);
+        Response<String> replay = fetcher.get(uri);
+
+        assertThat(replay.getBody(), is(equalTo("steady")));
+        assertThat(replay.isStaleFromCache(), is(true));
+        assertThat(hungUp.get(10, TimeUnit.SECONDS), is(true));
+    }
+
+    @Test
+    @DisplayName("A 5xx arriving after the entry's stale-if-error window closed is replaced by the entry when the window was open as the fetch began")
+    void staleIfErrorIsJudgedAsTheFetchBegins() {
+        AtomicInteger hits = new AtomicInteger();
+        this.server.createContext("/stale-slow", exchange -> {
+            boolean first = hits.getAndIncrement() == 0;
+
+            if (!first) {
+                try {
+                    Thread.sleep(2_500L);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            byte[] body = (first ? "steady" : "down").getBytes(StandardCharsets.UTF_8);
+
+            if (first) {
+                exchange.getResponseHeaders().add("ETag", "\"v1\"");
+                exchange.getResponseHeaders().add("Cache-Control", "max-age=0, stale-if-error=1");
+            }
+
+            exchange.sendResponseHeaders(first ? 200 : 503, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/stale-slow");
+
+        fetcher.get(uri);
+        Response<String> replay = fetcher.get(uri);
+
+        assertThat(replay.getBody(), is(equalTo("steady")));
+        assertThat(replay.isStaleFromCache(), is(true));
+        assertThat(hits.get(), is(2));
+    }
+
+    @Test
+    @DisplayName("A 5xx answering the request for an entry without a validator is replaced by the entry within its stale-if-error window")
+    void staleIfErrorWithoutValidatorServesStale() {
+        List<Boolean> conditional = new CopyOnWriteArrayList<>();
+        this.server.createContext("/unvalidated", exchange -> {
+            Headers sent = exchange.getRequestHeaders();
+            conditional.add(sent.containsKey("If-None-Match") || sent.containsKey("If-Modified-Since"));
+            boolean first = conditional.size() == 1;
+            byte[] body = (first ? "steady" : "down").getBytes(StandardCharsets.UTF_8);
+
+            if (first)
+                exchange.getResponseHeaders().add("Cache-Control", "max-age=0, stale-if-error=60");
+
+            exchange.sendResponseHeaders(first ? 200 : 503, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        UrlFetcher fetcher = buildFetcher(UrlFetcherConfig.DEFAULT_MAX_BODY_BYTES);
+        URI uri = this.baseUri.resolve("/unvalidated");
+
+        Response<String> live = fetcher.get(uri);
+        Response<String> replay = fetcher.get(uri);
+
+        assertThat(live.isFromCache(), is(false));
+        assertThat(replay.getBody(), is(equalTo("steady")));
+        assertThat(replay.isStaleFromCache(), is(true));
+        assertThat(conditional, contains(false, false));
+    }
+
+    @Test
+    @DisplayName("The fetcher's socket timeout bounds a read the origin never answers")
+    void socketTimeoutBoundsAStalledRead() throws IOException {
+        try (ServerSocket silent = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
+            UrlFetcher fetcher = timedFetcher(60_000L, 500L);
+            URI uri = URI.create("http://127.0.0.1:" + silent.getLocalPort() + "/stalled");
+
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(20),
+                () -> assertThrows(UrlFetchException.Transport.class, () -> fetcher.bytes(uri))
+            );
+        }
+    }
+
+    @Test
+    @DisplayName("The fetcher's connect timeout bounds a TLS handshake the origin never answers")
+    void connectTimeoutBoundsAStalledHandshake() throws IOException {
+        try (ServerSocket silent = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))) {
+            UrlFetcher fetcher = timedFetcher(500L, 60_000L);
+            URI uri = URI.create("https://127.0.0.1:" + silent.getLocalPort() + "/stalled");
+
+            assertTimeoutPreemptively(
+                Duration.ofSeconds(20),
+                () -> assertThrows(UrlFetchException.Transport.class, () -> fetcher.bytes(uri))
+            );
+        }
+    }
+
+    @Test
+    @DisplayName("Fetches sent together are admitted no further than the fetcher's rate limit allows")
+    void concurrentFetchesAreAdmittedNoFurtherThanTheLimit() throws Exception {
+        AtomicInteger counted = new AtomicInteger();
+        this.server.createContext("/counted", exchange -> {
+            counted.incrementAndGet();
+            byte[] body = "counted".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Cache-Control", "no-store");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(body);
+            }
+        });
+        UrlFetcher fetcher = UrlFetcher.create(
+            UrlFetcherConfig.builder(new Gson())
+                .withDefaultRateLimit(RateLimit.builder().limit(3).window(60, ChronoUnit.SECONDS).build())
+                .build()
+        );
+        URI uri = this.baseUri.resolve("/counted");
+        int threads = 32;
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+
+        try {
+            for (int round = 0; round < 50; round++) {
+                fetcher.getRateLimitManager().clear();
+                counted.set(0);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Boolean>> fetches = new ArrayList<>();
+
+                for (int i = 0; i < threads; i++) {
+                    fetches.add(pool.submit(() -> {
+                        start.await();
+
+                        try {
+                            fetcher.bytes(uri);
+                            return true;
+                        } catch (UrlFetchException.RateLimited refused) {
+                            return false;
+                        }
+                    }));
+                }
+
+                start.countDown();
+                long admitted = 0;
+
+                for (Future<Boolean> fetch : fetches) {
+                    if (fetch.get())
+                        admitted++;
+                }
+
+                assertThat("round " + round, admitted, is(3L));
+                assertThat("round " + round, counted.get(), is(3));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @DisplayName("A header a caller names with the internal prefix reaches the origin")
+    void sendsACallersInternalHeader() {
+        List<List<String>> tenants = new CopyOnWriteArrayList<>();
+        this.server.createContext("/tenant", exchange -> {
+            tenants.add(List.copyOf(exchange.getRequestHeaders().getOrDefault("X-Internal-Tenant", List.of())));
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        UrlFetcher.create(UrlFetcherConfig.builder(new Gson()).withHeader("X-Internal-Tenant", "t1").build())
+            .bytes(this.baseUri.resolve("/tenant"));
+
+        assertThat(tenants, is(equalTo(List.of(List.of("t1")))));
     }
 
 }

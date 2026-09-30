@@ -11,32 +11,30 @@ import dev.simplified.client.route.DynamicRouteProvider;
 import dev.simplified.client.route.Route;
 import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.SubnetRotation;
-import dev.simplified.client.subnet.pool.SubnetBucketPool;
+import dev.simplified.client.subnet.pool.ClientPool;
 import org.jetbrains.annotations.NotNull;
 
+import java.util.Optional;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 
 /**
- * Subnet-aware IPv6 source-address rotator for a single {@link Contract} type.
+ * Pool of {@link Client} instances fronting a single {@link Contract} type.
  * <p>
- * A {@code Proxy} owns a {@link SubnetBucketPool} configured via
- * {@link SubnetRotation}. Each call to {@link #getClient()} picks a bucket
- * with remaining budget (per the configured selection strategy) and returns
- * an available {@link Client} bound to a random address within that bucket's
- * subnet. When all buckets are saturated, the call throws
- * {@link RateLimitException}.
+ * With a {@link SubnetRotation}, each {@link #getClient()} picks a subnet bucket with remaining
+ * budget (per the configured selection strategy) and returns a client bound to a random address
+ * inside it. Without one, every call returns the same client, sending from the host's default
+ * source address. Every client shares one {@link RateLimitManager}, and a call no client can serve
+ * throws {@link RateLimitException}.
  * <p>
- * The bucket layer is internal - callers see only {@link Client} instances.
- * Because {@code Proxy} implements {@link AsyncAccess}, it is a drop-in
- * replacement for {@link Client} anywhere an {@code AsyncAccess<E>} is
- * accepted.
+ * Because {@code Proxy} implements {@link AsyncAccess}, it stands in for a {@link Client} anywhere
+ * an {@code AsyncAccess<C>} is accepted.
  *
  * @param <C> the {@link Contract} interface type that the underlying clients target
  * @see Client
  * @see ClientConfig
  * @see SubnetRotation
- * @see SubnetBucketPool
+ * @see ClientPool
  */
 @Getter
 @RequiredArgsConstructor(access = AccessLevel.PRIVATE)
@@ -48,29 +46,32 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
     private final @NotNull ClientConfig<C> baseOptions;
 
     /**
-     * The rotation configuration backing this proxy.
+     * The rotation the clients are spread across, empty for a proxy sending from the host's
+     * default source address.
      */
-    private final @NotNull SubnetRotation rotation;
+    private final @NotNull Optional<SubnetRotation> rotation;
 
     /**
-     * The bucket pool that selects subnets and spawns clients.
+     * The pool that selects the client each call is served through.
      */
     @Getter(AccessLevel.NONE)
-    private final @NotNull SubnetBucketPool<C> bucketPool;
+    private final @NotNull ClientPool<C> pool;
 
     /**
      * Returns a new {@link Builder} that produces proxies pooling clients derived from the given
      * base options.
      * <p>
      * The default {@linkplain Builder#withPerClientMutator per-client mutator} is the identity
-     * operator (no additional per-client variance beyond the bucket's address binding) and the
-     * default {@linkplain Builder#withAvailability availability predicate} treats a client as
+     * operator (no per-client variance beyond the address a rotation binds) and the default
+     * {@linkplain Builder#withAvailability availability predicate} treats a client as
      * available when {@link Client#isRateLimited()} returns {@code false}, which checks the
      * type-level {@link Route @Route} bucket. Single-domain endpoints can rely
      * on the default predicate; multi-domain endpoints should override it to target the relevant
      * bucket.
      * <p>
-     * The {@linkplain Builder#withSubnetRotation rotation} must be set before {@link Builder#build()}.
+     * A proxy built with a {@linkplain Builder#withSubnetRotation(SubnetRotation) rotation} spreads
+     * its clients across the subnets it names; one built without serves every call through one
+     * client sending from the host's default source address.
      *
      * @param <C> the contract interface type
      * @param baseOptions the shared base options
@@ -83,11 +84,15 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
     /**
      * Returns the synchronous Feign-generated contract proxy of the currently selected client.
      * <p>
-     * Each call resolves a fresh client via {@link #getClient()}; the returned contract reflects
-     * the selection at the moment of the call.
+     * Each call resolves a client via {@link #getClient()}. With a rotation the returned contract
+     * reflects the selection at the moment of the call; without one it is always the contract of
+     * the proxy's one client.
      *
      * @return the contract proxy of the selected client
-     * @throws RateLimitException if all buckets are saturated
+     * @throws RateLimitException if no client of the pool can serve a request, or if the one subnet
+     *     bucket a rotation spreading its clients over several chose was spent between the pool's
+     *     saturation check and its selection - naming that bucket's subnet, while another bucket
+     *     may serve a retry
      */
     @Override
     public @NotNull C getContract() {
@@ -95,13 +100,20 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
     }
 
     /**
-     * Selects an available client through the bucket pool.
+     * Selects a client able to serve a request.
+     * <p>
+     * With a rotation, the client is bound to a random address inside a subnet bucket with
+     * remaining budget. Without one, it is the proxy's one client, built on the first call and
+     * returned by every later one.
      *
-     * @return an available client, never {@code null}
-     * @throws RateLimitException if all buckets are saturated
+     * @return an available client
+     * @throws RateLimitException if no client of the pool can serve a request, or if the one subnet
+     *     bucket a rotation spreading its clients over several chose was spent between the pool's
+     *     saturation check and its selection - naming that bucket's subnet, while another bucket
+     *     may serve a retry
      */
     public @NotNull Client<C> getClient() {
-        return this.bucketPool.selectClient();
+        return this.pool.selectClient();
     }
 
     /**
@@ -114,7 +126,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
         private final @NotNull ClientConfig<C> baseOptions;
         private @NotNull UnaryOperator<ClientConfig.Builder<C>> perClientMutator = UnaryOperator.identity();
         private @NotNull Predicate<Client<C>> availability = client -> !client.isRateLimited();
-        private SubnetRotation rotation;
+        private @NotNull Optional<SubnetRotation> rotation = Optional.empty();
 
         private Builder(@NotNull ClientConfig<C> baseOptions) {
             this.baseOptions = baseOptions;
@@ -124,7 +136,8 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * Sets the operator applied to the base options builder when constructing a new client.
          * <p>
          * The operator receives a fresh {@link ClientConfig.Builder} seeded from the base
-         * options on each call to {@link #getClient()} that needs to add a new pool member.
+         * options each time the pool builds a client: once per subnet bucket for a proxy with a
+         * rotation, once in all for a proxy without one.
          * The bucket's random source-address binding is applied <em>after</em> this mutator,
          * so the mutator cannot override the address selected by the rotation layer.
          * <p>
@@ -165,31 +178,34 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * prefix length:
          * <ul>
          *   <li>source &lt; bucket -&gt; fan-out across all contained subnets</li>
-         *   <li>source == bucket -&gt; single bucket, address-only rotation</li>
+         *   <li>source == bucket -&gt; single bucket, one client at a random address inside it</li>
          *   <li>source &gt; bucket -&gt; pass-through (rotation gains nothing)</li>
          * </ul>
          *
-         * <h5>Hurricane Electric IPv6 Tunnel Setup (example /48 provider)</h5>
+         * <h4>Hurricane Electric IPv6 Tunnel Setup (example /48 provider)</h4>
          * <ol>
          *     <li>Go to <a href="https://tunnelbroker.net/">TunnelBroker</a></li>
          *     <li>Create an account or login</li>
-         *     <li>Click on Create Regular Tunnel</li>
+         *     <li>Click on Create Regular Tunnel
          *     <ul>
-         *         <li>Enter ipv4 address of your server</li>
+         *         <li>Enter ipv4 address of your server
          *         <ul>
          *             <li>If it gives an error, use the pingable IP of nginx.com</li>
          *         </ul>
+         *         </li>
          *         <li>Select an origin city for your tunnel</li>
          *         <li>Click Create</li>
          *     </ul>
-         *     <li>Click on your tunnel name</li>
+         *     </li>
+         *     <li>Click on your tunnel name
          *     <ul>
          *         <li>If you entered the nginx.com IP, change it to the ipv4 address of your server</li>
          *     </ul>
+         *     </li>
          *     <li>Click on Generate /48</li>
          * </ol>
          *
-         * <h5>Variables</h5>
+         * <h4>Variables</h4>
          * <pre><code>
          * SERVER_IPV4 = Server IPv4 Address
          * CLIENT_IPV4 = Client IPv4 Address
@@ -197,12 +213,12 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * ROUTED_48   = Routed /48 prefix
          * </code></pre>
          *
-         * <h5>Create Routing Table</h5>
+         * <h4>Create Routing Table</h4>
          * <pre><code>
          * grep -q '^100 he' /etc/iproute2/rt_tables || echo "100 he" &gt;&gt; /etc/iproute2/rt_tables
          * </code></pre>
          *
-         * <h5>Enable IPv6 Non-Local Binding &amp; Forwarding and TCP Optimizations</h5>
+         * <h4>Enable IPv6 Non-Local Binding &amp; Forwarding and TCP Optimizations</h4>
          * <pre><code>
          * cat &gt; /etc/sysctl.d/99-he-tunnel.conf &lt;&lt; 'EOF'
          * # Enable nonlocal bind
@@ -220,7 +236,7 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * sysctl -p /etc/sysctl.d/99-he-tunnel.conf
          * </code></pre>
          *
-         * <h5>Enable Non-Local IPv6 Binding</h5>
+         * <h4>Enable Non-Local IPv6 Binding</h4>
          * <pre><code>
          * cat &gt; /etc/systemd/system/he-ipv6.service &lt;&lt; 'EOF'
          * [Unit]
@@ -251,14 +267,14 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * EOF
          * </code></pre>
          *
-         * <h5>Launch Service</h5>
+         * <h4>Launch Service</h4>
          * <pre><code>
          * systemctl daemon-reload
          * systemctl enable he-ipv6
          * systemctl start he-ipv6
          * </code></pre>
          *
-         * <h5>JVM Requirement</h5>
+         * <h4>JVM Requirement</h4>
          * <p>The JVM must be started with {@code -Djava.net.preferIPv6Addresses=true}.
          * Without this, Java resolves hostnames to IPv4 addresses first, and an IPv6-bound
          * socket cannot connect to an IPv4 destination ({@code Network unreachable}).
@@ -267,39 +283,47 @@ public final class Proxy<C extends Contract> implements AsyncAccess<C> {
          * @return this builder
          */
         public @NotNull Builder<C> withSubnetRotation(@NotNull SubnetRotation rotation) {
+            return this.withSubnetRotation(Optional.of(rotation));
+        }
+
+        /**
+         * Sets the rotation from an {@link Optional}; an empty rotation builds a proxy over one
+         * client sending from the host's default source address.
+         *
+         * @param rotation the rotation configuration, or empty for none
+         * @return this builder
+         * @see #withSubnetRotation(SubnetRotation)
+         */
+        public @NotNull Builder<C> withSubnetRotation(@NotNull Optional<SubnetRotation> rotation) {
             this.rotation = rotation;
             return this;
         }
 
         /**
-         * Constructs an immutable {@link Proxy} from the current builder state.
+         * Constructs an immutable {@link Proxy} from the current builder state. Builds no client
+         * and opens no connection; the first {@link Proxy#getClient()} does.
          *
          * @return a new {@code Proxy}
-         * @throws IllegalStateException if {@link #withSubnetRotation(SubnetRotation)} was not called
+         * @throws IllegalArgumentException if the contract declares no type-level route
          */
         public @NotNull Proxy<C> build() {
-            if (this.rotation == null)
-                throw new IllegalStateException("withSubnetRotation must be set");
-
             RateLimitManager sharedManager = new RateLimitManager();
-            String anchorRouteId = new RouteDiscovery(this.baseOptions)
-                .getDefaultRoute()
-                .getRoute();
+            RouteDiscovery.Metadata anchorRoute = new RouteDiscovery(this.baseOptions).getDefaultRoute();
 
-            // Inject the shared manager into every spawned client's config so all clients
-            // aggregate against one tracker. The per-bucket subnet IPv6Prefix is injected by
-            // SubnetBucket.createClient when it actually spawns a client - it has the canonical
-            // prefix instance and passes it via withSubnetPrefix.
-            UnaryOperator<ClientConfig.Builder<C>> wrappedMutator = builder -> this.perClientMutator
-                .apply(builder)
+            // Every client the pool builds carries the one shared manager, so all of them count
+            // against one tracker. The mutator is read once here, so a later call on this builder
+            // does not reach the built proxy. A rotating pool binds the subnet prefix and address
+            // after this mutator when it builds a client.
+            UnaryOperator<ClientConfig.Builder<C>> mutator = this.perClientMutator;
+            UnaryOperator<ClientConfig.Builder<C>> sharing = builder -> mutator.apply(builder)
                 .withRateLimitManager(sharedManager);
 
-            SubnetBucketPool<C> pool = SubnetBucketPool.create(
+            ClientPool<C> pool = ClientPool.create(
                 this.rotation,
                 sharedManager,
-                anchorRouteId,
+                anchorRoute,
                 this.baseOptions,
-                wrappedMutator,
+                sharing,
                 this.availability
             );
             return new Proxy<>(this.baseOptions, this.rotation, pool);

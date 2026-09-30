@@ -7,6 +7,7 @@ import dev.simplified.client.exception.RateLimitException;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.request.Contract;
+import dev.simplified.client.route.RouteDiscovery;
 import dev.simplified.client.subnet.IPv6Prefix;
 import dev.simplified.client.subnet.SubnetRotation;
 import dev.simplified.collection.Concurrent;
@@ -15,6 +16,8 @@ import org.jetbrains.annotations.NotNull;
 
 import java.math.BigInteger;
 import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
@@ -29,6 +32,16 @@ import java.util.stream.Stream;
  * with the number of <em>actually used</em> subnets rather than the total
  * theoretical fan-out. Selection is dispatched to one of three algorithms based
  * on {@link SubnetRotation#strategy()}.
+ * <p>
+ * When every bucket is saturated, {@link #selectClient()} throws a refusal naming
+ * the source prefix and carrying the policy of an exhausted rate-limit bucket a
+ * saturated bucket's client reports, as {@link Client#findRateLimitedPolicy()} finds
+ * it. When none reports one, the refusal carries the policy a saturated bucket's
+ * client holds for its type-level route, as {@link Client#getRateLimit()} reads it,
+ * or the anchor route's declared policy when none holds one. A bucket chosen while
+ * its client could serve, and spent before the call reaches it, refuses under its
+ * own subnet as {@link SubnetBucket#selectClient()} does, and a retry may be served
+ * by another bucket.
  *
  * @param <C> the contract interface type
  */
@@ -37,7 +50,7 @@ public final class FanOutBucketPool<C extends Contract> implements SubnetBucketP
     @Getter
     private final @NotNull SubnetRotation rotation;
     private final @NotNull RateLimitManager sharedManager;
-    private final @NotNull String anchorRouteId;
+    private final @NotNull RouteDiscovery.Metadata anchorRoute;
     private final @NotNull ClientConfig<C> baseOptions;
     private final @NotNull UnaryOperator<ClientConfig.Builder<C>> mutator;
     private final @NotNull Predicate<Client<C>> availability;
@@ -47,14 +60,14 @@ public final class FanOutBucketPool<C extends Contract> implements SubnetBucketP
     FanOutBucketPool(
         @NotNull SubnetRotation rotation,
         @NotNull RateLimitManager sharedManager,
-        @NotNull String anchorRouteId,
+        @NotNull RouteDiscovery.Metadata anchorRoute,
         @NotNull ClientConfig<C> baseOptions,
         @NotNull UnaryOperator<ClientConfig.Builder<C>> mutator,
         @NotNull Predicate<Client<C>> availability
     ) {
         this.rotation = rotation;
         this.sharedManager = sharedManager;
-        this.anchorRouteId = anchorRouteId;
+        this.anchorRoute = anchorRoute;
         this.baseOptions = baseOptions;
         this.mutator = mutator;
         this.availability = availability;
@@ -143,14 +156,39 @@ public final class FanOutBucketPool<C extends Contract> implements SubnetBucketP
         return this.sharedManager.getRequestCount(this.sharedManager.getBucketKey(bucket.getAnchorBucketKey()));
     }
 
+    /**
+     * Builds the refusal thrown when every bucket is saturated, naming the source prefix.
+     * <p>
+     * The refusal carries the policy of an exhausted rate-limit bucket a saturated bucket's client
+     * reports; when none reports one, the policy a saturated bucket's client holds for its
+     * type-level route, or the anchor route's declared policy when none holds one.
+     *
+     * @return the refusal
+     */
     private @NotNull RateLimitException saturationException() {
-        return new RateLimitException(this.rotation.sourcePrefix().toString(), RateLimit.UNLIMITED);
+        List<SubnetBucket<C>> saturated = this.active.values().stream()
+            .filter(SubnetBucket::isSaturated)
+            .toList();
+
+        RateLimit spent = saturated.stream()
+            .map(SubnetBucket::findExhaustedRateLimit)
+            .flatMap(Optional::stream)
+            .findFirst()
+            .or(() -> saturated.stream()
+                .map(SubnetBucket::findAnchorRateLimit)
+                .flatMap(Optional::stream)
+                .findFirst()
+            )
+            .orElse(this.anchorRoute.getRateLimit());
+
+        return new RateLimitException(this.rotation.sourcePrefix().toString(), spent);
     }
 
     private @NotNull SubnetBucket<C> newBucket(@NotNull IPv6Prefix subnet) {
         return new SubnetBucket<>(
             subnet,
-            this.anchorRouteId + "@" + subnet,
+            this.anchorRoute.getRoute() + "@" + subnet,
+            this.anchorRoute.getRateLimit(),
             this.baseOptions,
             this.mutator,
             this.availability

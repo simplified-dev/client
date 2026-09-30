@@ -1,6 +1,8 @@
 package dev.simplified.client.exception;
 
 import dev.simplified.annotations.Getter;
+import dev.simplified.client.Client;
+import dev.simplified.client.Proxy;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.ratelimit.RateLimitingFeignClient;
@@ -123,16 +125,33 @@ public final class RateLimitException extends ApiException {
     }
 
     /**
-     * Constructs a client-enforced rate-limit exception for a saturated subnet
-     * {@link SubnetBucket} when no contained bucket has remaining budget.
+     * Constructs a client-enforced rate-limit exception for a {@link Proxy} whose pool refused a
+     * client: the availability predicate rejects the one client of a proxy without a rotation;
+     * every subnet {@link SubnetBucket} of a rotating proxy is saturated; or the one bucket a
+     * rotating proxy chose was spent between the pool's saturation check and its selection.
      * <p>
      * Used at the proxy layer before any HTTP request is constructed, so the
      * synthetic context carries the bucket identifier as its url placeholder
      * and {@link HttpMethod#GET} as a neutral request method stand-in.
+     * <p>
+     * When a rotating proxy spreads its clients over several buckets, a refusal of the one bucket
+     * it chose names that bucket's subnet rather than the source prefix. Other buckets may still
+     * have budget, so a retry may be served by another bucket without waiting on this
+     * exception's policy.
+     * <p>
+     * The policy is the one the refused client's {@link RateLimitManager} holds for the bucket it
+     * spent, as {@link Client#findRateLimitedPolicy()} finds it: the policy a server's headers
+     * last gave that bucket, reset instant included, or the one its route declares while no
+     * server has named one. When the client reports no exhausted bucket and the availability
+     * predicate refused it for another reason, the policy is the one {@link Client#getRateLimit()}
+     * reads for the contract's type-level route, or the one that route declares while the client
+     * holds no bucket for it. A caller backing off on this exception's
+     * {@linkplain #rateLimit policy} waits on that bucket's window.
      *
-     * @param bucketId the identifier of the saturated bucket (typically its
-     *                 subnet CIDR string)
-     * @param rateLimit the per-bucket rate-limit policy that was exhausted
+     * @param bucketId the identifier of the refused bucket - a subnet CIDR string for a rotating
+     *     proxy, or the bare type-level route for a proxy without a rotation
+     * @param rateLimit the policy the refused client holds for the bucket it spent, or for the
+     *     contract's type-level route when it reports none spent
      */
     public RateLimitException(@NotNull String bucketId, @NotNull RateLimit rateLimit) {
         super(

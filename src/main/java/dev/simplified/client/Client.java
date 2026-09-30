@@ -17,12 +17,13 @@ import dev.simplified.client.factory.TimedConnectionOperator;
 import dev.simplified.client.factory.TimedTlsSocketStrategy;
 import dev.simplified.client.interceptor.InternalRequestInterceptor;
 import dev.simplified.client.interceptor.InternalResponseInterceptor;
+import dev.simplified.client.ratelimit.RateLimit;
+import dev.simplified.client.ratelimit.RateLimitBucket;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.ratelimit.RateLimitingFeignClient;
 import dev.simplified.client.request.AsyncAccess;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.request.Timings;
-import dev.simplified.client.response.HttpStatus;
 import dev.simplified.client.response.NetworkDetails;
 import dev.simplified.client.response.Response;
 import dev.simplified.client.route.DynamicRoute;
@@ -40,10 +41,12 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 /**
  * Feign-backed HTTP client providing connection pooling, rate limiting, route discovery,
@@ -238,7 +241,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     /**
      * Calculates the round-trip latency of the most recent HTTP request in milliseconds.
      * <p>
-     * The latency is derived from the {@linkplain NetworkDetails#getRoundTrip() round-trip}
+     * The latency is derived from the {@linkplain NetworkDetails#roundTrip round-trip}
      * duration recorded in the most recent response's {@link NetworkDetails}. This includes DNS
      * resolution, TCP connect, TLS handshake, request transfer, server processing, and response
      * transfer.
@@ -260,7 +263,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * Checks whether the type-level default rate-limit bucket is currently exhausted.
      * <p>
      * Resolves the bucket from the {@link Route @Route} declared on the endpoint interface via
-     * {@link RouteDiscovery#getDefaultRoute()} and {@link RateLimitManager#getBucketKey(String)}:
+     * {@link RouteDiscovery#defaultRoute} and {@link RateLimitManager#getBucketKey(String)}:
      * the quota the route's latest response named, or the route's own bucket. Convenient for
      * single-domain endpoints where every request shares one bucket; multi-domain contracts
      * should prefer the {@link DynamicRouteProvider} overload to target a specific route's bucket.
@@ -318,6 +321,63 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
     }
 
     /**
+     * Returns the policy enforced by the type-level default rate-limit bucket, resolved as
+     * {@link #isRateLimited()} resolves it.
+     * <p>
+     * That is the policy the bucket was created with, or the one a server response last replaced
+     * it with, reset instant included - not necessarily the one the type-level
+     * {@link Route @Route} declares.
+     *
+     * @return the policy the type-level default bucket enforces, or empty while no bucket exists
+     *     for it
+     */
+    public @NotNull Optional<RateLimit> getRateLimit() {
+        return this.rateLimitManager.getRateLimit(this.bucketKeyOf(this.routeDiscovery.getDefaultRoute()));
+    }
+
+    /**
+     * Finds the policy of an exhausted rate-limit bucket among those the contract's routes count
+     * against.
+     * <p>
+     * Resolves the bucket of the type-level default route and of every method-level route as
+     * {@link #isRateLimited()} resolves the default route's: the quota the route's latest response
+     * named, or the route's own bucket. Among the buckets that are exhausted, the one whose window
+     * ends last is chosen, the type-level route's winning a tie, so a caller backing off on its
+     * policy waits no less than the longest-lived of them. The policy is the one that bucket
+     * enforces rather than the one its route declares: a route that declares no limit, whose
+     * bucket a server's headers gave a policy and then spent, reports the server's policy with its
+     * reset instant. A bucket under an {@linkplain RateLimit#unlimited unlimited} policy is
+     * never exhausted, so the policy found is never one. A {@link Proxy} that refuses this client
+     * carries the found policy as the one that was spent.
+     *
+     * @return the policy of the exhausted bucket whose window ends last, or empty when no route's
+     *     bucket is exhausted
+     */
+    public @NotNull Optional<RateLimit> findRateLimitedPolicy() {
+        return Stream.concat(
+                Stream.of(this.routeDiscovery.getDefaultRoute()),
+                this.routeDiscovery.getMethodRoutes().values().stream()
+            )
+            .map(this::bucketKeyOf)
+            .filter(this.rateLimitManager::isRateLimited)
+            .max(Comparator.comparingLong(this::windowEndOf))
+            .flatMap(this.rateLimitManager::getRateLimit);
+    }
+
+    /**
+     * Reads when the window of a bucket ends.
+     *
+     * @param bucketKey the bucket to read
+     * @return the epoch-millisecond timestamp the bucket's window ends at, or
+     *     {@link Long#MIN_VALUE} when no bucket exists for the key
+     */
+    private long windowEndOf(@NotNull String bucketKey) {
+        return this.rateLimitManager.getWindow(bucketKey)
+            .map(RateLimitBucket.Window::end)
+            .orElse(Long.MIN_VALUE);
+    }
+
+    /**
      * Resolves the bucket a route's requests count against.
      *
      * @param route the route to resolve
@@ -345,12 +405,14 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
      * sends, so the cache keys a request by them without holding their values. The
      * {@linkplain ClientConfig#getEncoderFactory() encoder factory} and
      * {@linkplain ClientConfig#getDecoderFactory() decoder factory} from the options are
-     * each invoked once with the configured {@link Gson Gson}.
+     * each invoked once with the configured {@link Gson Gson}. The {@link InternalResponseDecoder}
+     * and {@link InternalErrorDecoder} both hold the bodies they read to the
+     * {@linkplain ClientConfig#getMaxBodyBytes() configured body cap}.
      * {@link feign.Feign.Builder#doNotCloseAfterDecode()} is set so that
      * {@link InternalResponseDecoder} can manage response body lifecycle for
      * {@link InputStream} return types, and {@link feign.Feign.Builder#decodeVoid()} so that a
-     * {@code void} contract method reaches it too, raising for a status code {@link HttpStatus}
-     * has no constant for as every other return type does.
+     * {@code void} contract method reaches it too and its exchange is recorded as the
+     * {@linkplain #getLastResponse() last response}.
      * <p>
      * The returned proxy is subsequently wrapped by {@link #wrapContractProxy(Contract)} to
      * strip internal exception wrappers before they reach callers.
@@ -370,21 +432,20 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
             this.options.getDynamicHeaders(),
             this.options.getQueries()
         );
-        InternalErrorDecoder errorDecoder = new InternalErrorDecoder(
-            this.options.getErrorDecoder(),
-            this.getRouteDiscovery(),
-            this.responseCache
-        );
-
         return Feign.builder()
             .client(cachingClient)
             .encoder(this.options.getEncoderFactory().apply(this.gson))
             .decoder(new InternalResponseDecoder(
                 this.options.getDecoderFactory().apply(this.gson),
                 this.responseCache,
-                errorDecoder
+                this.options.getMaxBodyBytes()
             ))
-            .errorDecoder(errorDecoder)
+            .errorDecoder(new InternalErrorDecoder(
+                this.options.getErrorDecoder(),
+                this.getRouteDiscovery(),
+                this.responseCache,
+                this.options.getMaxBodyBytes()
+            ))
             .requestInterceptor(new InternalRequestInterceptor(
                 this.getRateLimitManager(),
                 this.getRouteDiscovery()
@@ -436,8 +497,7 @@ public final class Client<C extends Contract> implements AsyncAccess<C> {
                         throw retryable.getWrappedException();
 
                     // Unwrap an ApiException the decoder raised, which InvocationContext wraps
-                    // in a DecodeException - a decode failure, or a status HttpStatus has no
-                    // constant for
+                    // in a DecodeException - a decode failure
                     if (cause instanceof DecodeException && cause.getCause() instanceof ApiException apiEx)
                         throw apiEx;
 

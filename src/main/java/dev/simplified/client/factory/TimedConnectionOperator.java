@@ -49,9 +49,8 @@ import java.nio.file.Path;
  *   <li>{@link NetworkDetails#TCP_CONNECT_START} / {@link NetworkDetails#TCP_CONNECT_END}
  *       - the combined DNS + TCP connection window</li>
  * </ul>
- * The {@link NetworkDetails#DNS_START} / {@link NetworkDetails#DNS_END} keys are no longer
- * populated under HC 5; consumers read {@link NetworkDetails#getDnsResolution()} as an
- * empty {@code Stopwatch} on the HC 5 path.
+ * Nothing populates the {@link NetworkDetails#DNS_START} / {@link NetworkDetails#DNS_END} keys,
+ * so consumers read {@link NetworkDetails#dnsResolution} as an empty {@code Stopwatch}.
  *
  * @see TimedTlsSocketStrategy
  * @see NetworkDetails
