@@ -20,11 +20,11 @@ repositories {
 }
 
 val springBench: SourceSet by sourceSets.creating {
-    // The default convention already wires src/springBench/java and src/springBench/resources;
-    // we add the jmh resources directory for keystore reuse and the jmh output so the bench app
-    // can call into TestClient (the package-private hook into Client used by both benchmark
-    // surfaces).
-    resources.srcDir("src/jmh/resources")
+    // The default convention wires src/springBench/java and src/springBench/resources. The jmh
+    // output joins the classpath so the bench app can call into TestClient (the package-private
+    // hook into Client used by both benchmark surfaces) and read the jmh keystore, which that
+    // output carries as a processed resource - src/jmh/resources stays the jmh set's alone, so
+    // each directory belongs to exactly one source set.
     compileClasspath += sourceSets["main"].output + sourceSets["jmh"].output
     runtimeClasspath += output + compileClasspath
 }
@@ -117,10 +117,10 @@ jmh {
     if (threadsProp != null) threads.set(threadsProp.toInt())
 }
 
+// The jmh plugin marks its own source set as test sources for IntelliJ; the spring bench is marked
+// the same way, so both benchmark surfaces import as test code rather than production code.
 idea {
     module {
-        testSources.from(sourceSets["jmh"].java.srcDirs)
-        testResources.from(sourceSets["jmh"].resources.srcDirs)
         testSources.from(springBench.java.srcDirs)
         testResources.from(springBench.resources.srcDirs)
     }
