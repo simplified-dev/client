@@ -4,6 +4,7 @@ import dev.simplified.annotations.Getter;
 import dev.simplified.client.Client;
 import dev.simplified.client.ClientConfig;
 import dev.simplified.client.exception.RateLimitException;
+import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.request.Contract;
 import dev.simplified.client.subnet.SubnetRotation;
 import org.jetbrains.annotations.NotNull;
@@ -54,6 +55,9 @@ public final class PassThroughBucketPool<C extends Contract> implements SubnetBu
 
     @Override
     public @NotNull Client<C> selectClient() throws RateLimitException {
+        if (this.bucket.isSaturated())
+            throw new RateLimitException(this.bucket.getSubnet().toString(), RateLimit.UNLIMITED);
+
         return this.bucket.selectClient();
     }
 
