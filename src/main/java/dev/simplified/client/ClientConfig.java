@@ -160,11 +160,11 @@ public final class ClientConfig<C extends Contract> {
 
     /**
      * Optional {@link IPv6Prefix} that this client's bound source address belongs to, populated
-     * by {@link SubnetBucket} when the client is spawned through a {@link Proxy}. Read by
-     * {@link RouteDiscovery} at construction time to bake the
+     * by {@link SubnetBucket} when the client is spawned through a {@link Proxy} with a rotation.
+     * Read by {@link RouteDiscovery} at construction time to bake the
      * per-subnet rate-limit bucket key into every {@link Metadata}
      * instance, so the request and response interceptors look up the precomputed bucket key
-     * directly. Empty for clients constructed directly (no rotation).
+     * directly. Empty for a client built directly, or by a {@link Proxy} without a rotation.
      */
     private final @NotNull Optional<IPv6Prefix> subnetPrefix;
 

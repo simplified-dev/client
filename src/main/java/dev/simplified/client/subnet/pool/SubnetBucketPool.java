@@ -24,14 +24,15 @@ import java.util.stream.Stream;
  *   <li>{@link SingleBucketPool} - source equals one bucket (no /bucket-level
  *       rotation, only addresses-within-bucket).</li>
  *   <li>{@link PassThroughBucketPool} - source is smaller than a bucket (rotation
- *       gains nothing at this dimension; budget tracking is bypassed).</li>
+ *       gains nothing at this dimension; like the single bucket, it refuses a
+ *       request once its bucket is saturated).</li>
  * </ul>
  *
  * @param <C> the contract interface type
  * @see SubnetRotation
  * @see SubnetBucket
  */
-public sealed interface SubnetBucketPool<C extends Contract>
+public sealed interface SubnetBucketPool<C extends Contract> extends ClientPool<C>
     permits FanOutBucketPool, SingleBucketPool, PassThroughBucketPool {
 
     /**

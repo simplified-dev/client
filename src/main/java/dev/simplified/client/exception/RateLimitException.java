@@ -1,6 +1,7 @@
 package dev.simplified.client.exception;
 
 import dev.simplified.annotations.Getter;
+import dev.simplified.client.Proxy;
 import dev.simplified.client.ratelimit.RateLimit;
 import dev.simplified.client.ratelimit.RateLimitManager;
 import dev.simplified.client.ratelimit.RateLimitingFeignClient;
@@ -123,15 +124,17 @@ public final class RateLimitException extends ApiException {
     }
 
     /**
-     * Constructs a client-enforced rate-limit exception for a saturated subnet
-     * {@link SubnetBucket} when no contained bucket has remaining budget.
+     * Constructs a client-enforced rate-limit exception for a {@link Proxy} whose pool has no
+     * client able to serve a request: every subnet {@link SubnetBucket} of a rotating proxy is
+     * saturated, or the availability predicate rejects the one client of a proxy without a
+     * rotation.
      * <p>
      * Used at the proxy layer before any HTTP request is constructed, so the
      * synthetic context carries the bucket identifier as its url placeholder
      * and {@link HttpMethod#GET} as a neutral request method stand-in.
      *
-     * @param bucketId the identifier of the saturated bucket (typically its
-     *                 subnet CIDR string)
+     * @param bucketId the identifier of the refused bucket - a subnet CIDR string for a rotating
+     *     proxy, or the bare type-level route for a proxy without a rotation
      * @param rateLimit the per-bucket rate-limit policy that was exhausted
      */
     public RateLimitException(@NotNull String bucketId, @NotNull RateLimit rateLimit) {
