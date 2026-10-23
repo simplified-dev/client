@@ -1,5 +1,6 @@
 package dev.simplified.client.exception;
 
+import dev.simplified.client.response.HttpStatus;
 import org.jetbrains.annotations.NotNull;
 
 /**
@@ -27,7 +28,27 @@ public final class ApiDecodeException extends ApiException {
      * @param context the primitive HTTP context whose bytes carry the undecodable body
      */
     public ApiDecodeException(@NotNull Exception cause, @NotNull ErrorContext context) {
-        super(cause, "Decode", context);
+        super(cause, "Decode", context, decodeMessage(context), true);
+    }
+
+    /**
+     * Synthesizes the exception message from the request method, URL, and status, naming the
+     * body rather than the status as what failed.
+     * <p>
+     * Produces a diagnostic line of the form
+     * {@code "GET https://api.example.com/v1/resource answered 200 OK with a body that could not be decoded"},
+     * or {@code "GET https://api.example.com/v1/resource answered unknown status 460 with a body that could not be decoded"}
+     * for a code {@link HttpStatus} has no constant for.
+     *
+     * @param context the primitive context whose fields drive the message
+     * @return the synthesized message text
+     */
+    private static @NotNull String decodeMessage(@NotNull ErrorContext context) {
+        String status = context.isKnownStatus()
+            ? "%d %s".formatted(context.status().getCode(), context.status().getMessage())
+            : "unknown status %d".formatted(context.statusCode());
+
+        return "%s %s answered %s with a body that could not be decoded".formatted(context.requestMethod(), context.requestUrl(), status);
     }
 
 }
