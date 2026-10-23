@@ -113,6 +113,23 @@ class ErrorContextTest {
     }
 
     @Test
+    @DisplayName("An ApiDecodeException names the body as what failed, not the status the origin answered")
+    void apiDecodeExceptionNamesTheBody() {
+        ApiDecodeException raised = new ApiDecodeException(new IllegalStateException("Unparseable"), context(HttpStatus.OK, 200));
+
+        assertThat(raised.getStatusCode(), is(200));
+        assertThat(raised.getMessage(), is(equalTo("GET " + URL + " answered 200 OK with a body that could not be decoded")));
+    }
+
+    @Test
+    @DisplayName("An ApiDecodeException over a code HttpStatus has no constant for names the code")
+    void apiDecodeExceptionNamesAnUnknownCode() {
+        ApiDecodeException raised = new ApiDecodeException(new IllegalStateException("Unparseable"), context(HttpStatus.UNKNOWN_ERROR, 460));
+
+        assertThat(raised.getMessage(), is(equalTo("GET " + URL + " answered unknown status 460 with a body that could not be decoded")));
+    }
+
+    @Test
     @DisplayName("A retryable wrapper hands Feign the code the origin sent, not UNKNOWN_ERROR's")
     void retryableWrapperCarriesTheOriginCode() {
         ApiException raised = new ApiException(null, "Test", context(HttpStatus.UNKNOWN_ERROR, 460));
